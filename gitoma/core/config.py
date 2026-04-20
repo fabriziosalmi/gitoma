@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,10 @@ from dotenv import load_dotenv
 GITOMA_DIR = Path.home() / ".gitoma"
 CONFIG_FILE = GITOMA_DIR / "config.toml"
 ENV_FILE = GITOMA_DIR / ".env"
+
+# Auto-generated API token is persisted here between runs, so the cockpit's
+# localStorage copy stays valid across restarts. Mode 0o600.
+RUNTIME_TOKEN_FILE = GITOMA_DIR / "runtime_token"
 
 
 @dataclass
@@ -126,3 +131,38 @@ def save_config_value(key: str, value: str) -> None:
 
     with CONFIG_FILE.open("w") as f:
         toml.dump(raw, f)
+
+
+def ensure_runtime_api_token() -> tuple[str, bool]:
+    """Return an API token, generating + persisting one if none is configured.
+
+    Priority:
+      1. Explicit `GITOMA_API_TOKEN` from env / config.toml — returned as-is.
+      2. Previously-generated token in `~/.gitoma/runtime_token` — reused so
+         the cockpit's localStorage survives restarts.
+      3. Freshly-generated `secrets.token_urlsafe(32)`, written to the file
+         with mode 0o600.
+
+    Returns `(token, was_generated_now)`. The caller (typically
+    `gitoma serve`) is expected to publish the token via the process env so
+    `load_config()` picks it up in every `verify_token` call.
+    """
+    cfg = load_config()
+    if cfg.api_auth_token:
+        return cfg.api_auth_token, False
+
+    GITOMA_DIR.mkdir(parents=True, exist_ok=True)
+    if RUNTIME_TOKEN_FILE.exists():
+        persisted = RUNTIME_TOKEN_FILE.read_text().strip()
+        if persisted:
+            return persisted, False
+
+    token = secrets.token_urlsafe(32)
+    RUNTIME_TOKEN_FILE.write_text(token)
+    try:
+        os.chmod(RUNTIME_TOKEN_FILE, 0o600)
+    except OSError:
+        # chmod may fail on exotic filesystems (FAT, network mounts); the
+        # token is still usable, just slightly less protected.
+        pass
+    return token, True

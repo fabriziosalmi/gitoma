@@ -125,11 +125,20 @@ gitoma reset https://github.com/owner/repo
 Unleash the full async REST API server to trigger jobs via VPN or automation layers.
 
 ```bash
-# Secure the API by putting GITOMA_API_TOKEN in your .env
 gitoma serve --port 8000
 
 # Endpoint available at: http://localhost:8000/api/v1/health
 # Swagger Docs available at: http://localhost:8000/docs
+```
+
+**API authentication** — if `GITOMA_API_TOKEN` is not configured, the
+server auto-generates one at first start and persists it to
+`~/.gitoma/runtime_token` (mode `0600`). The token is printed once in
+the startup banner; reuse it in the cockpit Settings dialog. Delete
+the file and restart to rotate. To pin an explicit token instead:
+
+```bash
+gitoma config set GITOMA_API_TOKEN=my-long-secret
 ```
 
 ### Live Web Cockpit

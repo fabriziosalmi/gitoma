@@ -1232,18 +1232,43 @@ def serve(
     """
     🌐  Launch the Gitoma FastAPI REST Server.
     """
-    import uvicorn
-    print_banner(__version__)
-    
-    config = _check_config(require_token=False)
-    if not config.api_auth_token:
-        console.print("[warning]WARNING: GITOMA_API_TOKEN is not set in your config or .env. API calls will be rejected.[/warning]")
-    else:
-        console.print(f"[success]API secured with GITOMA_API_TOKEN ending in ...{config.api_auth_token[-4:] if len(config.api_auth_token)>4 else '***'}[/success]")
+    import os
 
-    console.print(f"Starting server on http://{host}:{port}")
-    console.print(f"Swagger interactive docs: http://{host}:{port}/docs\n")
-    
+    import uvicorn
+
+    from gitoma.core.config import RUNTIME_TOKEN_FILE, ensure_runtime_api_token
+
+    print_banner(__version__)
+    _check_config(require_token=False)
+
+    token, generated = ensure_runtime_api_token()
+    # Publish to the process env so `load_config()` picks it up in every
+    # request handler (verify_token calls it per request).
+    os.environ["GITOMA_API_TOKEN"] = token
+
+    masked = (token[:6] + "…" + token[-4:]) if len(token) > 12 else "***"
+    if generated:
+        console.print(
+            Panel(
+                f"[bold]{token}[/bold]\n\n"
+                f"[muted]Persisted to {RUNTIME_TOKEN_FILE} (mode 0600).[/muted]\n"
+                f"[muted]Paste into the cockpit Settings dialog when prompted.[/muted]\n"
+                f"[muted]Delete that file and restart to rotate.[/muted]",
+                title="[primary]◉ New API token generated[/primary]",
+                border_style="info",
+                padding=(1, 2),
+            )
+        )
+    else:
+        console.print(
+            f"[success]API secured[/success] "
+            f"[muted](token {masked})[/muted]"
+        )
+
+    console.print(f"Starting server on [primary]http://{host}:{port}[/primary]")
+    console.print(f"Cockpit:         [primary]http://{host}:{port}/[/primary]")
+    console.print(f"Swagger docs:    [primary]http://{host}:{port}/docs[/primary]\n")
+
     uvicorn.run("gitoma.api.server:app", host=host, port=port, log_level="info")
 
 # ─────────────────────────────────────────────────────────────────────────────
