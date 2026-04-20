@@ -19,8 +19,10 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(auth_schem
 
     if not expected_token:
         # Fail-closed: without a server-side token, auth cannot be validated.
+        # 503 (not 500) so clients can distinguish "server misconfigured" from
+        # "unexpected bug" and surface a clear remediation message.
         raise HTTPException(
-            status_code=500,
+            status_code=503,
             detail="GITOMA_API_TOKEN is not configured on the server.",
         )
 

@@ -41,8 +41,11 @@ def test_api_auth_server_not_configured(mocker):
 
     headers = {"Authorization": "Bearer SOME_TOKEN"}
     response = client.get("/api/v1/health", headers=headers)
-    
-    assert response.status_code == 500
+
+    # 503 (not 500): server is explicitly misconfigured, not a runtime crash.
+    # The client uses this code to show a distinct "Server not configured"
+    # banner vs the 403 "token rejected" case.
+    assert response.status_code == 503
     assert "not configured" in response.json()["detail"]
 
 

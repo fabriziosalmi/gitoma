@@ -399,6 +399,35 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── Inline banner (auth / server state) ──────────────────────────────── */
+#banner[hidden] { display: none; }
+.banner {
+  display: flex; align-items: center; gap: 12px;
+  margin: 12px 20px 0;
+  padding: 10px 14px;
+  background: var(--warn-soft);
+  border: 1px solid rgba(234,179,8,0.3);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.banner.fail {
+  background: var(--fail-soft);
+  border-color: rgba(239,68,68,0.3);
+  border-left-color: var(--fail);
+}
+.banner .icon { width: 16px; height: 16px; color: var(--warn); flex-shrink: 0; }
+.banner.fail .icon { color: var(--fail); }
+.banner .body { flex: 1; min-width: 0; }
+.banner .title { font-weight: 600; color: var(--fg); }
+.banner .msg { color: var(--fg-mid); font-size: 12px; }
+.banner .btn { flex-shrink: 0; }
+@media (max-width: 640px) {
+  .banner { margin: 10px 12px 0; flex-wrap: wrap; }
+  .banner .body { flex-basis: 100%; }
+}
+
 /* ── Live log stream ───────────────────────────────────────────────────── */
 .log-card { display: none; }
 .log-card.open { display: block; }
@@ -1115,6 +1144,27 @@ function renderAll() {
   renderMetrics(state);
 }
 
+// ── Banner (persistent, actionable, non-modal) ──────────────────────────
+const Banner = {
+  show({ title, msg = "", actionLabel = null, actionFn = null, level = "warn" }) {
+    const el = $("banner");
+    el.classList.toggle("fail", level === "fail");
+    $("banner-title").textContent = title;
+    $("banner-msg").textContent = msg;
+    const btn = $("banner-action");
+    if (actionLabel && actionFn) {
+      btn.textContent = actionLabel;
+      btn.onclick = actionFn;
+      btn.hidden = false;
+    } else {
+      btn.hidden = true;
+      btn.onclick = null;
+    }
+    el.hidden = false;
+  },
+  hide() { $("banner").hidden = true; },
+};
+
 // ── Jobs badge (polled when anything is live) ───────────────────────────
 async function refreshJobs() {
   try {
@@ -1124,10 +1174,42 @@ async function refreshJobs() {
     const badge = $("jobs-badge");
     badge.classList.toggle("busy", running > 0);
     $("jobs-count").textContent = running ? `${running} running` : `${entries.length} total`;
+    Banner.hide();
   } catch (err) {
-    // token might be unset / invalid — fail silent in the header
+    // Auth / server misconfig → stop polling and surface an actionable banner.
+    stopJobPolling();
     $("jobs-count").textContent = "—";
     $("jobs-badge").classList.remove("busy");
+    if (err.status === 401) {
+      Banner.show({
+        title: "API token required",
+        msg: "Configure a Bearer token to issue commands.",
+        actionLabel: "Configure",
+        actionFn: () => $("settings-btn").click(),
+      });
+    } else if (err.status === 403) {
+      Banner.show({
+        title: "API token rejected",
+        msg: "The token doesn't match the one on the server.",
+        actionLabel: "Update token",
+        actionFn: () => $("settings-btn").click(),
+        level: "fail",
+      });
+    } else if (err.status === 503) {
+      Banner.show({
+        title: "Server not configured",
+        msg: "GITOMA_API_TOKEN is missing on the server. Set it in ~/.gitoma/.env (or via `gitoma config set GITOMA_API_TOKEN=…`) and restart the server.",
+        level: "fail",
+      });
+    } else {
+      Banner.show({
+        title: "Connection error",
+        msg: err.message || "Unable to reach the API.",
+        actionLabel: "Retry",
+        actionFn: () => startJobPolling(),
+        level: "fail",
+      });
+    }
   }
 }
 
@@ -1135,6 +1217,10 @@ function startJobPolling() {
   if (JOB_POLL) return;
   refreshJobs();
   JOB_POLL = setInterval(refreshJobs, 3000);
+}
+
+function stopJobPolling() {
+  if (JOB_POLL) { clearInterval(JOB_POLL); JOB_POLL = null; }
 }
 
 // ── WebSocket connection ────────────────────────────────────────────────
@@ -1169,13 +1255,17 @@ async function submitCommand(name, fn) {
   try {
     const res = await fn();
     Toast.success(name + " dispatched", res?.job_id ? `Job ${res.job_id.slice(0, 8)}` : "");
-    refreshJobs();
+    startJobPolling();  // re-enable if previously stopped by a 4xx/5xx
     if (res?.job_id) LogStream.open(res.job_id, name);
   } catch (err) {
     if (err.status === 401 || err.status === 403) {
-      Token.set("");
       Toast.error("Auth failed", "Please re-enter the API token.");
       openDialog("token-dialog");
+      return;
+    }
+    if (err.status === 503) {
+      Toast.error("Server not configured", "GITOMA_API_TOKEN is missing server-side.");
+      refreshJobs();  // re-raises the banner
       return;
     }
     Toast.error(name + " failed", err.message || "Unknown error");
@@ -1198,7 +1288,8 @@ function wireDialogs() {
     Token.set(t);
     closeDialog("token-dialog");
     Toast.success("Token saved", "Authorization ready.");
-    refreshJobs();
+    Banner.hide();
+    startJobPolling();
     if (window.__pendingAction) {
       const fn = window.__pendingAction;
       window.__pendingAction = null;
@@ -1210,7 +1301,8 @@ function wireDialogs() {
     $("token-input").value = "";
     closeDialog("token-dialog");
     Toast.info("Token cleared");
-    refreshJobs();
+    stopJobPolling();
+    refreshJobs();  // one probe to re-show the appropriate banner
   });
 
   $("run-form").addEventListener("submit", (e) => {
@@ -1396,8 +1488,11 @@ function confirmAndReset() {
         Toast.success("State reset", `${s.owner}/${s.name}`);
       } catch (err) {
         if (err.status === 401 || err.status === 403) {
-          Token.set(""); openDialog("token-dialog");
+          openDialog("token-dialog");
           Toast.error("Auth failed", "Please re-enter the API token.");
+        } else if (err.status === 503) {
+          Toast.error("Server not configured", "GITOMA_API_TOKEN is missing server-side.");
+          refreshJobs();
         } else {
           Toast.error("Reset failed", err.message || "Unknown error");
         }
@@ -1464,6 +1559,15 @@ _DASHBOARD_BODY = """
       </span>
     </div>
   </header>
+
+  <div id="banner" class="banner" role="alert" hidden>
+    <svg class="icon"><use href="#icon-alert"/></svg>
+    <div class="body">
+      <div class="title" id="banner-title"></div>
+      <div class="msg" id="banner-msg"></div>
+    </div>
+    <button id="banner-action" class="btn btn--sm" type="button" hidden></button>
+  </div>
 
   <main>
     <aside class="aside">
