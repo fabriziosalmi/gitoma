@@ -17,8 +17,9 @@ def test_dashboard_is_public_and_returns_html():
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     body = resp.text
-    assert "GITOMA" in body
+    assert "Gitoma" in body
     assert "/ws/state" in body  # frontend wires up the WS endpoint
+    assert "<svg" in body  # icon sprite present — dashboard uses inline SVGs, no emoji
 
 
 def test_ws_state_pushes_snapshot_on_connect(monkeypatch):
