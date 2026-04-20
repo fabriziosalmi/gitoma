@@ -1,0 +1,69 @@
+"""PlannerAgent — converts MetricReport → TaskPlan via LLM."""
+
+from __future__ import annotations
+
+from gitoma.analyzers.base import MetricReport
+from gitoma.planner.llm_client import LLMClient
+from gitoma.planner.prompts import planner_system_prompt, planner_user_prompt
+from gitoma.planner.task import SubTask, Task, TaskPlan
+
+
+class PlannerAgent:
+    """Calls the LLM to generate a structured TaskPlan from a MetricReport."""
+
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+
+    def plan(self, report: MetricReport, file_tree: list[str]) -> TaskPlan:
+        """
+        Generate a TaskPlan from a MetricReport.
+
+        Args:
+            report: the full metric analysis report
+            file_tree: list of relative file paths in the repo
+
+        Returns:
+            TaskPlan with prioritized tasks and subtasks
+        """
+        messages = [
+            {"role": "system", "content": planner_system_prompt()},
+            {
+                "role": "user",
+                "content": planner_user_prompt(report, file_tree, report.languages),
+            },
+        ]
+
+        raw = self._llm.chat_json(messages)
+        task_plan = self._parse_plan(raw)
+        task_plan.overall_score_before = report.overall_score
+        task_plan.llm_model = self._llm.model
+        return task_plan
+
+    def _parse_plan(self, raw: dict) -> TaskPlan:
+        """Parse the LLM JSON response into a TaskPlan."""
+        tasks: list[Task] = []
+        for i, t_raw in enumerate(raw.get("tasks", [])[:8]):
+            subtasks: list[SubTask] = []
+            for j, s_raw in enumerate(t_raw.get("subtasks", [])[:4]):
+                st = SubTask(
+                    id=s_raw.get("id", f"T{i+1:03d}-S{j+1:02d}"),
+                    title=s_raw.get("title", "Untitled subtask"),
+                    description=s_raw.get("description", ""),
+                    file_hints=s_raw.get("file_hints", []),
+                    action=s_raw.get("action", "modify"),
+                )
+                subtasks.append(st)
+
+            task = Task(
+                id=t_raw.get("id", f"T{i+1:03d}"),
+                title=t_raw.get("title", "Untitled task"),
+                priority=int(t_raw.get("priority", i + 1)),
+                metric=t_raw.get("metric", ""),
+                description=t_raw.get("description", ""),
+                subtasks=subtasks,
+            )
+            tasks.append(task)
+
+        # Sort by priority
+        tasks.sort(key=lambda t: t.priority)
+        return TaskPlan(tasks=tasks)

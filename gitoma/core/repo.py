@@ -1,0 +1,215 @@
+"""Git repo abstraction — clone, branch, commit, push."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
+
+import git
+from git import Repo
+
+from gitoma.core.config import Config
+
+
+def parse_repo_url(url: str) -> tuple[str, str]:
+    """Extract (owner, name) from GitHub URL or owner/name shorthand."""
+    url = url.rstrip("/").removesuffix(".git")
+    if url.startswith("http"):
+        parts = urlparse(url).path.strip("/").split("/")
+        return parts[0], parts[1]
+    if "/" in url:
+        owner, name = url.split("/", 1)
+        return owner, name
+    raise ValueError(f"Cannot parse repo URL: {url}")
+
+
+class GitRepo:
+    """Wraps GitPython for all repo operations needed by the agent."""
+
+    def __init__(self, url: str, config: Config) -> None:
+        self.url = url
+        self.config = config
+        self.owner, self.name = parse_repo_url(url)
+        self._tmpdir: str | None = None
+        self._repo: Repo | None = None
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────
+
+    def clone(self) -> Path:
+        """Clone the repo to a temp directory. Returns local root path."""
+        self._tmpdir = tempfile.mkdtemp(prefix="gitoma_")
+        auth_url = self._authed_url()
+        self._repo = Repo.clone_from(auth_url, self._tmpdir)
+        return Path(self._tmpdir)
+
+    def cleanup(self) -> None:
+        """Remove the cloned temp directory."""
+        if self._tmpdir and os.path.exists(self._tmpdir):
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            self._tmpdir = None
+
+    def __enter__(self) -> "GitRepo":
+        self.clone()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.cleanup()
+
+    # ── Properties ─────────────────────────────────────────────────────────
+
+    @property
+    def root(self) -> Path:
+        if self._tmpdir is None:
+            raise RuntimeError("Repo not cloned yet. Call clone() first.")
+        return Path(self._tmpdir)
+
+    @property
+    def repo(self) -> Repo:
+        if self._repo is None:
+            raise RuntimeError("Repo not cloned yet. Call clone() first.")
+        return self._repo
+
+    # ── Branch management ──────────────────────────────────────────────────
+
+    def create_branch(self, branch_name: str) -> None:
+        """Create and checkout a new branch."""
+        self.repo.git.checkout("-b", branch_name)
+
+    def current_branch(self) -> str:
+        return self.repo.active_branch.name
+
+    def branch_exists_remote(self, branch_name: str) -> bool:
+        origin = self.repo.remotes.origin
+        origin.fetch()
+        return any(ref.name == f"origin/{branch_name}" for ref in origin.refs)
+
+    # ── File operations ────────────────────────────────────────────────────
+
+    def read_file(self, relative_path: str) -> str | None:
+        """Read file content; returns None if not found."""
+        path = self.root / relative_path
+        if path.exists() and path.is_file():
+            try:
+                return path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                return None
+        return None
+
+    def write_file(self, relative_path: str, content: str) -> None:
+        """Write (or overwrite) a file inside the repo."""
+        path = self.root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def delete_file(self, relative_path: str) -> bool:
+        """Delete a file if it exists."""
+        path = self.root / relative_path
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    def file_tree(self, max_files: int = 200) -> list[str]:
+        """Return list of relative file paths (respects .gitignore via git ls-files)."""
+        try:
+            result = self.repo.git.ls_files()
+            files = [line for line in result.splitlines() if line]
+            return files[:max_files]
+        except Exception:
+            return self._fallback_file_tree(max_files)
+
+    def _fallback_file_tree(self, max_files: int) -> list[str]:
+        files: list[str] = []
+        for path in Path(self._tmpdir or "").rglob("*"):
+            if path.is_file() and ".git" not in path.parts:
+                files.append(str(path.relative_to(self.root)))
+                if len(files) >= max_files:
+                    break
+        return files
+
+    def detect_languages(self) -> list[str]:
+        """Detect primary languages from file extensions."""
+        ext_map: dict[str, str] = {
+            ".py": "Python",
+            ".go": "Go",
+            ".rs": "Rust",
+            ".js": "JavaScript",
+            ".ts": "TypeScript",
+            ".jsx": "JavaScript",
+            ".tsx": "TypeScript",
+            ".rb": "Ruby",
+            ".java": "Java",
+            ".cpp": "C++",
+            ".c": "C",
+        }
+        counts: dict[str, int] = {}
+        for f in self.file_tree(500):
+            ext = Path(f).suffix.lower()
+            if ext in ext_map:
+                lang = ext_map[ext]
+                counts[lang] = counts.get(lang, 0) + 1
+        return sorted(counts, key=lambda k: counts[k], reverse=True)
+
+    # ── Git operations ──────────────────────────────────────────────────────
+
+    def stage_all(self) -> None:
+        """Stage all changes."""
+        self.repo.git.add(A=True)
+
+    def stage_file(self, relative_path: str) -> None:
+        self.repo.index.add([relative_path])
+
+    def commit(self, message: str, *, author_name: str, author_email: str) -> str:
+        """Commit staged changes. Returns commit SHA."""
+        actor = git.Actor(author_name, author_email)
+        commit = self.repo.index.commit(
+            message,
+            author=actor,
+            committer=actor,
+        )
+        return commit.hexsha
+
+    def push(self, branch: str, *, force: bool = False) -> None:
+        """Push branch to origin using authenticated URL."""
+        origin = self.repo.remotes.origin
+        # Ensure the remote uses the authenticated URL
+        with origin.config_writer as cw:
+            cw.set("url", self._authed_url())
+        push_flags = ["--force"] if force else []
+        self.repo.git.push("origin", branch, *push_flags)
+
+    def has_staged_changes(self) -> bool:
+        return bool(self.repo.index.diff("HEAD"))
+
+    def has_uncommitted_changes(self) -> bool:
+        return self.repo.is_dirty(untracked_files=True)
+
+    def log(self, n: int = 10) -> list[dict]:
+        """Return last N commits as dicts."""
+        commits = []
+        for c in list(self.repo.iter_commits())[:n]:
+            commits.append(
+                {
+                    "sha": c.hexsha[:8],
+                    "message": str(c.message).split("\n")[0],
+                    "author": c.author.name,
+                    "date": c.authored_datetime.isoformat(),
+                }
+            )
+        return commits
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _authed_url(self) -> str:
+        """Build authenticated HTTPS URL with GitHub token."""
+        token = self.config.github.token
+        return f"https://{self.config.bot.github_user}:{token}@github.com/{self.owner}/{self.name}.git"
+
+    def github_url(self) -> str:
+        return f"https://github.com/{self.owner}/{self.name}"
+
+    def branch_url(self, branch: str) -> str:
+        return f"https://github.com/{self.owner}/{self.name}/tree/{branch}"

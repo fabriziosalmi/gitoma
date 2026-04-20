@@ -1,0 +1,197 @@
+# Gitoma 🤖
+
+> AI-powered GitHub repository improvement agent — analyzes, plans, commits, and opens PRs autonomously.
+
+```
+   _____ _ _                        
+  / ____(_) |                       
+ | |  __ _| |_ ___  _ __ ___   __ _ 
+ | | |_ | | __/ _ \| '_ ` _ \ / _` |
+ | |__| | | || (_) | | | | | | (_| |
+  \_____|_|\__\___/|_| |_| |_|\__,_|
+```
+
+## What it does
+
+1. **Analyzes** your GitHub repo across 9+ metrics (CI/CD, tests, security, docs, deps…)
+2. **Plans** improvements via local LLM (LM Studio + gemma-4-e2b-it)
+3. **Commits** structured fixes to a `gitoma/improve-*` branch, task by task
+4. **Opens a PR** with a rich description of every change made
+5. **Integrates** Copilot review comments — auto-fixes and pushes them
+
+You just merge.
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/fabgpt-coder/gitoma
+cd gitoma
+pip install -e .
+```
+
+Or globally with pipx:
+
+```bash
+pipx install .
+```
+
+---
+
+## Prerequisites
+
+- **LM Studio** running locally with `gemma-4-e2b-it` loaded (OpenAI-compatible API on port 1234)
+- **GitHub Personal Access Token** (fine-grained) with:
+  - `contents: write`
+  - `pull-requests: write`
+  - `issues: read`
+
+---
+
+## Setup
+
+```bash
+# Set your GitHub token
+gitoma config set GITHUB_TOKEN=ghp_your_token_here
+
+# Verify config
+gitoma config show
+```
+
+Or copy `.env.example` to `~/.gitoma/.env` and edit it.
+
+---
+
+## Usage
+
+### Full autonomous run
+
+```bash
+gitoma run https://github.com/owner/repo
+```
+
+Options:
+- `--dry-run` — analyze + plan only, no commits
+- `--branch gitoma/custom-branch` — custom branch name
+- `--yes` / `-y` — skip confirmation prompts
+- `--resume` — continue an interrupted run
+- `--reset` — delete state and start fresh
+
+### Analyze only
+
+```bash
+gitoma analyze https://github.com/owner/repo
+```
+
+### Check progress
+
+```bash
+# Specific repo
+gitoma status https://github.com/owner/repo
+
+# All tracked repos
+gitoma list
+
+# Also show remote branches on GitHub
+gitoma status https://github.com/owner/repo --remote
+```
+
+### Review Copilot feedback
+
+```bash
+# Show review comments
+gitoma review https://github.com/owner/repo
+
+# Auto-fix all comments and push
+gitoma review https://github.com/owner/repo --integrate
+```
+
+### Auto-Remediate CI/CD Failures (Reflexion Agent)
+
+```bash
+# Auto-detect broken GitHub Actions jobs, stream logs to LLM, evaluate, and push fix
+gitoma fix-ci https://github.com/owner/repo --branch <target-branch>
+```
+
+### Reset state
+
+```bash
+gitoma reset https://github.com/owner/repo
+```
+
+### Run REST API Server (FastAPI)
+
+Unleash the full async REST API server to trigger jobs via VPN or automation layers.
+
+```bash
+# Secure the API by putting GITOMA_API_TOKEN in your .env
+gitoma serve --port 8000
+
+# Endpoint available at: http://localhost:8000/api/v1/health
+# Swagger Docs available at: http://localhost:8000/docs
+```
+
+---
+
+## Architecture
+
+```
+gitoma run <url>
+  │
+  ├─ Phase 1: ANALYZE    — 9 metric analyzers (README, CI, tests, security…)
+  ├─ Phase 2: PLAN       — LLM (gemma via LM Studio) → structured TaskPlan
+  ├─ Phase 3: EXECUTE    — LLM generates patches → git commit per subtask
+  ├─ Phase 4: PR         — push branch + open GitHub PR
+  ├─ Phase 5: REVIEW     — CopilotWatcher → integrate comments → push fixes
+  └─ Phase 6: FIX-CI     — Reflexion Dual-Agent (Fixer + Critic) remediates broken workflows
+```
+
+### Design patterns
+
+| Pattern | Where |
+|---|---|
+| Strategy | LLM client (swappable backend) |
+| Pipeline | Analyzer → Planner → Worker → PR → Watcher |
+| Async Worker | FastAPI BackgroundTasks for REST endpoints |
+| State Machine | IDLE → ANALYZING → PLANNING → WORKING → PR_OPEN → REVIEWING → DONE |
+| Command | Each SubTask is an executable + replayable unit |
+| Observer | Meta-Cognitive architectural analysis on telemetry |
+| Repository | GitRepo abstracts GitPython + GitHub API |
+| Factory | LLMClient wraps OpenAI-compat API |
+
+### Metrics analyzed
+
+| # | Metric | Languages |
+|---|---|---|
+| 1 | README quality | All |
+| 2 | CI/CD pipeline | All |
+| 3 | Test suite | Python, Go, Rust, JS/TS |
+| 4 | Security | All |
+| 5 | Code quality | Python, Go, Rust, JS/TS |
+| 6 | Dependencies | Python, Go, Rust, JS/TS |
+| 7 | Documentation | Python, Rust, JS/TS |
+| 8 | License | All |
+| 9 | Project structure | All |
+
+---
+
+## State persistence
+
+Agent state is saved at `~/.gitoma/state/<owner>__<repo>.json` after every subtask.
+This enables resumability — if gitoma crashes mid-task, run with `--resume`.
+
+---
+
+## Bot identity
+
+Commits are authored by:
+- **Name**: FabGPT
+- **Email**: fabgpt.inbox@gmail.com
+- **GitHub**: [@fabgpt-coder](https://github.com/fabgpt-coder)
+
+---
+
+## License
+
+MIT © FabGPT
