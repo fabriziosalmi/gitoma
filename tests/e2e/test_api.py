@@ -73,13 +73,13 @@ def test_api_run_job_dispatch(mocker):
     Test that trigger run successfully yields an async background task id
     and that the job status machinery tracks its lifecycle.
     """
-
     mock_config = mocker.patch("gitoma.api.server.load_config")
     mock_config.return_value.api_auth_token = "TOKEN"
 
-    # Stub the actual CLI subprocess so the background task returns instantly.
-    stub = mocker.MagicMock(returncode=0, stdout="ok", stderr="")
-    mocker.patch("gitoma.api.routers.subprocess.run", return_value=stub)
+    # Neutralize the actual subprocess spawn so the background task is a no-op.
+    async def _noop(job):
+        return None
+    mocker.patch("gitoma.api.routers._spawn_cli_job", side_effect=_noop)
 
     payload = {"repo_url": "https://github.com/mock/repo"}
     headers = {"Authorization": "Bearer TOKEN"}
@@ -93,10 +93,10 @@ def test_api_run_job_dispatch(mocker):
 
     job_id = data["job_id"]
 
-    # Poll the job id status — the subprocess stub returns success immediately.
+    # Poll status — with _spawn_cli_job stubbed the job stays in its initial state.
     status_resp = client.get(f"/api/v1/status/{job_id}", headers=headers)
     assert status_resp.status_code == 200
-    assert status_resp.json()["status"] in ["running", "completed"]
+    assert status_resp.json()["status"] in ("queued", "running", "completed")
 
 
 def test_api_fix_ci_dispatch(mocker):

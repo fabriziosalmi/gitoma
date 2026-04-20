@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from gitoma.api.server import app
@@ -17,9 +18,17 @@ def _mock_token(mocker):
     cfg.return_value.api_auth_token = "TOKEN"
 
 
-def _stub_subprocess(mocker, returncode=0, stdout="ok", stderr=""):
-    stub = mocker.MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
-    mocker.patch("gitoma.api.routers.subprocess.run", return_value=stub)
+@pytest.fixture(autouse=True)
+def _neutralize_spawn(mocker):
+    """Prevent tests from actually spawning `gitoma` subprocesses.
+
+    Every dispatch endpoint schedules `_spawn_cli_job` on the event loop, so
+    we replace it with a no-op coroutine for the whole module.
+    """
+    async def _noop(job):
+        return None
+
+    mocker.patch("gitoma.api.routers._spawn_cli_job", side_effect=_noop)
 
 
 # ── analyze ──────────────────────────────────────────────────────────────
@@ -27,7 +36,6 @@ def _stub_subprocess(mocker, returncode=0, stdout="ok", stderr=""):
 
 def test_analyze_dispatches_job(mocker):
     _mock_token(mocker)
-    _stub_subprocess(mocker)
 
     resp = client.post(
         "/api/v1/analyze",
@@ -51,7 +59,6 @@ def test_analyze_rejects_unauthenticated(mocker):
 
 def test_review_dispatches_job_without_integrate(mocker):
     _mock_token(mocker)
-    _stub_subprocess(mocker)
 
     resp = client.post(
         "/api/v1/review",
@@ -64,7 +71,6 @@ def test_review_dispatches_job_without_integrate(mocker):
 
 def test_review_with_integrate_flag(mocker):
     _mock_token(mocker)
-    _stub_subprocess(mocker)
 
     resp = client.post(
         "/api/v1/review",
@@ -80,12 +86,19 @@ def test_review_with_integrate_flag(mocker):
 
 def test_jobs_lists_tracked_background_jobs(mocker):
     _mock_token(mocker)
-    mocker.patch.dict("gitoma.api.routers._JOBS", {"abc": "running", "def": "completed"})
+    from gitoma.api.routers import JobRecord
+
+    fake = {
+        "abc": JobRecord(id="abc", label="run", argv=["a"], status="running"),
+        "def": JobRecord(id="def", label="analyze", argv=["a"], status="completed"),
+    }
+    mocker.patch.dict("gitoma.api.routers._JOBS", fake, clear=True)
 
     resp = client.get("/api/v1/jobs", headers=HEADERS)
     assert resp.status_code == 200
     data = resp.json()
     assert data["abc"]["status"] == "running"
+    assert data["abc"]["label"] == "run"
     assert data["def"]["status"] == "completed"
 
 

@@ -1,24 +1,42 @@
-"""Routers for Gitoma REST API."""
+"""Routers for Gitoma REST API.
 
+The agent commands (`run`, `analyze`, `review`, `fix-ci`) all dispatch the
+corresponding `gitoma` CLI subcommand as an **async** subprocess. Each spawn
+is tracked by a :class:`JobRecord` that holds a ring buffer of recent output
+plus a set of asyncio queue subscribers. The `/api/v1/stream/{job_id}` SSE
+endpoint lets any HTTP client tail the job's output line-by-line in real
+time (used by the cockpit live-log panel).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import datetime as _dt
+import json
 import logging
 import shutil
-import subprocess
 import sys
 import uuid
-from typing import Optional
+from collections import deque
+from dataclasses import dataclass, field
+from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from gitoma.core.config import load_config
 from gitoma.core.state import delete_state as _delete_state
 from gitoma.core.state import load_state as _load_state
 from gitoma.planner.llm_client import check_lmstudio
-from gitoma.review.reflexion import CIDiagnosticAgent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1")
+
+
+# ── Request / response schemas ───────────────────────────────────────────────
 
 
 class RunRequest(BaseModel):
@@ -42,9 +60,40 @@ class JobResponse(BaseModel):
     message: str
 
 
-# Basic in-memory job tracker for the Background Tasks
-# In a real enterprise system this would be Redis/Celery.
-_JOBS: dict[str, str] = {}
+# ── Job tracking ─────────────────────────────────────────────────────────────
+
+_LOG_BUFFER_LINES = 500
+_SUBSCRIBER_QUEUE_DEPTH = 1000
+_END_SENTINEL = "__END__"
+
+
+@dataclass
+class JobRecord:
+    """In-memory record for a single background CLI job."""
+
+    id: str
+    label: str
+    argv: list[str]
+    status: str = "queued"
+    lines: deque[str] = field(
+        default_factory=lambda: deque(maxlen=_LOG_BUFFER_LINES)
+    )
+    subscribers: set["asyncio.Queue[str]"] = field(default_factory=set)
+    created_at: _dt.datetime = field(
+        default_factory=lambda: _dt.datetime.now(_dt.timezone.utc)
+    )
+    finished_at: _dt.datetime | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status not in ("queued", "running")
+
+
+# Keyed by job_id. In production this would be a durable store.
+_JOBS: dict[str, JobRecord] = {}
+
+
+# ── CLI resolution ───────────────────────────────────────────────────────────
 
 
 def _gitoma_cli_argv() -> list[str]:
@@ -59,67 +108,82 @@ def _gitoma_cli_argv() -> list[str]:
     return [sys.executable, "-m", "gitoma.cli"]
 
 
-def _run_cli_job(argv: list[str], job_id: str, label: str) -> None:
-    """Shared subprocess runner for CLI-backed background jobs.
+# ── Pub/sub plumbing for live log streaming ─────────────────────────────────
 
-    Captures full stdout/stderr and stores the outcome in the in-memory job
-    tracker. On non-zero exit, embeds a short tail of the output so the
-    client can surface a meaningful failure message.
+
+def _publish(job: JobRecord, line: str) -> None:
+    """Append to the ring buffer and fan out to every active subscriber.
+
+    A slow/stuck consumer (full queue) is dropped rather than blocking the
+    producer, so one stale client can't stall the job.
     """
-    _JOBS[job_id] = "running"
+    job.lines.append(line)
+    dead: list["asyncio.Queue[str]"] = []
+    for q in job.subscribers:
+        try:
+            q.put_nowait(line)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        job.subscribers.discard(q)
+
+
+async def _spawn_cli_job(job: JobRecord) -> None:
+    """Run the CLI subprocess for this job and stream its output.
+
+    stdout+stderr are merged into a single stream so timing between the two
+    is preserved. Each decoded line is broadcast via `_publish`. A terminal
+    sentinel is always emitted so SSE consumers know to close the stream.
+    """
+    job.status = "running"
+    _publish(job, f"$ {' '.join(job.argv)}")
+
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.exception("%s job %s could not start", label, job_id)
-        _JOBS[job_id] = f"failed: {exc}"
+        proc = await asyncio.create_subprocess_exec(
+            *job.argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except (OSError, ValueError) as exc:
+        logger.exception("Job %s (%s) could not start", job.id, job.label)
+        job.status = f"failed: {exc}"
+        job.finished_at = _dt.datetime.now(_dt.timezone.utc)
+        _publish(job, f"[error] {exc}")
+        _publish(job, f"{_END_SENTINEL}:{job.status}")
         return
 
-    if proc.returncode == 0:
-        _JOBS[job_id] = "completed"
-    else:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-5:]
-        _JOBS[job_id] = f"failed (rc={proc.returncode}): {' | '.join(tail)[:400]}"
-
-
-def _run_autonomous_agent(repo_url: str, branch: Optional[str], dry_run: bool, job_id: str) -> None:
-    """Spawn the `gitoma run` CLI in a subprocess and track its status.
-
-    Subprocess isolation sidesteps typer.Exit() propagating into the background
-    worker thread and keeps the API process alive across pipeline failures.
-    """
-    argv = [*_gitoma_cli_argv(), "run", repo_url, "--yes"]
-    if branch:
-        argv += ["--branch", branch]
-    if dry_run:
-        argv.append("--dry-run")
-    _run_cli_job(argv, job_id, "run")
-
-
-def _run_analyze(repo_url: str, job_id: str) -> None:
-    """Spawn `gitoma analyze <repo_url>` and track outcome."""
-    argv = [*_gitoma_cli_argv(), "analyze", repo_url]
-    _run_cli_job(argv, job_id, "analyze")
-
-
-def _run_review(repo_url: str, integrate: bool, job_id: str) -> None:
-    """Spawn `gitoma review <repo_url> [--integrate]` and track outcome."""
-    argv = [*_gitoma_cli_argv(), "review", repo_url]
-    if integrate:
-        argv.append("--integrate")
-    _run_cli_job(argv, job_id, "review")
-
-
-def _run_fix_ci(repo_url: str, branch: str, job_id: str) -> None:
-    """Run CIDiagnosticAgent in the background and report status."""
-    _JOBS[job_id] = "running"
+    assert proc.stdout is not None
     try:
-        config = load_config()
-        agent = CIDiagnosticAgent(config)
-        agent.analyze_and_fix(repo_url, branch)
-        _JOBS[job_id] = "completed"
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            _publish(job, line)
+        rc = await proc.wait()
+    except asyncio.CancelledError:
+        proc.terminate()
+        raise
     except Exception as exc:
-        logger.exception("Fix-CI job %s failed", job_id)
-        _JOBS[job_id] = f"failed: {exc}"
+        logger.exception("Job %s (%s) crashed", job.id, job.label)
+        job.status = f"failed: {exc}"
+        job.finished_at = _dt.datetime.now(_dt.timezone.utc)
+        _publish(job, f"[error] {exc}")
+        _publish(job, f"{_END_SENTINEL}:{job.status}")
+        return
+
+    job.status = "completed" if rc == 0 else f"failed (rc={rc})"
+    job.finished_at = _dt.datetime.now(_dt.timezone.utc)
+    _publish(job, f"{_END_SENTINEL}:{job.status}")
+
+
+def _dispatch(label: str, argv: list[str]) -> JobRecord:
+    """Register a new job and schedule it on the event loop."""
+    job_id = str(uuid.uuid4())
+    job = JobRecord(id=job_id, label=label, argv=argv)
+    _JOBS[job_id] = job
+    asyncio.create_task(_spawn_cli_job(job))
+    return job
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
 
 
 @router.get("/health")
@@ -127,7 +191,6 @@ def health_check() -> dict[str, object]:
     """Verify system health and configuration."""
     config = load_config()
     lm_state = check_lmstudio(config)
-    import dataclasses
     return {
         "status": "ok",
         "lm_studio": dataclasses.asdict(lm_state),
@@ -136,53 +199,122 @@ def health_check() -> dict[str, object]:
 
 
 @router.post("/run", response_model=JobResponse)
-def trigger_agent_run(req: RunRequest, background_tasks: BackgroundTasks) -> JobResponse:
-    """Trigger a full autonomous run pipeline (Analyzer -> Planner -> Worker -> PR)."""
-    job_id = str(uuid.uuid4())
-    background_tasks.add_task(_run_autonomous_agent, req.repo_url, req.branch, req.dry_run, job_id)
-    return JobResponse(job_id=job_id, status="started", message="Autonomous run dispatched in background.")
+async def trigger_agent_run(req: RunRequest) -> JobResponse:
+    """Trigger a full autonomous run pipeline (Analyzer → Planner → Worker → PR)."""
+    argv = [*_gitoma_cli_argv(), "run", req.repo_url, "--yes"]
+    if req.branch:
+        argv += ["--branch", req.branch]
+    if req.dry_run:
+        argv.append("--dry-run")
+    job = _dispatch("run", argv)
+    return JobResponse(job_id=job.id, status="started", message="Autonomous run dispatched in background.")
 
 
 @router.post("/fix-ci", response_model=JobResponse)
-def trigger_fix_ci(req: RunRequest, background_tasks: BackgroundTasks) -> JobResponse:
+async def trigger_fix_ci(req: RunRequest) -> JobResponse:
     """Trigger the CIDiagnostic Agent (Reflexion Dual-Agent) to fix a CI breakage."""
     if not req.branch:
         raise HTTPException(status_code=400, detail="Branch must be provided for CI fixing.")
-
-    job_id = str(uuid.uuid4())
-    background_tasks.add_task(_run_fix_ci, req.repo_url, req.branch, job_id)
-    return JobResponse(job_id=job_id, status="started", message="CI Reflexion Agent dispatched in background.")
+    argv = [*_gitoma_cli_argv(), "fix-ci", req.repo_url, "--branch", req.branch]
+    job = _dispatch("fix-ci", argv)
+    return JobResponse(job_id=job.id, status="started", message="CI Reflexion Agent dispatched in background.")
 
 
 @router.post("/analyze", response_model=JobResponse)
-def trigger_analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> JobResponse:
+async def trigger_analyze(req: AnalyzeRequest) -> JobResponse:
     """Trigger a read-only analysis pass (no commits, no PR)."""
-    job_id = str(uuid.uuid4())
-    background_tasks.add_task(_run_analyze, req.repo_url, job_id)
-    return JobResponse(job_id=job_id, status="started", message="Analysis dispatched in background.")
+    argv = [*_gitoma_cli_argv(), "analyze", req.repo_url]
+    job = _dispatch("analyze", argv)
+    return JobResponse(job_id=job.id, status="started", message="Analysis dispatched in background.")
 
 
 @router.post("/review", response_model=JobResponse)
-def trigger_review(req: ReviewRequest, background_tasks: BackgroundTasks) -> JobResponse:
+async def trigger_review(req: ReviewRequest) -> JobResponse:
     """Fetch Copilot review comments; optionally auto-integrate them."""
-    job_id = str(uuid.uuid4())
-    background_tasks.add_task(_run_review, req.repo_url, req.integrate, job_id)
+    argv = [*_gitoma_cli_argv(), "review", req.repo_url]
+    if req.integrate:
+        argv.append("--integrate")
+    job = _dispatch("review", argv)
     msg = "Review integration dispatched." if req.integrate else "Review fetch dispatched."
-    return JobResponse(job_id=job_id, status="started", message=msg)
+    return JobResponse(job_id=job.id, status="started", message=msg)
 
 
 @router.get("/status/{job_id}")
 def get_job_status(job_id: str) -> dict[str, str]:
     """Poll the status of an asynchronous job."""
-    if job_id not in _JOBS:
+    job = _JOBS.get(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {"job_id": job_id, "status": _JOBS[job_id]}
+    return {"job_id": job.id, "status": job.status, "label": job.label}
 
 
 @router.get("/jobs")
-def list_jobs() -> dict[str, dict[str, str]]:
-    """List every in-memory job and its current status."""
-    return {jid: {"status": status} for jid, status in _JOBS.items()}
+def list_jobs() -> dict[str, dict[str, object]]:
+    """List every in-memory job with its current status and a buffered-lines count."""
+    return {
+        jid: {
+            "status": job.status,
+            "label": job.label,
+            "lines": len(job.lines),
+            "created_at": job.created_at.isoformat(),
+            "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        }
+        for jid, job in _JOBS.items()
+    }
+
+
+@router.get("/stream/{job_id}")
+async def stream_job_output(job_id: str) -> StreamingResponse:
+    """SSE endpoint: stream the job's merged stdout/stderr line by line.
+
+    Buffered lines are replayed on connect so late joiners see the full
+    history up to the ring-buffer limit. The stream terminates when the
+    job emits the end sentinel.
+    """
+    job = _JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    async def event_stream() -> AsyncIterator[str]:
+        # Replay history first so the client can render whatever happened
+        # before subscription.
+        replayed_end = False
+        for line in list(job.lines):
+            yield _format_event("line", line)
+            if line.startswith(_END_SENTINEL):
+                replayed_end = True
+                break
+        if replayed_end:
+            return
+
+        q: "asyncio.Queue[str]" = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_DEPTH)
+        job.subscribers.add(q)
+        try:
+            while True:
+                line = await q.get()
+                yield _format_event("line", line)
+                if line.startswith(_END_SENTINEL):
+                    break
+        except asyncio.CancelledError:
+            # Client disconnected
+            pass
+        finally:
+            job.subscribers.discard(q)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable proxy buffering if fronted by nginx
+        },
+    )
+
+
+def _format_event(event: str, line: str) -> str:
+    """Format a single SSE frame."""
+    payload = json.dumps({"line": line})
+    return f"event: {event}\ndata: {payload}\n\n"
 
 
 @router.delete("/state/{owner}/{name}")

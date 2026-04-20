@@ -399,6 +399,63 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── Live log stream ───────────────────────────────────────────────────── */
+.log-card { display: none; }
+.log-card.open { display: block; }
+.log-card .card-head .status-pill {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10px; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 3px;
+  background: var(--bg-subtle); color: var(--fg-mid);
+  border: 1px solid var(--border);
+}
+.log-card .status-pill .dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--warn);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+.log-card .status-pill.done .dot { background: var(--ok); animation: none; }
+.log-card .status-pill.fail .dot { background: var(--fail); animation: none; }
+.log-card .status-pill.done { color: var(--ok); border-color: rgba(34,197,94,0.3); }
+.log-card .status-pill.fail { color: var(--fail); border-color: rgba(239,68,68,0.3); }
+@keyframes pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%     { opacity: .35; transform: scale(.6); }
+}
+.log-card .btn--icon.close-log { margin-left: 6px; }
+.log-stream {
+  margin: 0;
+  background: #050506;
+  color: #c9d1d9;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 12px 14px;
+  max-height: 360px;
+  overflow-y: auto;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 2;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.log-stream::-webkit-scrollbar { width: 8px; height: 8px; }
+.log-stream::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+.log-stream::-webkit-scrollbar-track { background: transparent; }
+.log-stream .row { display: block; }
+.log-stream .row.system { color: var(--accent); opacity: 0.85; }
+.log-stream .row.error { color: var(--fail); }
+.log-stream .row.dim   { color: var(--fg-dim); }
+.log-stream .empty {
+  color: var(--fg-dim);
+  padding: 10px 0;
+  text-align: center;
+  font-family: var(--font-ui);
+  font-size: 11px;
+}
+
 /* ── Footer ────────────────────────────────────────────────────────────── */
 footer {
   padding: 10px 20px;
@@ -603,6 +660,16 @@ _DASHBOARD_ICONS = """
       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
       <circle cx="12" cy="12" r="3"/>
     </symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
+    </symbol>
+    <symbol id="icon-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="4 17 10 11 4 5"/>
+      <line x1="12" y1="19" x2="20" y2="19"/>
+    </symbol>
     <!-- Phase icons -->
     <symbol id="icon-phase-idle" viewBox="0 0 24 24" fill="none" stroke="currentColor"
       stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -744,6 +811,111 @@ document.addEventListener("click", (e) => {
 let STATES = [];
 let SELECTED = 0;
 let JOB_POLL = null;
+
+// ── Live log stream (SSE via fetch, so we can pass Bearer header) ───────
+const LogStream = {
+  controller: null,
+  jobId: null,
+
+  open(jobId, label) {
+    this.close();
+    this.jobId = jobId;
+    $("log-card").classList.add("open");
+    $("log-title").textContent = `Live Output — ${label}`;
+    this._setStatus("running");
+    const pre = $("log-stream");
+    pre.innerHTML = "";
+    this._autoScroll = true;
+    pre.addEventListener("scroll", () => {
+      const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 12;
+      this._autoScroll = atBottom;
+    });
+    this._consume(jobId).catch((err) => {
+      this._appendRaw(`[stream error] ${err.message || err}`, "error");
+      this._setStatus("fail");
+    });
+  },
+
+  close() {
+    if (this.controller) {
+      try { this.controller.abort(); } catch {}
+      this.controller = null;
+    }
+    this.jobId = null;
+  },
+
+  hide() {
+    this.close();
+    $("log-card").classList.remove("open");
+  },
+
+  async _consume(jobId) {
+    this.controller = new AbortController();
+    const token = Token.get();
+    const res = await fetch(`/api/v1/stream/${encodeURIComponent(jobId)}`, {
+      headers: token ? { "Authorization": `Bearer ${token}` } : {},
+      signal: this.controller.signal,
+    });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        this._appendRaw("[auth required] token rejected by server", "error");
+        this._setStatus("fail");
+        return;
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split(/\n\n/);
+      buffer = frames.pop() || "";
+      for (const frame of frames) {
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          try {
+            const payload = JSON.parse(line.slice(5).trim());
+            const text = payload.line || "";
+            if (text.startsWith("__END__")) {
+              const status = text.split(":").slice(1).join(":") || "completed";
+              this._setStatus(status.startsWith("failed") ? "fail" : "done", status);
+              return;
+            }
+            this._appendLine(text);
+          } catch { /* ignore malformed */ }
+        }
+      }
+    }
+    // Stream ended without __END__
+    this._setStatus("done", "closed");
+  },
+
+  _appendLine(text) {
+    let cls = "";
+    if (text.startsWith("$ ")) cls = "system";
+    else if (/\b(error|failed|traceback)/i.test(text)) cls = "error";
+    else if (text.startsWith("[") && text.endsWith("]")) cls = "dim";
+    this._appendRaw(text, cls);
+  },
+
+  _appendRaw(text, cls = "") {
+    const pre = $("log-stream");
+    const row = document.createElement("span");
+    row.className = "row" + (cls ? " " + cls : "");
+    row.textContent = text + "\n";
+    pre.appendChild(row);
+    if (this._autoScroll) pre.scrollTop = pre.scrollHeight;
+  },
+
+  _setStatus(kind, label) {
+    const pill = $("log-status");
+    pill.className = "status-pill " + (kind === "done" ? "done" : kind === "fail" ? "fail" : "");
+    $("log-status-label").textContent = label || kind;
+  },
+};
 
 // ── Rendering ───────────────────────────────────────────────────────────
 function renderPipeline(phase) {
@@ -895,6 +1067,7 @@ async function submitCommand(name, fn) {
     const res = await fn();
     Toast.success(name + " dispatched", res?.job_id ? `Job ${res.job_id.slice(0, 8)}` : "");
     refreshJobs();
+    if (res?.job_id) LogStream.open(res.job_id, name);
   } catch (err) {
     if (err.status === 401 || err.status === 403) {
       Token.set("");
@@ -1019,6 +1192,7 @@ function init() {
   });
   $("jobs-badge").addEventListener("click", refreshJobs);
   $("reset-btn").addEventListener("click", confirmAndReset);
+  $("log-close").addEventListener("click", () => LogStream.hide());
 
   wireDialogs();
   connectWS();
@@ -1104,6 +1278,18 @@ _DASHBOARD_BODY = """
     </aside>
 
     <div class="stack">
+      <section id="log-card" class="card log-card" aria-live="polite">
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-terminal"/></svg>
+          <span class="title" id="log-title">Live Output</span>
+          <span id="log-status" class="status-pill"><span class="dot"></span><span id="log-status-label">running</span></span>
+          <button id="log-close" class="btn btn--ghost btn--icon btn--sm close-log" aria-label="Close live output" title="Close">
+            <svg class="icon"><use href="#icon-x"/></svg>
+          </button>
+        </div>
+        <pre id="log-stream" class="log-stream" role="log" aria-label="Live subprocess output"></pre>
+      </section>
+
       <section class="card">
         <div class="card-head">
           <svg class="icon"><use href="#icon-activity"/></svg>
