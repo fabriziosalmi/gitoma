@@ -3,12 +3,13 @@
 import datetime
 import json
 from pathlib import Path
+from typing import Any
 
 from gitoma.core.config import GITOMA_DIR
 
 TELEMETRY_DIR = GITOMA_DIR / "telemetry"
 
-def save_telemetry_report(agent_type: str, session_data: dict, report: str) -> Path:
+def save_telemetry_report(agent_type: str, session_data: dict[str, Any], report: str) -> Path:
     """
     Save a meta-cognitive report along with the raw session data for developer observation.
     Returns the file path.

@@ -41,7 +41,6 @@ class DepsAnalyzer(BaseAnalyzer):
                 # Check for pinned versions
                 req = self.read(has_requirements) or ""
                 pinned = len(re.findall(r"==", req))
-                loose = len(re.findall(r">=", req))
                 if pinned > 0:
                     suggestions.append(
                         f"requirements.txt has {pinned} pinned deps (==). "

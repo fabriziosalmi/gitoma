@@ -10,7 +10,7 @@ from gitoma.api.routers import router
 # Setup Authentication Schema
 auth_scheme = HTTPBearer()
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Security(auth_scheme)):
+def verify_token(credentials: HTTPAuthorizationCredentials = Security(auth_scheme)) -> None:
     """Validates the static Bearer token against GITOMA_API_TOKEN."""
     config = load_config()
     expected_token = config.api_auth_token

@@ -6,7 +6,7 @@ from gitoma.core.config import Config
 from gitoma.core.github_client import ReviewComment
 from gitoma.core.repo import GitRepo
 from gitoma.core.state import AgentState
-from typing import Callable
+from typing import Any, Callable
 from gitoma.planner.llm_client import LLMClient
 from gitoma.planner.prompts import (
     review_integrator_system_prompt,
@@ -38,13 +38,13 @@ class ReviewIntegrator:
         on_comment_start: "Callable[[ReviewComment], None] | None" = None,
         on_comment_done: "Callable[[ReviewComment, str | None], None] | None" = None,
         on_comment_error: "Callable[[ReviewComment, str], None] | None" = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Generate and commit a fix for each review comment.
 
         Returns list of results: [{comment_id, sha, error}]
         """
-        results: list[dict] = []
+        results: list[dict[str, Any]] = []
 
         for comment in comments:
             if on_comment_start:

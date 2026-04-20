@@ -41,7 +41,7 @@ class CIDiagnosticAgent:
         self.observer = ObserverAgent(config)
         
         self.gh = GitHubClient(config)
-        self._last_session_data = {}
+        self._last_session_data: dict[str, Any] = {}
 
     def analyze_and_fix(self, repo_url: str, branch: str) -> None:
         """Entrypoint for the CI fix loop."""
@@ -83,7 +83,7 @@ class CIDiagnosticAgent:
                 self.observer.analyze_session(self._last_session_data)
 
 
-    def _attempt_remediation(self, owner: str, name: str, branch: str, repo_url: str, job: dict) -> bool:
+    def _attempt_remediation(self, owner: str, name: str, branch: str, repo_url: str, job: dict[str, Any]) -> bool:
         """Fetch logs, generate patch, run reflexion, and commit."""
         log_text = self.gh.get_job_log(owner, name, job["job_id"])
         if log_text.startswith("Could not fetch"):
@@ -152,7 +152,8 @@ Respond STRICTLY with a valid JSON document matching this schema:
         resp = self.fixer_llm.chat([{"role": "user", "content": prompt}])
         try:
             cleaned = resp.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            return json.loads(cleaned)
+            parsed: dict[str, Any] = json.loads(cleaned)
+            return parsed
         except json.JSONDecodeError as e:
             console.print(f"[dim warning]Failed to parse Fixer JSON: {e}[/dim warning]")
             return None

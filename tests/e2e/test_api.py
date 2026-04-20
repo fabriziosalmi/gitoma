@@ -1,4 +1,3 @@
-import pytest
 from fastapi.testclient import TestClient
 
 from gitoma.api.server import app
@@ -71,24 +70,30 @@ def test_api_health_endpoint(mocker):
 
 def test_api_run_job_dispatch(mocker):
     """
-    Test that trigger run successfully yields an async background task id.
+    Test that trigger run successfully yields an async background task id
+    and that the job status machinery tracks its lifecycle.
     """
+
     mock_config = mocker.patch("gitoma.api.server.load_config")
     mock_config.return_value.api_auth_token = "TOKEN"
 
+    # Stub the actual CLI subprocess so the background task returns instantly.
+    stub = mocker.MagicMock(returncode=0, stdout="ok", stderr="")
+    mocker.patch("gitoma.api.routers.subprocess.run", return_value=stub)
+
     payload = {"repo_url": "https://github.com/mock/repo"}
     headers = {"Authorization": "Bearer TOKEN"}
-    
+
     response = client.post("/api/v1/run", json=payload, headers=headers)
     assert response.status_code == 200
-    
+
     data = response.json()
     assert "job_id" in data
     assert data["status"] == "started"
-    
+
     job_id = data["job_id"]
-    
-    # Now poll the job id status!
+
+    # Poll the job id status — the subprocess stub returns success immediately.
     status_resp = client.get(f"/api/v1/status/{job_id}", headers=headers)
     assert status_resp.status_code == 200
     assert status_resp.json()["status"] in ["running", "completed"]

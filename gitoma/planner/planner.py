@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from gitoma.analyzers.base import MetricReport
 from gitoma.planner.llm_client import LLMClient
 from gitoma.planner.prompts import planner_system_prompt, planner_user_prompt
@@ -39,7 +41,7 @@ class PlannerAgent:
         task_plan.llm_model = self._llm.model
         return task_plan
 
-    def _parse_plan(self, raw: dict) -> TaskPlan:
+    def _parse_plan(self, raw: dict[str, Any]) -> TaskPlan:
         """Parse the LLM JSON response into a TaskPlan."""
         tasks: list[Task] = []
         for i, t_raw in enumerate(raw.get("tasks", [])[:8]):

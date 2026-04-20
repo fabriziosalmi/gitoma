@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 TaskStatus = Literal["pending", "in_progress", "completed", "failed", "skipped"]
 SubTaskAction = Literal["create", "modify", "delete", "verify"]
@@ -21,11 +21,11 @@ class SubTask:
     commit_sha: str = ""
     error: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "SubTask":
+    def from_dict(cls, d: dict[str, Any]) -> "SubTask":
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -53,13 +53,13 @@ class Task:
             return 0.0
         return self.completed_subtasks / self.total_subtasks
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["subtasks"] = [s.to_dict() for s in self.subtasks]
         return d
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Task":
+    def from_dict(cls, d: dict[str, Any]) -> "Task":
         subtasks = [SubTask.from_dict(s) for s in d.pop("subtasks", [])]
         return cls(subtasks=subtasks, **{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
@@ -87,7 +87,7 @@ class TaskPlan:
     def pending_tasks(self) -> list[Task]:
         return [t for t in self.tasks if t.status in ("pending", "in_progress")]
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "created_at": self.created_at,
             "overall_score_before": self.overall_score_before,
@@ -96,6 +96,6 @@ class TaskPlan:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "TaskPlan":
+    def from_dict(cls, d: dict[str, Any]) -> "TaskPlan":
         tasks = [Task.from_dict(t) for t in d.pop("tasks", [])]
         return cls(tasks=tasks, **{k: v for k, v in d.items() if k in cls.__dataclass_fields__})

@@ -36,7 +36,7 @@ class StructureAnalyzer(BaseAnalyzer):
         # .gitignore quality
         gitignore = self.read(".gitignore") or ""
         if gitignore:
-            lines = [l.strip() for l in gitignore.split("\n") if l.strip() and not l.startswith("#")]
+            lines = [line.strip() for line in gitignore.split("\n") if line.strip() and not line.startswith("#")]
             if len(lines) < 5:
                 suggestions.append(".gitignore exists but has very few entries — use gitignore.io to generate a proper one")
             elif len(lines) >= 15:

@@ -19,8 +19,6 @@ from __future__ import annotations
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
-from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -63,7 +61,7 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         cache_key = f"tree:{owner}/{repo}:{max_files}"
         cached = _cache.get(cache_key)
         if cached is not None:
-            return cached
+            return str(cached)
 
         from gitoma.core.config import load_config
         from gitoma.core.github_client import GitHubClient
@@ -96,7 +94,7 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         cache_key = f"file:{owner}/{repo}:{ref or 'HEAD'}:{path}"
         cached = _cache.get(cache_key)
         if cached is not None:
-            return cached
+            return str(cached)
 
         from gitoma.core.config import load_config
         from gitoma.core.github_client import GitHubClient
@@ -178,7 +176,7 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         cache_key = f"ci:{owner}/{repo}:{branch}"
         cached = _cache.get(cache_key)
         if cached is not None:
-            return cached
+            return str(cached)
 
         from gitoma.core.config import load_config
         from gitoma.core.github_client import GitHubClient
@@ -200,7 +198,7 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         cache_key = f"issues:{owner}/{repo}:{limit}"
         cached = _cache.get(cache_key)
         if cached is not None:
-            return cached
+            return str(cached)
 
         from gitoma.core.config import load_config
         from gitoma.core.github_client import GitHubClient
@@ -208,8 +206,9 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         gh = GitHubClient(cfg)
         r = gh.get_repo(owner, repo)
 
-        issues = []
-        for issue in r.get_issues(state="open")[:limit]:
+        issues: list[dict[str, Any]] = []
+        open_issues = r.get_issues(state="open")
+        for issue in list(open_issues)[:limit]:
             issues.append({
                 "number": issue.number,
                 "title": issue.title,
@@ -234,7 +233,7 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         cache_key = f"pr_comments:{owner}/{repo}:{pr_number}"
         cached = _cache.get(cache_key)
         if cached is not None:
-            return cached
+            return str(cached)
 
         from gitoma.core.config import load_config
         from gitoma.core.github_client import GitHubClient

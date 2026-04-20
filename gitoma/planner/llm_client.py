@@ -7,9 +7,12 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from gitoma.core.config import Config
+
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,7 +216,7 @@ class LLMClient:
         # Build the client lazily to avoid import-time failures
         self._client = self._build_client()
 
-    def _build_client(self):
+    def _build_client(self) -> "OpenAI":
         try:
             from openai import OpenAI
             return OpenAI(
@@ -266,7 +269,7 @@ class LLMClient:
                 content = response.choices[0].message.content
                 if content is None:
                     raise LLMError("LLM returned an empty response (content=None)")
-                return content
+                return str(content)
 
             except (APIConnectionError, APITimeoutError) as e:
                 last_error = e

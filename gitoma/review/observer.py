@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from rich.console import Console
 
 from gitoma.core.config import Config
@@ -18,7 +20,7 @@ class ObserverAgent:
         # Use the primary LLM
         self.llm = LLMClient(config)
 
-    def analyze_session(self, session_data: dict) -> None:
+    def analyze_session(self, session_data: dict[str, Any]) -> None:
         """
         Takes raw interactions from the pipeline and generates an architectural review.
         """

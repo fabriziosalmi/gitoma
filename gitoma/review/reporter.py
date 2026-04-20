@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from rich.table import Table
 from rich.panel import Panel
 from rich import box
@@ -48,7 +50,7 @@ def display_review_status(status: ReviewStatus) -> None:
         )
 
 
-def _display_reviews_table(reviews: list[dict]) -> None:
+def _display_reviews_table(reviews: list[dict[str, Any]]) -> None:
     table = Table(
         title="📋 PR Reviews",
         box=box.ROUNDED,
@@ -77,7 +79,7 @@ def _display_reviews_table(reviews: list[dict]) -> None:
     console.print(table)
 
 
-def _display_comments_table(comments: list) -> None:
+def _display_comments_table(comments: list[Any]) -> None:
     table = Table(
         title=f"💬 Review Comments ({len(comments)})",
         box=box.ROUNDED,

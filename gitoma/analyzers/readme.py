@@ -38,7 +38,7 @@ class ReadmeAnalyzer(BaseAnalyzer):
         score += 0.20
 
         # Length (meaningful content): 0.15 pts
-        non_empty = [l for l in lines if l.strip()]
+        non_empty = [line for line in lines if line.strip()]
         if len(non_empty) >= 50:
             score += 0.15
         elif len(non_empty) >= 20:
@@ -63,7 +63,7 @@ class ReadmeAnalyzer(BaseAnalyzer):
             suggestions.append("Add status badges (CI, coverage, version) to the README header")
 
         # H1 title: 0.10 pts
-        if any(l.startswith("# ") for l in lines):
+        if any(line.startswith("# ") for line in lines):
             score += 0.10
         else:
             suggestions.append("Add an H1 title (# Project Name) at the top of the README")

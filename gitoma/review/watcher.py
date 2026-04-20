@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from gitoma.core.github_client import GitHubClient, ReviewComment
 
@@ -15,7 +15,7 @@ class ReviewStatus:
     pr_url: str
     review_comments: list[ReviewComment]
     issue_comments: list[ReviewComment]
-    reviews: list[dict]
+    reviews: list[dict[str, Any]]
 
     @property
     def all_comments(self) -> list[ReviewComment]:

@@ -65,7 +65,7 @@ class AnalyzerRegistry:
             if on_progress:
                 on_progress(AnalyzerCls.display_name, idx, total)
             try:
-                analyzer = AnalyzerCls(root=self.root, languages=self.languages)
+                analyzer = AnalyzerCls(root=self.root, languages=self.languages)  # type: ignore[abstract]
                 result = analyzer.analyze()
             except Exception as e:
                 result = MetricResult.from_score(

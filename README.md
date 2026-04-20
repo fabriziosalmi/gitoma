@@ -132,6 +132,15 @@ gitoma serve --port 8000
 # Swagger Docs available at: http://localhost:8000/docs
 ```
 
+### Run as MCP server
+
+Expose GitHub context tools (file reads, repo tree, CI failures, PR comments)
+to any MCP-capable client (Claude Desktop, MCP Inspector, ...):
+
+```bash
+gitoma mcp
+```
+
 ---
 
 ## Architecture

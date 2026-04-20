@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from dataclasses import dataclass
 
 from github import Github, GithubException, Auth
@@ -44,7 +46,9 @@ class GitHubClient:
 
     def create_user_repo(self, name: str, description: str = "", private: bool = True) -> Repository:
         """Create a new repository under the authenticated user's account."""
+        from github.AuthenticatedUser import AuthenticatedUser
         user = self._gh.get_user()
+        assert isinstance(user, AuthenticatedUser), "Token must authenticate a user, not a named user"
         return user.create_repo(name=name, description=description, private=private, auto_init=True)
 
     def delete_user_repo(self, owner: str, name: str) -> None:
@@ -59,7 +63,7 @@ class GitHubClient:
 
     # ── Repo info ───────────────────────────────────────────────────────────
 
-    def repo_info(self, owner: str, name: str) -> dict:
+    def repo_info(self, owner: str, name: str) -> dict[str, Any]:
         """Return basic metadata dict for a repo."""
         r = self.get_repo(owner, name)
         return {
@@ -159,7 +163,7 @@ class GitHubClient:
             owner, name, pr_number
         )
 
-    def get_pr_reviews(self, owner: str, name: str, pr_number: int) -> list[dict]:
+    def get_pr_reviews(self, owner: str, name: str, pr_number: int) -> list[dict[str, Any]]:
         """Return PR review summaries."""
         pr = self.get_pr(owner, name, pr_number)
         return [
@@ -175,11 +179,13 @@ class GitHubClient:
 
     # ── CI/CD Checks ───────────────────────────────────────────────────────
 
-    def get_failed_jobs(self, owner: str, name: str, branch: str) -> list[dict]:
+    def get_failed_jobs(self, owner: str, name: str, branch: str) -> list[dict[str, Any]]:
         """Return a list of failed GitHub Action jobs for a given branch."""
         r = self.get_repo(owner, name)
-        failed = []
-        for run in r.get_workflow_runs(branch=branch):
+        failed: list[dict[str, Any]] = []
+        # PyGithub accepts branch names as strings at runtime; its stubs restrict
+        # this to `Branch` objects, so we bypass the stub here.
+        for run in r.get_workflow_runs(branch=branch):  # type: ignore[arg-type]
             if run.status == "completed" and run.conclusion == "failure":
                 for job in run.jobs():
                     if job.conclusion == "failure":

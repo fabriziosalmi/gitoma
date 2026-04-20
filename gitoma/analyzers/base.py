@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 ScoreStatus = Literal["pass", "warn", "fail"]
 
@@ -56,7 +56,7 @@ class MetricResult:
             weight=weight,
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "display_name": self.display_name,
@@ -98,7 +98,7 @@ class MetricReport:
     def passing(self) -> list[MetricResult]:
         return [m for m in self.metrics if m.status == "pass"]
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "repo_url": self.repo_url,
             "owner": self.owner,

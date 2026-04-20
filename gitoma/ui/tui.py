@@ -6,22 +6,23 @@ Launch with: gitoma tui
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar, Optional, Tuple
+from typing import Any, ClassVar, Optional, Tuple
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
+from textual.css.query import NoMatches
+from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Input,
-    Label,
     ListItem,
     ListView,
     Log,
@@ -29,6 +30,8 @@ from textual.widgets import (
     ProgressBar,
     Static,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -60,15 +63,15 @@ _VERSION = "0.1.0"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _load_all_states() -> list[dict]:
+def _load_all_states() -> list[dict[str, Any]]:
     """Load all agent states from disk."""
-    states: list[dict] = []
+    states: list[dict[str, Any]] = []
     if STATE_DIR.exists():
         for p in sorted(STATE_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
             try:
                 states.append(json.loads(p.read_text()))
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.debug("Skipping unreadable state file %s: %s", p, exc)
     return states
 
 
@@ -88,7 +91,7 @@ def _ts() -> str:
 
 # ── Modals ──────────────────────────────────────────────────────────────────────
 
-class InputModal(ModalScreen):
+class InputModal(ModalScreen[Tuple[str, str]]):
     """Modal to capture repo URL + optional branch."""
 
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
@@ -119,16 +122,16 @@ class InputModal(ModalScreen):
         if self._show_branch:
             try:
                 branch = self.query_one("#branch-input", Input).value.strip()
-            except Exception:
-                pass
-        self.dismiss((url, branch))  # type: ignore[arg-type]
+            except NoMatches:
+                branch = ""
+        self.dismiss((url, branch))
 
     @on(Button.Pressed, "#cancel-btn")
     def _cancel(self) -> None:
         self.dismiss(None)
 
 
-class ConfirmModal(ModalScreen):
+class ConfirmModal(ModalScreen[bool]):
     """Simple yes/no confirmation dialog."""
 
     BINDINGS = [Binding("escape", "dismiss(False)", "Cancel")]
@@ -154,7 +157,7 @@ class ConfirmModal(ModalScreen):
         self.dismiss(False)
 
 
-class TelemetryModal(ModalScreen):
+class TelemetryModal(ModalScreen[None]):
     """Full-screen telemetry viewer for Observer Agent reports."""
 
     BINDINGS = [
@@ -179,7 +182,7 @@ class TelemetryModal(ModalScreen):
         self.dismiss(None)
 
 
-class ConfigModal(ModalScreen):
+class ConfigModal(ModalScreen[None]):
     """Shows current config key/value pairs."""
 
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
@@ -231,7 +234,7 @@ class RepoListPanel(Vertical):
         yield ListView(id="repo-list")
         yield Button("＋  Add Repo", id="repo-add-btn")
 
-    def refresh_repos(self, states: list[dict], select_slug: str | None = None) -> None:
+    def refresh_repos(self, states: list[dict[str, Any]], select_slug: str | None = None) -> None:
         lv = self.query_one("#repo-list", ListView)
         lv.clear()
         if not states:
@@ -258,10 +261,20 @@ class RepoListPanel(Vertical):
     @on(ListView.Selected, "#repo-list")
     def _selected(self, event: ListView.Selected) -> None:
         # Bubble up to app via message
-        self.post_message(self.RepoSelected(event.item.index))
+        idx = 0
+        item = event.item
+        if item is not None:
+            parent = item.parent
+            if isinstance(parent, ListView):
+                try:
+                    idx = parent.children.index(item)
+                except ValueError:
+                    idx = 0
+        self.post_message(self.RepoSelected(idx))
 
-    class RepoSelected:
+    class RepoSelected(Message):
         def __init__(self, index: int) -> None:
+            super().__init__()
             self.index = index
 
 
@@ -292,7 +305,7 @@ class PipelinePanel(Vertical):
         for i, (key, _) in enumerate(_PHASES[1:], start=1):
             try:
                 widget = self.query_one(f"#step-{key}", Static)
-            except Exception:
+            except NoMatches:
                 continue
 
             if i < current_idx:
@@ -310,7 +323,7 @@ class PipelinePanel(Vertical):
         try:
             pb = self.query_one("#pipeline-progress-bar", ProgressBar)
             pb.progress = pct
-        except Exception:
+        except NoMatches:
             pass
 
 
@@ -344,7 +357,7 @@ class MetricsPanel(Vertical):
                     yield ProgressBar(total=100, show_eta=False, classes="metric-bar")
                     yield Static("—%", classes="metric-score")
 
-    def update_metrics(self, metric_report: Optional[dict]) -> None:
+    def update_metrics(self, metric_report: Optional[dict[str, Any]]) -> None:
         if not metric_report:
             return
         metrics = metric_report.get("metrics", [])
@@ -372,8 +385,8 @@ class MetricsPanel(Vertical):
                 row.query_one(".metric-score", Static).update(
                     f"[{score_color}]{score_pct}%[/{score_color}]"
                 )
-            except Exception:
-                pass
+            except NoMatches:
+                continue
 
 
 # ── Widget: Agent Info ────────────────────────────────────────────────────────
@@ -403,20 +416,21 @@ class AgentInfoPanel(Vertical):
                 yield Static("Updated", classes="info-key")
                 yield Static("—", id="info-updated", classes="info-val")
 
-    def update_info(self, state: Optional[dict]) -> None:
+    def update_info(self, state: Optional[dict[str, Any]]) -> None:
         if not state:
             for wid in ["info-branch", "info-model", "info-tasks", "info-subtasks", "info-pr", "info-updated"]:
                 try:
                     self.query_one(f"#{wid}", Static).update("—")
-                except Exception:
-                    pass
+                except NoMatches:
+                    continue
             return
 
         try:
             from gitoma.core.config import load_config
             cfg = load_config()
             model = cfg.lmstudio.model
-        except Exception:
+        except (OSError, ValueError, AttributeError) as exc:
+            logger.debug("Could not load model from config: %s", exc)
             model = "?"
 
         branch = state.get("branch", "—")
@@ -449,8 +463,8 @@ class AgentInfoPanel(Vertical):
         for wid, val in info.items():
             try:
                 self.query_one(f"#{wid}", Static).update(val)
-            except Exception:
-                pass
+            except NoMatches:
+                continue
 
 
 # ── Widget: Event Feed ─────────────────────────────────────────────────────────
@@ -476,14 +490,14 @@ class EventFeed(ScrollableContainer):
             self._events = self._events[-self.MAX_EVENTS :]
         try:
             self.query_one("#event-content", Static).update("\n".join(self._events[-12:]))
-        except Exception:
+        except NoMatches:
             pass
         self.scroll_end(animate=False)
 
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-class GitomaTUI(App):
+class GitomaTUI(App[None]):
     """Gitoma — AI Agent Cockpit TUI."""
 
     CSS_PATH = Path(__file__).parent / "tui_styles.tcss"
@@ -501,8 +515,8 @@ class GitomaTUI(App):
 
     # Reactive: currently selected state index
     _selected_idx: reactive[int] = reactive(0)
-    _states: list[dict]
-    _subprocess: Optional[subprocess.Popen]  # type: ignore[type-arg]
+    _states: list[dict[str, Any]]
+    _subprocess: Optional[subprocess.Popen[str]]
 
     def __init__(self) -> None:
         super().__init__()
@@ -563,9 +577,9 @@ class GitomaTUI(App):
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self._log("◈ Gitoma TUI started", "cyan")
-        self._log(f"◦ Version {_VERSION} · Textual 8.x", "dim")
-        self._log("◦ Press [R] to run agent, [D] for doctor check", "dim")
+        self._log_line("◈ Gitoma TUI started", "cyan")
+        self._log_line(f"◦ Version {_VERSION} · Textual 8.x", "dim")
+        self._log_line("◦ Press [R] to run agent, [D] for doctor check", "dim")
         self.set_interval(0.5, self._poll_states)
         self._poll_states()
 
@@ -581,7 +595,7 @@ class GitomaTUI(App):
         try:
             repo_panel = self.query_one(RepoListPanel)
             repo_panel.refresh_repos(new_states)
-        except Exception:
+        except NoMatches:
             pass
 
         # Update selected state view
@@ -593,13 +607,13 @@ class GitomaTUI(App):
             phase = state.get("phase", "IDLE")
             self._push_event(_PHASE_ICONS.get(phase, "○"), f"Phase → {phase}", "yellow")
 
-    def _get_selected_state(self) -> Optional[dict]:
+    def _get_selected_state(self) -> Optional[dict[str, Any]]:
         if not self._states:
             return None
         idx = min(self._selected_idx, len(self._states) - 1)
         return self._states[idx]
 
-    def _refresh_center(self, state: Optional[dict]) -> None:
+    def _refresh_center(self, state: Optional[dict[str, Any]]) -> None:
         phase = state.get("phase", "IDLE") if state else "IDLE"
 
         # Pipeline progress estimation
@@ -613,7 +627,7 @@ class GitomaTUI(App):
             self.query_one(PipelinePanel).update_phase(phase, pct)
             self.query_one(MetricsPanel).update_metrics(state.get("metric_report") if state else None)
             self.query_one(AgentInfoPanel).update_info(state)
-        except Exception:
+        except NoMatches:
             pass
 
     # ── Actions ───────────────────────────────────────────────────────────────
@@ -626,7 +640,7 @@ class GitomaTUI(App):
         if not result:
             return
         url, _ = result
-        self._log(f"▶ Launching agent run for [cyan]{url}[/cyan]", "yellow")
+        self._log_line(f"▶ Launching agent run for [cyan]{url}[/cyan]", "yellow")
         self._push_event("🚀", f"Run started: {url}", "yellow")
         self._launch_subprocess(["gitoma", "run", url, "--yes"])
 
@@ -641,13 +655,13 @@ class GitomaTUI(App):
         if not branch:
             self._log_warn("⚠  Branch is required for fix-ci")
             return
-        self._log(f"🔧 Launching CI fix for [cyan]{url}[/cyan] @ [yellow]{branch}[/yellow]", "yellow")
+        self._log_line(f"🔧 Launching CI fix for [cyan]{url}[/cyan] @ [yellow]{branch}[/yellow]", "yellow")
         self._push_event("🔧", f"Fix-CI: {url}@{branch}", "yellow")
         self._launch_subprocess(["gitoma", "fix-ci", url, "--branch", branch])
 
     def action_doctor(self) -> None:
         """Run gitoma doctor and stream output to LiveLog."""
-        self._log("🩺 Running doctor check…", "cyan")
+        self._log_line("🩺 Running doctor check…", "cyan")
         self._push_event("🩺", "Doctor check started", "cyan")
         self._launch_subprocess(["gitoma", "doctor"])
 
@@ -658,12 +672,12 @@ class GitomaTUI(App):
         else:
             self._log_warn("⚠  No agent is currently running")
 
-    def _do_stop(self, confirmed: bool) -> None:
+    def _do_stop(self, confirmed: bool | None) -> None:
         if not confirmed:
             return
         if self._subprocess:
             self._subprocess.terminate()
-            self._log("⛔ Agent process terminated", "red")
+            self._log_line("⛔ Agent process terminated", "red")
             self._push_event("⛔", "Agent stopped by user", "red")
 
     def action_telemetry(self) -> None:
@@ -696,23 +710,23 @@ class GitomaTUI(App):
             for line in proc.stdout:
                 line = line.rstrip()
                 if line:
-                    self.call_from_thread(self._log, line, "dim")
+                    self.call_from_thread(self._log_line, line, "dim")
             proc.wait()
             rc = proc.returncode
             if rc == 0:
-                self.call_from_thread(self._log, f"✅ Command finished OK (rc={rc})", "green")
+                self.call_from_thread(self._log_line, f"✅ Command finished OK (rc={rc})", "green")
                 self.call_from_thread(self._push_event, "✅", "Command completed", "green")
             else:
-                self.call_from_thread(self._log, f"⚠  Command exited with rc={rc}", "red")
+                self.call_from_thread(self._log_line, f"⚠  Command exited with rc={rc}", "red")
                 self.call_from_thread(self._push_event, "⚠", f"Command failed (rc={rc})", "red")
         except FileNotFoundError:
             self.call_from_thread(
-                self._log,
+                self._log_line,
                 "⚠  'gitoma' not found in PATH. Is the package installed?",
                 "red",
             )
         except Exception as e:
-            self.call_from_thread(self._log, f"⚠  Error: {e}", "red")
+            self.call_from_thread(self._log_line, f"⚠  Error: {e}", "red")
         finally:
             self._subprocess = None
 
@@ -725,22 +739,22 @@ class GitomaTUI(App):
 
     # ── Log helpers ───────────────────────────────────────────────────────────
 
-    def _log(self, message: str, color: str = "white") -> None:
+    def _log_line(self, message: str, color: str = "white") -> None:
         try:
             log = self.query_one("#live-log", Log)
             ts = _ts()
             log.write_line(f"[dim]{ts}[/dim] [{color}]{message}[/{color}]")
-        except Exception:
+        except NoMatches:
             pass
 
     def _log_warn(self, message: str) -> None:
-        self._log(message, "yellow")
+        self._log_line(message, "yellow")
         self.notify(message, severity="warning")
 
     def _push_event(self, icon: str, message: str, color: str = "cyan") -> None:
         try:
             self.query_one(EventFeed).push_event(icon, message, color)
-        except Exception:
+        except NoMatches:
             pass
 
 

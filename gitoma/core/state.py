@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 STATE_DIR = Path.home() / ".gitoma" / "state"
 
@@ -30,8 +31,8 @@ class AgentState:
     phase: str = AgentPhase.IDLE
     started_at: str = field(default_factory=lambda: _now())
     updated_at: str = field(default_factory=lambda: _now())
-    metric_report: dict | None = None
-    task_plan: dict | None = None
+    metric_report: dict[str, Any] | None = None
+    task_plan: dict[str, Any] | None = None
     pr_number: int | None = None
     pr_url: str | None = None
     current_task_id: str | None = None
@@ -42,11 +43,11 @@ class AgentState:
     def slug(self) -> str:
         return f"{self.owner}__{self.name}"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "AgentState":
+    def from_dict(cls, d: dict[str, Any]) -> "AgentState":
         return cls(**d)
 
     def advance(self, phase: AgentPhase) -> None:

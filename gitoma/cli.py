@@ -6,7 +6,7 @@ import traceback
 import warnings
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Annotated, Generator, Optional, TYPE_CHECKING, NoReturn
+from typing import Annotated, Any, Generator, Optional, TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
     from gitoma.core.config import Config
@@ -82,7 +82,7 @@ def _ok(message: str) -> None:
 
 
 @contextmanager
-def _phase(name: str, cleanup=None) -> Generator[None, None, None]:
+def _phase(name: str, cleanup: "GitRepo | None" = None) -> Generator[None, None, None]:
     """
     Context manager that wraps a pipeline phase.
     On unhandled exception: prints traceback summary, calls cleanup, exits 1.
@@ -147,7 +147,7 @@ def _check_config(require_token: bool = True) -> "Config":
     return cfg
 
 
-def _check_github(config: "Config", owner: str, name: str) -> dict:
+def _check_github(config: "Config", owner: str, name: str) -> "dict[str, Any]":
     """Verify GitHub access and repo existence. Returns repo_info dict."""
     console.print(f"[muted]Verifying GitHub access for {owner}/{name}…[/muted]")
     gh = GitHubClient(config)
@@ -330,10 +330,8 @@ def doctor(
     if cfg and cfg.github.token:
         console.print("\n[heading]③ GitHub API[/heading]")
         try:
-            gh = GitHubClient(cfg)
-            # Try to get authenticated user
             import github
-            
+
             auth = github.Auth.Token(cfg.github.token)
             g = github.Github(auth=auth)
             user = g.get_user()
@@ -618,25 +616,27 @@ def run(
         console.print()
         worker = WorkerAgent(llm=llm, git_repo=git_repo, config=config, state=state)
 
-        def on_task_start(task):
+        from gitoma.planner.task import SubTask, Task
+
+        def on_task_start(task: Task) -> None:
             console.print(
                 f"\n[task.current]▶ {task.id}[/task.current] "
                 f"[bold heading]{task.title}[/bold heading]"
             )
 
-        def on_subtask_start(task, sub):
+        def on_subtask_start(task: Task, sub: SubTask) -> None:
             console.print(
                 f"  [muted]◌ {sub.id}[/muted] [info]{sub.title}[/info] "
                 f"[dim]({config.lmstudio.model} generating…)[/dim]"
             )
 
-        def on_subtask_done(task, sub, sha):
+        def on_subtask_done(task: Task, sub: SubTask, sha: str | None) -> None:
             if sha:
                 print_commit(sha, sub.title, sub.id)
             else:
                 console.print(f"  [warning]◎ {sub.id} — skipped (no file changes)[/warning]")
 
-        def on_subtask_error(task, sub, error):
+        def on_subtask_error(task: Task, sub: SubTask, error: str) -> None:
             console.print(f"  [danger]✗ {sub.id} failed: {error[:120]}[/danger]")
 
         plan = worker.execute(
@@ -874,19 +874,21 @@ def review(
 
     integrator = ReviewIntegrator(llm=llm, git_repo=git_repo, config=config, state=state)
 
-    def on_comment_start(c):
+    from gitoma.core.github_client import ReviewComment
+
+    def on_comment_start(c: ReviewComment) -> None:
         console.print(f"  [info]◌ Comment #{c.id} by [bold]{c.author}[/bold]…[/info]")
         if c.path:
             console.print(f"    [dim]File: {c.path}" + (f":{c.line}" if c.line else "") + "[/dim]")
         console.print(f"    [dim]{c.body[:100].strip()}…[/dim]" if len(c.body) > 100 else f"    [dim]{c.body.strip()}[/dim]")
 
-    def on_comment_done(c, sha):
+    def on_comment_done(c: ReviewComment, sha: str | None) -> None:
         if sha:
             console.print(f"  [commit]⚡ Fixed → commit {sha[:7]}[/commit]")
         else:
             console.print(f"  [warning]◎ Comment #{c.id} — no file changes needed[/warning]")
 
-    def on_comment_error(c, err):
+    def on_comment_error(c: ReviewComment, err: str) -> None:
         console.print(f"  [danger]✗ Comment #{c.id} failed: {err[:120]}[/danger]")
 
     results = integrator.integrate(
@@ -1182,7 +1184,7 @@ def sandbox_cmd(
             run(
                 repo_url=repo_url,
                 dry_run=False,
-                branch=None,
+                branch="",
                 base=None,
                 resume=True,
                 reset_state=False,
@@ -1267,6 +1269,36 @@ def tui() -> None:
         )
         raise typer.Exit(1)
     run_tui()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gitoma mcp
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command(name="mcp")
+def mcp_cmd() -> None:
+    """
+    🔗  Run the Gitoma GitHub MCP server on stdio.
+
+    Exposes read_github_file, list_repo_tree, get_ci_failures and other GitHub
+    context tools to any MCP-capable client (Claude Desktop, MCP Inspector, ...).
+    """
+    try:
+        from gitoma.mcp.server import get_mcp_server
+    except ImportError as exc:
+        console.print(
+            f"[danger]MCP server unavailable: {exc}[/danger]\n"
+            "[muted]Install it with: [primary]pip install 'mcp[cli]>=1.0'[/primary][/muted]"
+        )
+        raise typer.Exit(1)
+
+    _check_config()
+    console.print("[info]🔗 Gitoma GitHub MCP server running on stdio[/info]")
+    console.print("[muted]  Ctrl-C to stop.[/muted]")
+    try:
+        get_mcp_server().run()
+    except KeyboardInterrupt:
+        console.print("\n[muted]MCP server stopped.[/muted]")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

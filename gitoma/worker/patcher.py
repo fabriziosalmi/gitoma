@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pathlib import Path
 
 
@@ -9,7 +11,7 @@ class PatchError(Exception):
     pass
 
 
-def apply_patches(root: Path, patches: list[dict]) -> list[str]:
+def apply_patches(root: Path, patches: list[dict[str, Any]]) -> list[str]:
     """
     Apply a list of file patches to the repo working tree.
 

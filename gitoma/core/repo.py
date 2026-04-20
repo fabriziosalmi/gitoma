@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import os
 import shutil
 import tempfile
@@ -187,7 +189,7 @@ class GitRepo:
     def has_uncommitted_changes(self) -> bool:
         return self.repo.is_dirty(untracked_files=True)
 
-    def log(self, n: int = 10) -> list[dict]:
+    def log(self, n: int = 10) -> list[dict[str, Any]]:
         """Return last N commits as dicts."""
         commits = []
         for c in list(self.repo.iter_commits())[:n]:

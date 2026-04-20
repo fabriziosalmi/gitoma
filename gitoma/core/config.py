@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import toml
 from dotenv import load_dotenv
@@ -61,7 +62,7 @@ def load_config() -> Config:
     load_dotenv()  # local .env if present
 
     # Load TOML config
-    raw: dict = {}
+    raw: dict[str, Any] = {}
     if CONFIG_FILE.exists():
         raw = toml.load(CONFIG_FILE)
 
@@ -98,7 +99,7 @@ def load_config() -> Config:
 def save_config_value(key: str, value: str) -> None:
     """Persist a key=value to ~/.gitoma/config.toml."""
     GITOMA_DIR.mkdir(parents=True, exist_ok=True)
-    raw: dict = {}
+    raw: dict[str, Any] = {}
     if CONFIG_FILE.exists():
         raw = toml.load(CONFIG_FILE)
 

@@ -32,7 +32,13 @@ dependencies = [
 gitoma = "gitoma.cli:app"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.9"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "types-toml>=0.10",
+    "types-requests>=2.31",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -41,6 +47,11 @@ include = ["gitoma*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# cli.py silences urllib3 warnings before the stdlib/third-party imports — the
+# order is intentional so E402 must not be enforced here.
+"gitoma/cli.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.12"

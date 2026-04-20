@@ -7,7 +7,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.tree import Tree
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from gitoma.core.state import AgentState
@@ -24,7 +24,7 @@ def print_banner(version: str = "0.1.0") -> None:
     console.print()
 
 
-def print_repo_info(info: dict) -> None:
+def print_repo_info(info: dict[str, Any]) -> None:
     """Print a repo metadata panel."""
     items = [
         f"[heading]📦 {info['full_name']}[/heading]",
@@ -171,7 +171,7 @@ def print_status_panel(state: "AgentState") -> None:  # noqa: F821
         AgentPhase.DONE: "[success]DONE ✅[/success]",
     }
 
-    phase_label = phase_colors.get(state.phase, str(state.phase))
+    phase_label = phase_colors.get(AgentPhase(state.phase), str(state.phase))
 
     lines = [
         f"[heading]{state.owner}/{state.name}[/heading]",
