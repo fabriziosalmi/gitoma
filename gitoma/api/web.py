@@ -875,6 +875,7 @@ const API = {
   fixCi(repoUrl, branch) { return this._fetch("POST", "/fix-ci", { repo_url: repoUrl, branch }); },
   reset(owner, name) { return this._fetch("DELETE", `/state/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`); },
   jobs() { return this._fetch("GET", "/jobs"); },
+  cancel(jobId) { return this._fetch("POST", `/jobs/${encodeURIComponent(jobId)}/cancel`); },
   health() { return this._fetch("GET", "/health"); },
 };
 
@@ -937,6 +938,7 @@ const LogStream = {
     $("log-card").classList.add("open");
     $("log-title").textContent = `Live Output — ${label}`;
     this._setStatus("running");
+    $("log-stop").hidden = false;
     const pre = $("log-stream");
     pre.innerHTML = "";
     this._autoScroll = true;
@@ -948,6 +950,23 @@ const LogStream = {
       this._appendRaw(`[stream error] ${err.message || err}`, "error");
       this._setStatus("fail");
     });
+  },
+
+  async stop() {
+    if (!this.jobId) return;
+    try {
+      await API.cancel(this.jobId);
+      Toast.info("Cancelling…", `Signal sent to job ${this.jobId.slice(0, 8)}`);
+    } catch (err) {
+      if (err.status === 409) {
+        Toast.info("Already finished", err.message || "");
+      } else if (err.status === 401 || err.status === 403) {
+        Toast.error("Auth failed", "Re-enter the API token.");
+        openDialog("token-dialog");
+      } else {
+        Toast.error("Cancel failed", err.message || "Unknown error");
+      }
+    }
   },
 
   close() {
@@ -1028,6 +1047,8 @@ const LogStream = {
     const pill = $("log-status");
     pill.className = "status-pill " + (kind === "done" ? "done" : kind === "fail" ? "fail" : "");
     $("log-status-label").textContent = label || kind;
+    // Hide Stop button whenever we leave the running state.
+    if (kind !== "running") $("log-stop").hidden = true;
   },
 };
 
@@ -1515,6 +1536,7 @@ function init() {
   $("jobs-badge").addEventListener("click", refreshJobs);
   $("reset-btn").addEventListener("click", confirmAndReset);
   $("log-close").addEventListener("click", () => LogStream.hide());
+  $("log-stop").addEventListener("click", () => LogStream.stop());
 
   wireDialogs();
   wirePalette();
@@ -1624,6 +1646,10 @@ _DASHBOARD_BODY = """
           <svg class="icon"><use href="#icon-terminal"/></svg>
           <span class="title" id="log-title">Live Output</span>
           <span id="log-status" class="status-pill"><span class="dot"></span><span id="log-status-label">running</span></span>
+          <button id="log-stop" class="btn btn--sm close-log" aria-label="Stop running job" title="Stop" hidden>
+            <svg class="icon"><use href="#icon-x"/></svg>
+            Stop
+          </button>
           <button id="log-close" class="btn btn--ghost btn--icon btn--sm close-log" aria-label="Close live output" title="Close">
             <svg class="icon"><use href="#icon-x"/></svg>
           </button>

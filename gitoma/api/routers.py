@@ -66,6 +66,12 @@ _LOG_BUFFER_LINES = 500
 _SUBSCRIBER_QUEUE_DEPTH = 1000
 _END_SENTINEL = "__END__"
 
+# Long-lived server hygiene: we never want _JOBS to grow unboundedly, so
+# finished records are evicted after this TTL or when the cap is exceeded
+# (oldest finished first; running jobs are never evicted).
+MAX_JOBS = 50
+JOB_TTL_SECONDS = 900  # 15 min
+
 
 @dataclass
 class JobRecord:
@@ -83,6 +89,9 @@ class JobRecord:
         default_factory=lambda: _dt.datetime.now(_dt.timezone.utc)
     )
     finished_at: _dt.datetime | None = None
+    # Populated by `_dispatch` — lets `/jobs/{id}/cancel` and the shutdown
+    # hook abort the running subprocess cleanly.
+    task: "asyncio.Task[None] | None" = None
 
     @property
     def is_terminal(self) -> bool:
@@ -91,6 +100,34 @@ class JobRecord:
 
 # Keyed by job_id. In production this would be a durable store.
 _JOBS: dict[str, JobRecord] = {}
+
+
+def _evict_stale() -> None:
+    """Drop finished jobs past their TTL, then enforce the hard cap.
+
+    Running jobs are never evicted — they are still producing output and may
+    have active SSE subscribers. Only finished/failed/cancelled records are
+    eligible. Called lazily from `_dispatch` so every new job pays for a
+    single small sweep rather than needing a background timer.
+    """
+    now = _dt.datetime.now(_dt.timezone.utc)
+    cutoff = now - _dt.timedelta(seconds=JOB_TTL_SECONDS)
+    # 1. TTL eviction
+    for jid, job in list(_JOBS.items()):
+        if job.is_terminal and job.finished_at and job.finished_at < cutoff:
+            _JOBS.pop(jid, None)
+
+    # 2. Hard cap — drop oldest terminal records first
+    if len(_JOBS) <= MAX_JOBS:
+        return
+    terminal_by_age = sorted(
+        (job for job in _JOBS.values() if job.is_terminal),
+        key=lambda j: j.finished_at or j.created_at,
+    )
+    for job in terminal_by_age:
+        if len(_JOBS) <= MAX_JOBS:
+            return
+        _JOBS.pop(job.id, None)
 
 
 # ── CLI resolution ───────────────────────────────────────────────────────────
@@ -159,7 +196,21 @@ async def _spawn_cli_job(job: JobRecord) -> None:
             _publish(job, line)
         rc = await proc.wait()
     except asyncio.CancelledError:
+        # Cancel requested (via /cancel or server shutdown): SIGTERM the
+        # subprocess, give it 5 s to exit, then SIGKILL. Always set a
+        # terminal status + end sentinel so subscribers don't hang.
         proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            proc.kill()
+            try:
+                await proc.wait()
+            except asyncio.CancelledError:
+                pass
+        job.status = "cancelled"
+        job.finished_at = _dt.datetime.now(_dt.timezone.utc)
+        _publish(job, f"{_END_SENTINEL}:cancelled")
         raise
     except Exception as exc:
         logger.exception("Job %s (%s) crashed", job.id, job.label)
@@ -176,11 +227,32 @@ async def _spawn_cli_job(job: JobRecord) -> None:
 
 def _dispatch(label: str, argv: list[str]) -> JobRecord:
     """Register a new job and schedule it on the event loop."""
+    _evict_stale()
     job_id = str(uuid.uuid4())
     job = JobRecord(id=job_id, label=label, argv=argv)
     _JOBS[job_id] = job
-    asyncio.create_task(_spawn_cli_job(job))
+    job.task = asyncio.create_task(_spawn_cli_job(job))
     return job
+
+
+async def cancel_all_jobs() -> None:
+    """Cancel every running task and wait briefly for cleanup.
+
+    Called from the app lifespan shutdown handler so the server exits
+    without leaving orphan gitoma subprocesses behind.
+    """
+    victims = [job for job in _JOBS.values() if job.task and not job.task.done()]
+    for job in victims:
+        assert job.task is not None
+        job.task.cancel()
+    for job in victims:
+        assert job.task is not None
+        try:
+            await asyncio.wait_for(job.task, timeout=6.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            logger.debug("Exception while draining cancelled job %s", job.id, exc_info=True)
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -246,6 +318,22 @@ def get_job_status(job_id: str) -> dict[str, str]:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job.id, "status": job.status, "label": job.label}
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str) -> dict[str, str]:
+    """Cancel a running job — SIGTERM the subprocess, set status=cancelled.
+
+    Idempotent-ish: calling on an already-terminal job returns 409 so the
+    client can distinguish "nothing to do" from "just cancelled".
+    """
+    job = _JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.is_terminal or job.task is None or job.task.done():
+        raise HTTPException(status_code=409, detail=f"Job is already {job.status}")
+    job.task.cancel()
+    return {"job_id": job.id, "status": "cancelling"}
 
 
 @router.get("/jobs")

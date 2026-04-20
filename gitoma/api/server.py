@@ -1,12 +1,24 @@
 """FastAPI application initialization."""
 
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
 from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from gitoma import __version__
-from gitoma.api.routers import router
+from gitoma.api.routers import cancel_all_jobs, router
 from gitoma.api.web import web_router
 from gitoma.core.config import load_config
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """App-wide lifespan. On shutdown, reap any running CLI subprocesses so
+    the server doesn't leave orphan `gitoma` processes behind."""
+    yield
+    await cancel_all_jobs()
+
 
 # Setup Authentication Schema
 auth_scheme = HTTPBearer()
@@ -37,6 +49,7 @@ app = FastAPI(
     title="Gitoma API",
     description="Autonomous GitHub Agent API. Triggers local LLM agents to repair and review repositories.",
     version=__version__,
+    lifespan=lifespan,
 )
 
 # /api/v1/* — Bearer-protected REST
