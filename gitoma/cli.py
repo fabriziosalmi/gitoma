@@ -512,10 +512,13 @@ def run(
                     description=f"[heading]{analyzer_name}[/heading]",
                     advance=1,
                 )
+                state.current_operation = f"Analyzing: {analyzer_name}"
+                save_state(state)
 
             report = registry.run(on_progress=on_progress)
 
         state.metric_report = report.to_dict()
+        state.current_operation = "Analysis complete"
         state.advance(AgentPhase.PLANNING)
         save_state(state)
 
@@ -529,6 +532,7 @@ def run(
             )
         )
         _safe_cleanup(git_repo)
+        state.current_operation = "All metrics already pass"
         state.advance(AgentPhase.DONE)
         save_state(state)
         return
@@ -543,6 +547,8 @@ def run(
         console.print(
             f"[muted]Asking {config.lmstudio.model} to generate improvement plan…[/muted]"
         )
+        state.current_operation = f"Planning with {config.lmstudio.model}"
+        save_state(state)
         file_tree = git_repo.file_tree(max_files=100)
         planner = PlannerAgent(llm)
 
@@ -570,6 +576,7 @@ def run(
             return
 
         state.task_plan = plan.to_dict()
+        state.current_operation = f"Plan ready — {plan.total_tasks} tasks, {plan.total_subtasks} subtasks"
         state.advance(AgentPhase.WORKING)
         save_state(state)
 
@@ -619,12 +626,16 @@ def run(
         from gitoma.planner.task import SubTask, Task
 
         def on_task_start(task: Task) -> None:
+            state.current_operation = f"Task {task.id}: {task.title}"
+            save_state(state)
             console.print(
                 f"\n[task.current]▶ {task.id}[/task.current] "
                 f"[bold heading]{task.title}[/bold heading]"
             )
 
         def on_subtask_start(task: Task, sub: SubTask) -> None:
+            state.current_operation = f"{sub.id}: {sub.title} — {config.lmstudio.model} generating"
+            save_state(state)
             console.print(
                 f"  [muted]◌ {sub.id}[/muted] [info]{sub.title}[/info] "
                 f"[dim]({config.lmstudio.model} generating…)[/dim]"
@@ -632,11 +643,17 @@ def run(
 
         def on_subtask_done(task: Task, sub: SubTask, sha: str | None) -> None:
             if sha:
+                state.current_operation = f"{sub.id} committed → {sha[:7]}"
+                save_state(state)
                 print_commit(sha, sub.title, sub.id)
             else:
+                state.current_operation = f"{sub.id} skipped (no changes)"
+                save_state(state)
                 console.print(f"  [warning]◎ {sub.id} — skipped (no file changes)[/warning]")
 
         def on_subtask_error(task: Task, sub: SubTask, error: str) -> None:
+            state.current_operation = f"{sub.id} FAILED: {error[:80]}"
+            save_state(state)
             console.print(f"  [danger]✗ {sub.id} failed: {error[:120]}[/danger]")
 
         plan = worker.execute(
@@ -675,6 +692,8 @@ def run(
         from gitoma.pr.pr_agent import PRAgent
 
         console.print(f"[muted]Pushing {branch} to origin and opening PR…[/muted]")
+        state.current_operation = f"Pushing branch {branch} to origin"
+        save_state(state)
         pr_agent = PRAgent(git_repo=git_repo, gh_client=gh, config=config, state=state)
 
         try:
@@ -707,6 +726,7 @@ def run(
 
     print_pr_panel(pr_info.url, pr_info.number, branch)
 
+    state.current_operation = f"PR #{pr_info.number} opened"
     state.advance(AgentPhase.PR_OPEN)
     save_state(state)
     _safe_cleanup(git_repo)

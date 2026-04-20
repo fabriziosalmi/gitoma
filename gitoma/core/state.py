@@ -37,6 +37,11 @@ class AgentState:
     pr_url: str | None = None
     current_task_id: str | None = None
     current_subtask_id: str | None = None
+    # Human-readable description of what the agent is doing RIGHT NOW.
+    # Fills the gaps between coarse-grained `phase` transitions (e.g. the
+    # silent period between "last subtask committed" and "PR opened"), so
+    # the cockpit always has a sentence to show.
+    current_operation: str = ""
     errors: list[str] = field(default_factory=list)
 
     @property

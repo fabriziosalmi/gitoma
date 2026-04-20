@@ -428,6 +428,93 @@ main {
   .banner .body { flex-basis: 100%; }
 }
 
+/* ── Task plan list ────────────────────────────────────────────────────── */
+.task-list { display: flex; flex-direction: column; gap: 6px; }
+.task-row {
+  display: grid;
+  grid-template-columns: 20px 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: background .12s, border-color .12s;
+}
+.task-row.completed { opacity: 0.75; }
+.task-row.in_progress {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.task-row.failed {
+  border-color: rgba(239,68,68,0.35);
+  background: var(--fail-soft);
+}
+.task-row .badge {
+  width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-card); border: 1px solid var(--border);
+  font-size: 10px; font-weight: 600; color: var(--fg-mid);
+  font-variant-numeric: tabular-nums;
+}
+.task-row.completed .badge {
+  background: var(--ok-soft); border-color: rgba(34,197,94,0.3); color: var(--ok);
+}
+.task-row.in_progress .badge {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+}
+.task-row.failed .badge {
+  background: var(--fail-soft); border-color: rgba(239,68,68,0.35); color: var(--fail);
+}
+.task-row .title {
+  font-size: 12.5px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.task-row.completed .title { text-decoration: line-through; color: var(--fg-mid); }
+.task-row .progress {
+  font-size: 11px; color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.task-row .status-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
+  padding: 2px 7px; border-radius: 3px;
+  background: var(--bg-card); color: var(--fg-mid);
+  border: 1px solid var(--border);
+  text-transform: uppercase;
+}
+.task-row .status-pill .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fg-faint); }
+.task-row.completed   .status-pill { color: var(--ok); border-color: rgba(34,197,94,0.3); }
+.task-row.completed   .status-pill .dot { background: var(--ok); }
+.task-row.in_progress .status-pill { color: var(--accent); border-color: var(--accent); }
+.task-row.in_progress .status-pill .dot { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+.task-row.failed      .status-pill { color: var(--fail); border-color: rgba(239,68,68,0.35); }
+.task-row.failed      .status-pill .dot { background: var(--fail); }
+.current-op-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.current-op-row .icon { width: 14px; height: 14px; color: var(--accent); flex-shrink: 0; }
+.current-op-row .icon.spin { animation: spin 2.5s linear infinite; }
+.current-op-row .op-text {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 12px;
+}
+.current-op-row .age {
+  font-size: 11px; color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.current-op-row .age.warn { color: var(--warn); }
+.current-op-row .age.fail { color: var(--fail); }
+
 /* ── Live log stream ───────────────────────────────────────────────────── */
 .log-card { display: none; }
 .log-card.open { display: block; }
@@ -1136,6 +1223,8 @@ function renderDetail(state) {
     keys.forEach((k) => ($("info-" + k).textContent = "—"));
     renderPipeline("IDLE");
     $("reset-btn").disabled = true;
+    $("current-op-row").hidden = true;
+    $("task-plan-card").hidden = true;
     return;
   }
   $("info-repo").textContent = `${state.owner}/${state.name}`;
@@ -1155,6 +1244,82 @@ function renderDetail(state) {
   $("info-updated").textContent = updated ? updated.slice(11, 19) : "—";
   renderPipeline(state.phase);
   $("reset-btn").disabled = false;
+  renderCurrentOp(state);
+  renderTaskPlan(state);
+}
+
+function _ageBucket(ms) {
+  // returns {text, kind} — kind is "" | "warn" | "fail"
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return { text: `${secs}s ago`, kind: "" };
+  const mins = Math.floor(secs / 60);
+  if (mins < 3) return { text: `${mins}m ago`, kind: "" };
+  if (mins < 10) return { text: `${mins}m ago`, kind: "warn" };
+  if (mins < 60) return { text: `${mins}m ago`, kind: "fail" };
+  const hrs = Math.floor(mins / 60);
+  return { text: `${hrs}h ago`, kind: "fail" };
+}
+
+function renderCurrentOp(state) {
+  const row = $("current-op-row");
+  const phase = state.phase || "IDLE";
+  const terminal = phase === "DONE";
+  const op = state.current_operation || "";
+
+  // Hide the row if there's no activity signal and we're in a terminal state.
+  if (!op && terminal) {
+    row.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  $("current-op-text").textContent = op || `${phase.replace("_", " ")} — awaiting`;
+
+  // Age based on updated_at
+  const ageEl = $("current-op-age");
+  if (state.updated_at) {
+    const ms = Date.now() - new Date(state.updated_at).getTime();
+    const { text, kind } = _ageBucket(ms);
+    ageEl.textContent = text;
+    ageEl.className = "age" + (kind ? " " + kind : "");
+  } else {
+    ageEl.textContent = "—";
+    ageEl.className = "age";
+  }
+
+  // Spin the icon only while actively progressing (non-terminal phases).
+  const icon = $("current-op-icon");
+  icon.classList.toggle("spin", !terminal);
+}
+
+function renderTaskPlan(state) {
+  const card = $("task-plan-card");
+  const plan = state.task_plan || {};
+  const tasks = plan.tasks || [];
+  if (!tasks.length) { card.hidden = true; return; }
+
+  card.hidden = false;
+  $("task-plan-count").textContent = `${tasks.filter(t => t.status === "completed").length}/${tasks.length}`;
+
+  const host = $("task-list");
+  host.innerHTML = tasks.map((t, i) => {
+    const status = t.status || "pending";
+    const subs = t.subtasks || [];
+    const doneSubs = subs.filter(s => s.status === "completed").length;
+    const failedSubs = subs.filter(s => s.status === "failed").length;
+    const rowCls = "task-row " + status;
+    const pillLabel = status === "in_progress" ? "RUNNING"
+                    : status === "completed"  ? "DONE"
+                    : status === "failed"     ? "FAILED"
+                    : status === "skipped"    ? "SKIPPED"
+                    : "PENDING";
+    const progressText = subs.length ? `${doneSubs}/${subs.length}${failedSubs ? ` · ${failedSubs} failed` : ""}` : "";
+    return `<div class="${rowCls}" title="${escape(t.description || "")}">
+      <span class="badge">${i + 1}</span>
+      <span class="title">${escape(t.title || t.id || "—")}</span>
+      <span class="progress">${progressText}</span>
+      <span class="status-pill"><span class="dot"></span>${pillLabel}</span>
+    </div>`;
+  }).join("");
 }
 
 function renderAll() {
@@ -1239,6 +1404,13 @@ function startJobPolling() {
   refreshJobs();
   JOB_POLL = setInterval(refreshJobs, 3000);
 }
+
+// Refresh the "Xm ago" age indicator every 10 s even if the WS frame
+// hasn't changed, so a stuck run visibly ages.
+setInterval(() => {
+  const state = STATES[SELECTED];
+  if (state) renderCurrentOp(state);
+}, 10000);
 
 function stopJobPolling() {
   if (JOB_POLL) { clearInterval(JOB_POLL); JOB_POLL = null; }
@@ -1685,11 +1857,27 @@ _DASHBOARD_BODY = """
             <div class="kpi"><div class="k">Updated</div><div class="v mono" id="info-updated">—</div></div>
           </div>
         </div>
+        <div id="current-op-row" class="current-op-row" style="margin:0 14px 12px;" hidden>
+          <svg class="icon spin" id="current-op-icon"><use href="#icon-phase-working"/></svg>
+          <span class="op-text" id="current-op-text">—</span>
+          <span class="age" id="current-op-age">—</span>
+        </div>
         <div class="card-actions">
           <button id="reset-btn" class="btn btn--sm" disabled>
             <svg class="icon"><use href="#icon-trash"/></svg>
             Reset state
           </button>
+        </div>
+      </section>
+
+      <section id="task-plan-card" class="card" hidden>
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-phase-planning"/></svg>
+          <span class="title">Task Plan</span>
+          <span id="task-plan-count" class="count">0</span>
+        </div>
+        <div class="card-body">
+          <div id="task-list" class="task-list"></div>
         </div>
       </section>
 

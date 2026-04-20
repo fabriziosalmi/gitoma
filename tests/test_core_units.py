@@ -80,6 +80,15 @@ def test_agent_state_roundtrip_via_dict():
     assert restored.slug == "o__r"
 
 
+def test_agent_state_current_operation_is_persisted():
+    """current_operation must survive disk persistence so the cockpit can
+    read "what's happening now" between coarse phase transitions."""
+    s = AgentState(repo_url="u", owner="o", name="r", branch="b")
+    s.current_operation = "Pushing branch gitoma/improve-2026"
+    restored = AgentState.from_dict(s.to_dict())
+    assert restored.current_operation == "Pushing branch gitoma/improve-2026"
+
+
 # ── parse_repo_url ────────────────────────────────────────────────────────────
 
 

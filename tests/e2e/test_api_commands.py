@@ -155,3 +155,19 @@ def test_dashboard_has_mobile_viewport():
     body = client.get("/").text
     assert 'viewport' in body
     assert 'width=device-width' in body
+
+
+def test_dashboard_ships_current_op_and_task_plan_widgets():
+    """Current-op row + task-plan card make run progress visible between
+    coarse phase transitions. Regression guard for the `cosa sta facendo?` UX fix."""
+    body = client.get("/").text
+    # Current operation row (shows what the agent is doing right now)
+    assert 'id="current-op-row"' in body
+    assert 'id="current-op-text"' in body
+    assert 'id="current-op-age"' in body
+    # Task plan card (shows the full plan with per-task status)
+    assert 'id="task-plan-card"' in body
+    assert 'id="task-list"' in body
+    # JS hooks
+    assert "renderCurrentOp" in body
+    assert "renderTaskPlan" in body
