@@ -41,6 +41,8 @@ def test_e2e_json_hallucination_recovery(mocker, base_config):
 
     # Temporarily override sleep so test runs instantly without exponential backoff
     mocker.patch("time.sleep", return_value=None)
+    # Isolate the Observer so its internal LLM call doesn't pollute the call count
+    mocker.patch("gitoma.review.observer.ObserverAgent.analyze_session", return_value=None)
 
     agent = CIDiagnosticAgent(base_config)
     
@@ -78,6 +80,8 @@ def test_e2e_critic_agent_rejection_loop(mocker, base_config, capsys):
     ]
 
     mocker.patch("time.sleep", return_value=None)
+    # Isolate the Observer so its internal LLM call doesn't pollute the call count
+    mocker.patch("gitoma.review.observer.ObserverAgent.analyze_session", return_value=None)
 
     agent = CIDiagnosticAgent(base_config)
     agent.fixer_llm.chat = mock_fixer

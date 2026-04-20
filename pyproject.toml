@@ -7,7 +7,7 @@ name = "gitoma"
 version = "0.1.0"
 description = "AI-powered GitHub repository improvement agent — analyzes, plans, commits, and opens PRs autonomously"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "FabGPT", email = "fabgpt.inbox@gmail.com" }]
 keywords = ["github", "ai", "agent", "cli", "automation", "bot"]
@@ -24,6 +24,8 @@ dependencies = [
     "radon>=6.0",
     "fastapi>=0.111.0",
     "uvicorn>=0.30.0",
+    "textual>=0.60",
+    "mcp[cli]>=1.0",
 ]
 
 [project.scripts]

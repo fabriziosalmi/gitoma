@@ -16,6 +16,9 @@ Requires-Dist: toml>=0.10
 Requires-Dist: python-dotenv>=1.0
 Requires-Dist: httpx>=0.27
 Requires-Dist: radon>=6.0
+Requires-Dist: fastapi>=0.111.0
+Requires-Dist: uvicorn>=0.30.0
+Requires-Dist: textual>=0.60
 Provides-Extra: dev
 Requires-Dist: pytest>=8; extra == "dev"
 Requires-Dist: ruff>=0.4; extra == "dev"
@@ -130,10 +133,29 @@ gitoma review https://github.com/owner/repo
 gitoma review https://github.com/owner/repo --integrate
 ```
 
+### Auto-Remediate CI/CD Failures (Reflexion Agent)
+
+```bash
+# Auto-detect broken GitHub Actions jobs, stream logs to LLM, evaluate, and push fix
+gitoma fix-ci https://github.com/owner/repo --branch <target-branch>
+```
+
 ### Reset state
 
 ```bash
 gitoma reset https://github.com/owner/repo
+```
+
+### Run REST API Server (FastAPI)
+
+Unleash the full async REST API server to trigger jobs via VPN or automation layers.
+
+```bash
+# Secure the API by putting GITOMA_API_TOKEN in your .env
+gitoma serve --port 8000
+
+# Endpoint available at: http://localhost:8000/api/v1/health
+# Swagger Docs available at: http://localhost:8000/docs
 ```
 
 ---
@@ -147,7 +169,8 @@ gitoma run <url>
   ├─ Phase 2: PLAN       — LLM (gemma via LM Studio) → structured TaskPlan
   ├─ Phase 3: EXECUTE    — LLM generates patches → git commit per subtask
   ├─ Phase 4: PR         — push branch + open GitHub PR
-  └─ Phase 5: REVIEW     — CopilotWatcher → integrate comments → push fixes
+  ├─ Phase 5: REVIEW     — CopilotWatcher → integrate comments → push fixes
+  └─ Phase 6: FIX-CI     — Reflexion Dual-Agent (Fixer + Critic) remediates broken workflows
 ```
 
 ### Design patterns
@@ -156,9 +179,10 @@ gitoma run <url>
 |---|---|
 | Strategy | LLM client (swappable backend) |
 | Pipeline | Analyzer → Planner → Worker → PR → Watcher |
+| Async Worker | FastAPI BackgroundTasks for REST endpoints |
 | State Machine | IDLE → ANALYZING → PLANNING → WORKING → PR_OPEN → REVIEWING → DONE |
 | Command | Each SubTask is an executable + replayable unit |
-| Observer | CopilotWatcher polls and emits events |
+| Observer | Meta-Cognitive architectural analysis on telemetry |
 | Repository | GitRepo abstracts GitPython + GitHub API |
 | Factory | LLMClient wraps OpenAI-compat API |
 

@@ -7,6 +7,9 @@ toml>=0.10
 python-dotenv>=1.0
 httpx>=0.27
 radon>=6.0
+fastapi>=0.111.0
+uvicorn>=0.30.0
+textual>=0.60
 
 [dev]
 pytest>=8
