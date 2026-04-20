@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import threading
 import traceback
@@ -32,9 +33,11 @@ from gitoma.core.repo import GitRepo, parse_repo_url
 from gitoma.core.state import (
     AgentPhase,
     AgentState,
+    acquire_run_lock,
     delete_state,
     list_all_states,
     load_state,
+    release_run_lock,
     save_state,
 )
 from gitoma.ui.console import console
@@ -589,6 +592,24 @@ def run(
     # ── Pre-flight ──────────────────────────────────────────────────────────
     config = _check_config()
     owner, name = parse_repo_url(repo_url)
+
+    # ── Concurrent-run lock ────────────────────────────────────────────────
+    # Prevent two parallel `gitoma run` invocations on the same repo from
+    # corrupting each other's state. The lock is released at the end of
+    # this function (and cleaned up automatically if this PID dies).
+    acquired, holder_pid = acquire_run_lock(owner, name)
+    if not acquired:
+        _abort(
+            f"Another gitoma run is already active for {owner}/{name} (pid {holder_pid}).",
+            hint=(
+                "Wait for it to finish, or delete "
+                f"~/.gitoma/state/{owner}__{name}.lock if you know the other process is gone."
+            ),
+        )
+    # atexit guarantees release on every normal exit path (typer.Exit, sys.exit,
+    # graceful SIGTERM). Hard kills leave a stale lock behind which the next
+    # `acquire_run_lock` will detect and take over.
+    atexit.register(release_run_lock, owner, name)
 
     # ── Existing state guard ────────────────────────────────────────────────
     existing_state = load_state(owner, name)

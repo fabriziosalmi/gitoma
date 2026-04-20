@@ -141,3 +141,75 @@ def list_all_states() -> list[AgentState]:
         except Exception:
             pass
     return states
+
+
+# ── Concurrent-run lock ─────────────────────────────────────────────────────
+
+
+def _lock_path(owner: str, name: str) -> Path:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return STATE_DIR / f"{owner}__{name}.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    """True iff `pid` is a currently-running process on this machine."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def acquire_run_lock(owner: str, name: str) -> tuple[bool, int | None]:
+    """Try to grab the lock for (owner, name).
+
+    Returns ``(True, None)`` on success. On failure, returns
+    ``(False, existing_pid)`` so callers can tell the user who's holding
+    it. A stale lock (whose PID is no longer alive) is silently taken
+    over — otherwise a crash would leave you locked out forever.
+    """
+    path = _lock_path(owner, name)
+    my_pid = os.getpid()
+
+    # O_EXCL → atomic create. If it exists, we race-check the stale case.
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        try:
+            existing_raw = path.read_text().strip()
+            existing = int(existing_raw) if existing_raw else -1
+        except (OSError, ValueError):
+            existing = -1
+        if existing > 0 and _pid_alive(existing) and existing != my_pid:
+            return False, existing
+        # Stale — take it over by rewriting.
+        try:
+            path.write_text(str(my_pid))
+        except OSError:
+            return False, existing if existing > 0 else None
+        return True, None
+
+    with os.fdopen(fd, "w") as f:
+        f.write(str(my_pid))
+    return True, None
+
+
+def release_run_lock(owner: str, name: str) -> None:
+    """Release the lock if we own it. Never raises."""
+    path = _lock_path(owner, name)
+    my_pid = os.getpid()
+    try:
+        existing = int(path.read_text().strip())
+    except (OSError, ValueError):
+        return
+    if existing == my_pid:
+        try:
+            path.unlink()
+        except OSError:
+            pass
