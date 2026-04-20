@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -44,6 +46,15 @@ class AgentState:
     current_operation: str = ""
     errors: list[str] = field(default_factory=list)
 
+    # Liveness fields — let observers (cockpit, `gitoma doctor --runs`)
+    # distinguish a run that's actively progressing from one whose CLI
+    # died without a chance to persist a terminal state.
+    # `pid` is the OS PID of the CLI process owning this run.
+    # `last_heartbeat` is refreshed by a daemon thread every ~30 s, so a
+    # stale timestamp + dead PID means the process crashed / was killed.
+    pid: int | None = None
+    last_heartbeat: str = ""
+
     @property
     def slug(self) -> str:
         return f"{self.owner}__{self.name}"
@@ -53,7 +64,12 @@ class AgentState:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "AgentState":
-        return cls(**d)
+        # Tolerate older state files that are missing fields we've added
+        # later (pid, last_heartbeat, current_operation…) and ignore
+        # unknown keys so a forward-compatible rollback doesn't crash.
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in d.items() if k in known}
+        return cls(**filtered)
 
     def advance(self, phase: AgentPhase) -> None:
         self.phase = phase
@@ -70,10 +86,33 @@ def _state_path(owner: str, name: str) -> Path:
 
 
 def save_state(state: AgentState) -> None:
-    """Persist state to disk."""
+    """Persist state to disk atomically.
+
+    The CLI (main thread) and the heartbeat daemon both call this, so a
+    naive `write_text` can truncate the file mid-write and leave an
+    observer with invalid JSON. We write to a sibling temp file and
+    `os.replace` it over the real path — atomic on every POSIX filesystem
+    (and on NTFS via MoveFileEx).
+    """
     state.updated_at = _now()
     path = _state_path(state.owner, state.name)
-    path.write_text(json.dumps(state.to_dict(), indent=2))
+    data = json.dumps(state.to_dict(), indent=2)
+    # tempfile in the same dir so os.replace stays on-device.
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{state.slug}.", suffix=".json.tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        # Best-effort cleanup of the temp file; re-raise so callers see it.
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
 
 
 def load_state(owner: str, name: str) -> AgentState | None:

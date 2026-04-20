@@ -185,3 +185,6 @@ def test_dashboard_ships_agents_and_errors_widgets():
     assert 'id="errors-banner"' in body
     assert 'id="errors-list"' in body
     assert "renderErrors" in body
+    # Orphan banner (shows when CLI process is gone mid-run)
+    assert 'id="orphan-banner"' in body
+    assert "renderOrphan" in body

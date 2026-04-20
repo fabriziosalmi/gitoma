@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,15 +27,82 @@ web_router = APIRouter()
 STATE_DIR = Path.home() / ".gitoma" / "state"
 POLL_INTERVAL_S = 0.5
 
+# A run whose `last_heartbeat` is older than this AND whose owning PID is
+# gone counts as orphaned. The ~3× heartbeat-interval buffer absorbs
+# scheduler jitter so a momentarily slow heartbeat isn't flagged.
+ORPHAN_HEARTBEAT_GRACE_S = 90.0
+# Phases considered non-terminal (still expected to be producing progress).
+_NON_TERMINAL = {"IDLE", "ANALYZING", "PLANNING", "WORKING", "PR_OPEN", "REVIEWING"}
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """Best-effort check that `pid` is still a running process on this host.
+
+    `os.kill(pid, 0)` raises ProcessLookupError if gone, PermissionError if
+    the process exists but belongs to a different user (treat as alive —
+    we can't tell the difference from "dead" otherwise). None → False.
+    """
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _enrich_liveness(state: dict[str, Any]) -> dict[str, Any]:
+    """Add derived `is_alive` / `is_orphaned` fields to a state snapshot.
+
+    Mutates and returns the dict so callers can chain. The cockpit reads
+    these fields directly — keeping the logic server-side means the UI
+    doesn't need to know the OS-specific PID rules.
+    """
+    phase = state.get("phase", "IDLE")
+    pid = state.get("pid")
+    heartbeat = state.get("last_heartbeat") or ""
+    alive = _pid_alive(pid) if pid else False
+
+    heartbeat_age = None
+    if heartbeat:
+        try:
+            hb = datetime.fromisoformat(heartbeat)
+            heartbeat_age = (datetime.now(timezone.utc) - hb).total_seconds()
+        except ValueError:
+            heartbeat_age = None
+
+    # Orphan definition: phase says "still running" but nobody's actually
+    # running it. A dead PID is conclusive; a very stale heartbeat is
+    # sufficient even if the PID recycled to something else.
+    stale_heartbeat = (
+        heartbeat_age is not None and heartbeat_age > ORPHAN_HEARTBEAT_GRACE_S
+    )
+    orphaned = phase in _NON_TERMINAL and (not alive or stale_heartbeat)
+
+    state["is_alive"] = alive
+    state["is_orphaned"] = orphaned
+    state["heartbeat_age_s"] = heartbeat_age
+    return state
+
 
 def _snapshot_states() -> list[dict[str, Any]]:
-    """Read every state file under STATE_DIR, newest-first by mtime."""
+    """Read every state file under STATE_DIR, newest-first by mtime.
+
+    Each record gets liveness derivatives (`is_alive`, `is_orphaned`,
+    `heartbeat_age_s`) tacked on so the cockpit can render orphan
+    indicators without re-doing the OS-specific checks client-side.
+    """
     if not STATE_DIR.exists():
         return []
     states: list[dict[str, Any]] = []
     for p in sorted(STATE_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
         try:
-            states.append(json.loads(p.read_text()))
+            data = json.loads(p.read_text())
+            states.append(_enrich_liveness(data))
         except (OSError, json.JSONDecodeError) as exc:
             logger.debug("Skipping unreadable state file %s: %s", p, exc)
     return states
@@ -288,6 +357,12 @@ main {
 .phase-chip.PR_OPEN   .dot,
 .phase-chip.REVIEWING .dot { background: var(--accent); }
 .phase-chip.DONE      .dot { background: var(--ok); }
+.phase-chip.ORPHANED {
+  color: #fb923c;  /* orange — distinct from fail red and warn yellow */
+  border-color: rgba(251,146,60,0.4);
+  background: rgba(251,146,60,0.1);
+}
+.phase-chip.ORPHANED .dot { background: #fb923c; }
 
 /* ── Jobs badge ────────────────────────────────────────────────────────── */
 .jobs-badge {
@@ -306,21 +381,23 @@ main {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Pipeline stepper ──────────────────────────────────────────────────── */
-.pipeline { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+.pipeline { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 @media (max-width: 700px) { .pipeline { grid-template-columns: repeat(2, 1fr); } }
 .step {
   position: relative;
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 14px 10px;
+  display: flex; flex-direction: row; align-items: center; gap: 8px;
+  padding: 8px 10px;
   background: var(--bg-subtle);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   transition: all .2s var(--ease);
+  min-width: 0;
 }
-.step .icon { width: 18px; height: 18px; color: var(--fg-dim); }
+.step .icon { width: 14px; height: 14px; color: var(--fg-dim); flex-shrink: 0; }
 .step .label {
-  font-size: 10px; font-weight: 500; letter-spacing: 0.5px;
+  font-size: 10px; font-weight: 500; letter-spacing: 0.4px;
   color: var(--fg-dim); text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .step.done { border-color: rgba(34,197,94,0.3); background: var(--ok-soft); }
 .step.done .icon { color: var(--ok); }
@@ -432,31 +509,27 @@ main {
 .agents-row {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 8px;
+  gap: 6px;
 }
 @media (max-width: 700px) { .agents-row { grid-template-columns: repeat(2, 1fr); } }
 .agent-cell {
   display: flex; align-items: center; gap: 8px;
-  padding: 12px;
+  padding: 8px 10px;
   background: var(--bg-subtle);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  min-height: 62px;
+  min-width: 0;
   transition: all .2s var(--ease);
 }
-.agent-cell .icon { width: 16px; height: 16px; color: var(--fg-dim); flex-shrink: 0; }
-.agent-cell .info { flex: 1; min-width: 0; }
+.agent-cell .icon { width: 14px; height: 14px; color: var(--fg-dim); flex-shrink: 0; }
 .agent-cell .name {
+  flex: 1; min-width: 0;
   font-size: 11px; font-weight: 600; letter-spacing: 0.4px;
   color: var(--fg); text-transform: uppercase;
-  line-height: 1.3;
-}
-.agent-cell .state-label {
-  font-size: 10px; color: var(--fg-dim);
-  letter-spacing: 0.3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .agent-cell .dot {
-  width: 8px; height: 8px; border-radius: 50%;
+  width: 7px; height: 7px; border-radius: 50%;
   background: var(--fg-faint); flex-shrink: 0;
   box-shadow: 0 0 0 0 transparent;
   transition: background .2s, box-shadow .2s;
@@ -467,7 +540,6 @@ main {
 }
 .agent-cell[data-state="active"] .icon,
 .agent-cell[data-state="active"] .name { color: var(--accent); }
-.agent-cell[data-state="active"] .state-label { color: var(--accent); }
 .agent-cell[data-state="active"] .dot {
   background: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
@@ -479,7 +551,6 @@ main {
 }
 .agent-cell[data-state="done"] .icon,
 .agent-cell[data-state="done"] .name { color: var(--ok); }
-.agent-cell[data-state="done"] .state-label { color: var(--ok); }
 .agent-cell[data-state="done"] .dot { background: var(--ok); }
 .agent-cell[data-state="failed"] {
   border-color: rgba(239,68,68,0.35);
@@ -487,8 +558,31 @@ main {
 }
 .agent-cell[data-state="failed"] .icon,
 .agent-cell[data-state="failed"] .name { color: var(--fail); }
-.agent-cell[data-state="failed"] .state-label { color: var(--fail); }
 .agent-cell[data-state="failed"] .dot { background: var(--fail); }
+
+/* ── Orphan banner (CLI process gone mid-run) ─────────────────────────── */
+#orphan-banner[hidden] { display: none; }
+.orphan-banner {
+  margin: 12px 20px 0;
+  padding: 12px 14px;
+  background: rgba(251,146,60,0.1);
+  border: 1px solid rgba(251,146,60,0.3);
+  border-left: 3px solid #fb923c;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  color: var(--fg);
+  display: flex; align-items: flex-start; gap: 12px;
+}
+.orphan-banner .icon { width: 16px; height: 16px; color: #fb923c; flex-shrink: 0; margin-top: 2px; }
+.orphan-banner .body { flex: 1; min-width: 0; }
+.orphan-banner .title { font-weight: 600; color: #fb923c; margin-bottom: 4px; }
+.orphan-banner .msg { color: var(--fg-mid); line-height: 1.5; }
+.orphan-banner code {
+  padding: 1px 5px;
+  background: var(--bg-subtle); border: 1px solid var(--border);
+  border-radius: 3px; font-size: 11px;
+}
+@media (max-width: 640px) { .orphan-banner { margin: 10px 12px 0; } }
 
 /* ── Errors banner (state.errors) ──────────────────────────────────────── */
 #errors-banner[hidden] { display: none; }
@@ -1260,10 +1354,14 @@ function renderRepoList() {
   host.innerHTML = STATES.map((s, i) => {
     const slug = `${s.owner}/${s.name}`;
     const phase = s.phase || "IDLE";
+    // An orphaned run surfaces as its own chip rather than the phase chip,
+    // because the phase is stale by definition.
+    const chipClass = s.is_orphaned ? "ORPHANED" : phase;
+    const chipLabel = s.is_orphaned ? "ORPHANED" : phase.replace("_", " ");
     return `<div class="repo-item${i === SELECTED ? " active" : ""}" data-idx="${i}" role="button" tabindex="0">
       ${svg("icon-repo")}
       <span class="slug">${escape(slug)}</span>
-      <span class="phase-chip ${phase}"><span class="dot"></span>${phase.replace("_"," ")}</span>
+      <span class="phase-chip ${chipClass}"><span class="dot"></span>${chipLabel}</span>
     </div>`;
   }).join("");
   host.querySelectorAll(".repo-item").forEach((el) => {
@@ -1452,12 +1550,9 @@ function renderAgents(state) {
   ];
 
   $("agents-row").innerHTML = roles.map(r => `
-    <div class="agent-cell" data-state="${r.state}" data-role="${r.id}">
+    <div class="agent-cell" data-state="${r.state}" data-role="${r.id}" title="${r.name} — ${r.label}">
       ${svg(r.icon)}
-      <div class="info">
-        <div class="name">${r.name}</div>
-        <div class="state-label">${r.label}</div>
-      </div>
+      <span class="name">${r.name}</span>
       <span class="dot"></span>
     </div>`).join("");
 }
@@ -1475,6 +1570,28 @@ function renderErrors(state) {
     "Fix the underlying issue and re-run with `gitoma run <url> --reset` to start fresh, or `--resume` to continue.";
 }
 
+function renderOrphan(state) {
+  const el = $("orphan-banner");
+  if (!state || !state.is_orphaned) { el.hidden = true; return; }
+  el.hidden = false;
+
+  const phase = state.phase || "UNKNOWN";
+  const pid = state.pid;
+  const ageS = state.heartbeat_age_s;
+  const ageText = ageS == null
+    ? "never reported a heartbeat"
+    : ageS < 60 ? `last heartbeat ${Math.round(ageS)}s ago`
+    : ageS < 3600 ? `last heartbeat ${Math.round(ageS / 60)}m ago`
+    : `last heartbeat ${Math.round(ageS / 3600)}h ago`;
+
+  $("orphan-title").textContent =
+    `Run orphaned in ${phase.replace("_", " ")}`;
+  $("orphan-msg").innerHTML =
+    `The CLI process <code>${pid ? "pid " + escape(String(pid)) : "(unknown pid)"}</code> owning this run ` +
+    `is no longer alive (${escape(ageText)}). The state file is frozen — nothing is actively progressing. ` +
+    `Use <strong>Reset state</strong> and relaunch, or inspect the gitoma CLI terminal for what happened.`;
+}
+
 function renderAll() {
   if (SELECTED >= STATES.length) SELECTED = 0;
   const state = STATES[SELECTED] || null;
@@ -1483,6 +1600,7 @@ function renderAll() {
   renderMetrics(state);
   renderAgents(state);
   renderErrors(state);
+  renderOrphan(state);
 }
 
 // ── Banner (persistent, actionable, non-modal) ──────────────────────────
@@ -1925,6 +2043,14 @@ _DASHBOARD_BODY = """
     </div>
     <ul id="errors-list"></ul>
     <div class="hint" id="errors-hint"></div>
+  </div>
+
+  <div id="orphan-banner" class="orphan-banner" role="alert" hidden>
+    <svg class="icon"><use href="#icon-alert"/></svg>
+    <div class="body">
+      <div class="title" id="orphan-title">Run appears orphaned</div>
+      <div class="msg" id="orphan-msg"></div>
+    </div>
   </div>
 
   <main>
