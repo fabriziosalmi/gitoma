@@ -11,6 +11,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from gitoma.core.config import load_config
+from gitoma.core.state import delete_state as _delete_state
+from gitoma.core.state import load_state as _load_state
 from gitoma.planner.llm_client import check_lmstudio
 from gitoma.review.reflexion import CIDiagnosticAgent
 
@@ -23,6 +25,15 @@ class RunRequest(BaseModel):
     repo_url: str
     branch: Optional[str] = None
     dry_run: bool = False
+
+
+class ReviewRequest(BaseModel):
+    repo_url: str
+    integrate: bool = False
+
+
+class AnalyzeRequest(BaseModel):
+    repo_url: str
 
 
 class JobResponse(BaseModel):
@@ -48,28 +59,18 @@ def _gitoma_cli_argv() -> list[str]:
     return [sys.executable, "-m", "gitoma.cli"]
 
 
-def _run_autonomous_agent(repo_url: str, branch: Optional[str], dry_run: bool, job_id: str) -> None:
-    """Spawn the `gitoma run` CLI in a subprocess and track its status.
+def _run_cli_job(argv: list[str], job_id: str, label: str) -> None:
+    """Shared subprocess runner for CLI-backed background jobs.
 
-    Subprocess isolation sidesteps typer.Exit() propagating into the background
-    worker thread and keeps the API process alive across pipeline failures.
+    Captures full stdout/stderr and stores the outcome in the in-memory job
+    tracker. On non-zero exit, embeds a short tail of the output so the
+    client can surface a meaningful failure message.
     """
     _JOBS[job_id] = "running"
-    argv = [*_gitoma_cli_argv(), "run", repo_url, "--yes"]
-    if branch:
-        argv += ["--branch", branch]
-    if dry_run:
-        argv.append("--dry-run")
-
     try:
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.exception("Autonomous run job %s could not start", job_id)
+        logger.exception("%s job %s could not start", label, job_id)
         _JOBS[job_id] = f"failed: {exc}"
         return
 
@@ -78,6 +79,34 @@ def _run_autonomous_agent(repo_url: str, branch: Optional[str], dry_run: bool, j
     else:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-5:]
         _JOBS[job_id] = f"failed (rc={proc.returncode}): {' | '.join(tail)[:400]}"
+
+
+def _run_autonomous_agent(repo_url: str, branch: Optional[str], dry_run: bool, job_id: str) -> None:
+    """Spawn the `gitoma run` CLI in a subprocess and track its status.
+
+    Subprocess isolation sidesteps typer.Exit() propagating into the background
+    worker thread and keeps the API process alive across pipeline failures.
+    """
+    argv = [*_gitoma_cli_argv(), "run", repo_url, "--yes"]
+    if branch:
+        argv += ["--branch", branch]
+    if dry_run:
+        argv.append("--dry-run")
+    _run_cli_job(argv, job_id, "run")
+
+
+def _run_analyze(repo_url: str, job_id: str) -> None:
+    """Spawn `gitoma analyze <repo_url>` and track outcome."""
+    argv = [*_gitoma_cli_argv(), "analyze", repo_url]
+    _run_cli_job(argv, job_id, "analyze")
+
+
+def _run_review(repo_url: str, integrate: bool, job_id: str) -> None:
+    """Spawn `gitoma review <repo_url> [--integrate]` and track outcome."""
+    argv = [*_gitoma_cli_argv(), "review", repo_url]
+    if integrate:
+        argv.append("--integrate")
+    _run_cli_job(argv, job_id, "review")
 
 
 def _run_fix_ci(repo_url: str, branch: str, job_id: str) -> None:
@@ -125,9 +154,44 @@ def trigger_fix_ci(req: RunRequest, background_tasks: BackgroundTasks) -> JobRes
     return JobResponse(job_id=job_id, status="started", message="CI Reflexion Agent dispatched in background.")
 
 
+@router.post("/analyze", response_model=JobResponse)
+def trigger_analyze(req: AnalyzeRequest, background_tasks: BackgroundTasks) -> JobResponse:
+    """Trigger a read-only analysis pass (no commits, no PR)."""
+    job_id = str(uuid.uuid4())
+    background_tasks.add_task(_run_analyze, req.repo_url, job_id)
+    return JobResponse(job_id=job_id, status="started", message="Analysis dispatched in background.")
+
+
+@router.post("/review", response_model=JobResponse)
+def trigger_review(req: ReviewRequest, background_tasks: BackgroundTasks) -> JobResponse:
+    """Fetch Copilot review comments; optionally auto-integrate them."""
+    job_id = str(uuid.uuid4())
+    background_tasks.add_task(_run_review, req.repo_url, req.integrate, job_id)
+    msg = "Review integration dispatched." if req.integrate else "Review fetch dispatched."
+    return JobResponse(job_id=job_id, status="started", message=msg)
+
+
 @router.get("/status/{job_id}")
 def get_job_status(job_id: str) -> dict[str, str]:
     """Poll the status of an asynchronous job."""
     if job_id not in _JOBS:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, "status": _JOBS[job_id]}
+
+
+@router.get("/jobs")
+def list_jobs() -> dict[str, dict[str, str]]:
+    """List every in-memory job and its current status."""
+    return {jid: {"status": status} for jid, status in _JOBS.items()}
+
+
+@router.delete("/state/{owner}/{name}")
+def reset_repo_state(owner: str, name: str) -> dict[str, str]:
+    """Delete the persisted agent state for a repo (idempotent)."""
+    existed = _load_state(owner, name) is not None
+    _delete_state(owner, name)
+    return {
+        "owner": owner,
+        "name": name,
+        "result": "deleted" if existed else "not_found",
+    }
