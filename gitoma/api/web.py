@@ -535,6 +535,91 @@ dialog.modal[open] {
 .check input { accent-color: var(--accent); width: 16px; height: 16px; }
 .check span { font-size: 12px; color: var(--fg); }
 
+/* ── Command palette ───────────────────────────────────────────────────── */
+dialog.palette {
+  padding: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--fg);
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  box-shadow: var(--shadow-md);
+  margin-top: 10vh;
+}
+dialog.palette::backdrop { background: rgba(0,0,0,0.5); backdrop-filter: blur(3px); }
+.palette-search {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.palette-search .icon { width: 16px; height: 16px; color: var(--fg-dim); }
+.palette-search input {
+  flex: 1;
+  background: transparent; border: none; color: var(--fg);
+  font-family: inherit; font-size: 14px; outline: none;
+}
+.palette-search input::placeholder { color: var(--fg-dim); }
+.palette-list {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 6px;
+}
+.palette-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-height: var(--tap);
+  color: var(--fg);
+  transition: background .08s;
+}
+.palette-item.selected,
+.palette-item:hover { background: var(--bg-subtle); }
+.palette-item.selected { background: var(--accent-soft); }
+.palette-item .icon { width: 16px; height: 16px; color: var(--fg-mid); flex-shrink: 0; }
+.palette-item .label { flex: 1; font-size: 13px; }
+.palette-item.destructive .icon { color: var(--fail); }
+.palette-item.destructive.selected { background: var(--fail-soft); }
+.palette-foot {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 11px; color: var(--fg-dim);
+}
+.palette-foot .kbd-hint { display: inline-flex; align-items: center; gap: 6px; }
+kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; padding: 1px 6px;
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--fg-mid);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+}
+
+/* ── Shortcut hint dots (subtle letters on command tiles) ──────────────── */
+.cmd-tile { position: relative; }
+.cmd-tile .cmd-kbd {
+  position: absolute; top: 10px; right: 10px;
+  font-size: 10px;
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  letter-spacing: 0.4px;
+}
+
+/* ── Respect users who request less motion ────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ── Toasts ───────────────────────────────────────────────────────────── */
 #toasts {
   position: fixed;
@@ -936,7 +1021,16 @@ function renderRepoList() {
   const host = $("repo-list");
   $("repo-count").textContent = STATES.length;
   if (!STATES.length) {
-    host.innerHTML = '<div class="empty">No tracked runs yet.<br/>Launch one via the command panel.</div>';
+    host.innerHTML = `
+      <div class="empty" style="padding:24px 12px;">
+        <div style="margin-bottom:10px;">No tracked runs yet.</div>
+        <button class="btn btn--sm" id="empty-run-btn" type="button">
+          ${svg("icon-play")}
+          Launch first run
+        </button>
+      </div>`;
+    const btn = $("empty-run-btn");
+    if (btn) btn.addEventListener("click", () => onCommandTile("run"));
     return;
   }
   host.innerHTML = STATES.map((s, i) => {
@@ -960,8 +1054,17 @@ function renderMetrics(state) {
   const host = $("metrics");
   const report = state && state.metric_report;
   if (!report || !report.metrics || !report.metrics.length) {
-    host.innerHTML = '<div class="empty">No metric report yet.</div>';
+    host.innerHTML = `
+      <div class="empty" style="padding:20px 8px;">
+        <div style="margin-bottom:10px;">No metric report yet.</div>
+        <button class="btn btn--sm" id="empty-analyze-btn" type="button">
+          ${svg("icon-phase-analyzing")}
+          Analyze repository
+        </button>
+      </div>`;
     $("score").textContent = "—";
+    const btn = $("empty-analyze-btn");
+    if (btn) btn.addEventListener("click", () => onCommandTile("analyze"));
     return;
   }
   const metrics = [...report.metrics].sort((a, b) => (a.score || 0) - (b.score || 0));
@@ -1154,6 +1257,130 @@ function wireDialogs() {
   });
 }
 
+// ── Command palette ─────────────────────────────────────────────────────
+const Palette = {
+  items: [],
+  filtered: [],
+  selected: 0,
+
+  commands() {
+    return [
+      { id: "run",      label: "Run full pipeline",   icon: "icon-play",             act: () => onCommandTile("run") },
+      { id: "analyze",  label: "Analyze repository",  icon: "icon-phase-analyzing",  act: () => onCommandTile("analyze") },
+      { id: "review",   label: "Review PR comments",  icon: "icon-eye",              act: () => onCommandTile("review") },
+      { id: "fix-ci",   label: "Fix broken CI",       icon: "icon-tool",             act: () => onCommandTile("fix-ci") },
+      { id: "settings", label: "Configure API token", icon: "icon-settings",         act: () => $("settings-btn").click() },
+      { id: "refresh",  label: "Refresh jobs",        icon: "icon-zap",              act: () => refreshJobs() },
+      {
+        id: "reset", label: `Reset state for ${STATES[SELECTED] ? STATES[SELECTED].owner + "/" + STATES[SELECTED].name : "…"}`,
+        icon: "icon-trash", destructive: true,
+        when: () => !!STATES[SELECTED], act: () => confirmAndReset(),
+      },
+      {
+        id: "close-log", label: "Close live output",
+        icon: "icon-x", when: () => $("log-card").classList.contains("open"),
+        act: () => LogStream.hide(),
+      },
+    ];
+  },
+
+  open() {
+    this.items = this.commands().filter((c) => !c.when || c.when());
+    this.filtered = this.items.slice();
+    this.selected = 0;
+    const input = $("palette-input");
+    input.value = "";
+    this.render();
+    openDialog("palette-dialog");
+    setTimeout(() => input.focus(), 0);
+  },
+
+  filter(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) { this.filtered = this.items.slice(); }
+    else {
+      this.filtered = this.items.filter((c) => c.label.toLowerCase().includes(q));
+    }
+    this.selected = 0;
+    this.render();
+  },
+
+  render() {
+    const host = $("palette-list");
+    if (!this.filtered.length) {
+      host.innerHTML = '<div class="empty">No matching commands.</div>';
+      return;
+    }
+    host.innerHTML = this.filtered.map((c, i) => {
+      const cls = "palette-item" + (c.destructive ? " destructive" : "") + (i === this.selected ? " selected" : "");
+      return `<div class="${cls}" role="option" data-idx="${i}">
+        ${svg(c.icon)}
+        <span class="label">${escape(c.label)}</span>
+      </div>`;
+    }).join("");
+    host.querySelectorAll(".palette-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        this.selected = parseInt(el.dataset.idx, 10);
+        this.run();
+      });
+      el.addEventListener("mousemove", () => {
+        const idx = parseInt(el.dataset.idx, 10);
+        if (idx !== this.selected) { this.selected = idx; this.render(); }
+      });
+    });
+    const current = host.querySelector(".palette-item.selected");
+    if (current) current.scrollIntoView({ block: "nearest" });
+  },
+
+  move(delta) {
+    if (!this.filtered.length) return;
+    this.selected = (this.selected + delta + this.filtered.length) % this.filtered.length;
+    this.render();
+  },
+
+  run() {
+    const cmd = this.filtered[this.selected];
+    if (!cmd) return;
+    closeDialog("palette-dialog");
+    setTimeout(() => cmd.act(), 50);
+  },
+};
+
+function wirePalette() {
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+  $("palette-kbd").textContent = isMac ? "⌘K" : "Ctrl K";
+
+  $("palette-btn").addEventListener("click", () => Palette.open());
+  $("palette-input").addEventListener("input", (e) => Palette.filter(e.target.value));
+  $("palette-input").addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown")      { e.preventDefault(); Palette.move(1); }
+    else if (e.key === "ArrowUp")   { e.preventDefault(); Palette.move(-1); }
+    else if (e.key === "Enter")     { e.preventDefault(); Palette.run(); }
+  });
+
+  // Global shortcuts
+  document.addEventListener("keydown", (e) => {
+    // ⌘K / Ctrl+K → open palette
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      Palette.open();
+      return;
+    }
+    // Ignore single-letter shortcuts when typing, modifiers held, or any dialog is open
+    const focus = document.activeElement;
+    const tag = focus && focus.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || (focus && focus.isContentEditable)) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (document.querySelector("dialog[open]")) return;
+    const k = e.key.toLowerCase();
+    const map = { r: "run", a: "analyze", v: "review", f: "fix-ci" };
+    if (map[k]) {
+      e.preventDefault();
+      onCommandTile(map[k]);
+    }
+  });
+}
+
 function confirmAndReset() {
   const s = STATES[SELECTED];
   if (!s) return;
@@ -1195,6 +1422,7 @@ function init() {
   $("log-close").addEventListener("click", () => LogStream.hide());
 
   wireDialogs();
+  wirePalette();
   connectWS();
   renderAll();
   startJobPolling();
@@ -1218,6 +1446,11 @@ _DASHBOARD_BODY = """
     </div>
     <div class="header-spacer"></div>
     <div class="header-actions">
+      <button id="palette-btn" class="btn btn--ghost btn--sm" title="Command palette (⌘K)"
+              aria-label="Open command palette" style="gap:8px;">
+        <span>Quick command</span>
+        <kbd id="palette-kbd">⌘K</kbd>
+      </button>
       <span id="jobs-badge" class="jobs-badge" role="button" tabindex="0" title="Refresh jobs">
         <svg class="icon"><use href="#icon-zap"/></svg>
         <span id="jobs-count">—</span>
@@ -1241,25 +1474,29 @@ _DASHBOARD_BODY = """
         </div>
         <div class="card-body">
           <div class="cmd-grid">
-            <button class="cmd-tile" data-cmd="run" type="button">
+            <button class="cmd-tile" data-cmd="run" type="button" aria-keyshortcuts="r">
               <svg class="icon"><use href="#icon-play"/></svg>
               <span class="cmd-name">Run</span>
               <span class="cmd-hint">Full autonomous pipeline</span>
+              <span class="cmd-kbd">R</span>
             </button>
-            <button class="cmd-tile" data-cmd="analyze" type="button">
+            <button class="cmd-tile" data-cmd="analyze" type="button" aria-keyshortcuts="a">
               <svg class="icon"><use href="#icon-phase-analyzing"/></svg>
               <span class="cmd-name">Analyze</span>
               <span class="cmd-hint">Read-only metric scan</span>
+              <span class="cmd-kbd">A</span>
             </button>
-            <button class="cmd-tile" data-cmd="review" type="button">
+            <button class="cmd-tile" data-cmd="review" type="button" aria-keyshortcuts="v">
               <svg class="icon"><use href="#icon-eye"/></svg>
               <span class="cmd-name">Review</span>
               <span class="cmd-hint">Copilot comments + integrate</span>
+              <span class="cmd-kbd">V</span>
             </button>
-            <button class="cmd-tile" data-cmd="fix-ci" type="button">
+            <button class="cmd-tile" data-cmd="fix-ci" type="button" aria-keyshortcuts="f">
               <svg class="icon"><use href="#icon-tool"/></svg>
               <span class="cmd-name">Fix CI</span>
               <span class="cmd-hint">Reflexion agent on a branch</span>
+              <span class="cmd-kbd">F</span>
             </button>
           </div>
         </div>
@@ -1475,6 +1712,20 @@ _DASHBOARD_BODY = """
       <button type="submit" class="btn btn--primary btn--sm">Run Fix-CI</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="palette-dialog" class="palette" aria-labelledby="palette-title">
+  <div class="palette-search">
+    <svg class="icon"><use href="#icon-zap"/></svg>
+    <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="Type a command…" aria-labelledby="palette-title"/>
+  </div>
+  <div id="palette-list" class="palette-list" role="listbox"></div>
+  <div class="palette-foot">
+    <span class="kbd-hint"><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+    <span class="kbd-hint"><kbd>↵</kbd> run</span>
+    <span class="kbd-hint"><kbd>esc</kbd> close</span>
+  </div>
 </dialog>
 
 <dialog id="confirm-dialog" class="modal" aria-labelledby="confirm-title">
