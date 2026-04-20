@@ -171,3 +171,17 @@ def test_dashboard_ships_current_op_and_task_plan_widgets():
     # JS hooks
     assert "renderCurrentOp" in body
     assert "renderTaskPlan" in body
+
+
+def test_dashboard_ships_agents_and_errors_widgets():
+    """Agents card + Errors banner. Regression guard for the
+    `cosa non torna nel giro?` visibility fix."""
+    body = client.get("/").text
+    # Agents card (Analyzer / Planner / Worker / PR Agent / Reviewer)
+    assert 'id="agents-card"' in body
+    assert 'id="agents-row"' in body
+    assert "renderAgents" in body
+    # Errors banner (shows state.errors when persisted by _abort/_phase)
+    assert 'id="errors-banner"' in body
+    assert 'id="errors-list"' in body
+    assert "renderErrors" in body

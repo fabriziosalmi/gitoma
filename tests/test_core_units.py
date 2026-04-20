@@ -89,6 +89,17 @@ def test_agent_state_current_operation_is_persisted():
     assert restored.current_operation == "Pushing branch gitoma/improve-2026"
 
 
+def test_agent_state_errors_survive_roundtrip():
+    """state.errors is what surfaces in the cockpit's red banner when
+    `_abort`/`_phase` persist a failure. Must make it through JSON."""
+    s = AgentState(repo_url="u", owner="o", name="r", branch="b")
+    s.errors.append("Git push failed: permission denied")
+    s.errors.append("PHASE 4 — PULL REQUEST: RuntimeError: boom")
+    restored = AgentState.from_dict(s.to_dict())
+    assert len(restored.errors) == 2
+    assert "permission denied" in restored.errors[0]
+
+
 # ── parse_repo_url ────────────────────────────────────────────────────────────
 
 

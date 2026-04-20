@@ -61,12 +61,32 @@ app = typer.Typer(
 # Guard helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _abort(message: str, hint: str = "", code: int = 1) -> NoReturn:
-    """Print a formatted error and exit."""
+def _abort(
+    message: str,
+    hint: str = "",
+    code: int = 1,
+    state: "AgentState | None" = None,
+) -> NoReturn:
+    """Print a formatted error and exit.
+
+    If ``state`` is provided, the error is appended to ``state.errors`` and
+    persisted to disk *before* exiting — so the cockpit (which observes
+    ~/.gitoma/state/*.json) sees a non-silent failure instead of a stale
+    phase snapshot.
+    """
     lines = [f"[danger]✗ {message}[/danger]"]
     if hint:
         lines.append(f"[muted]  → {hint}[/muted]")
     console.print("\n".join(lines))
+    if state is not None:
+        full = message if not hint else f"{message} — {hint}"
+        state.errors.append(full)
+        state.current_operation = f"FAILED: {message[:120]}"
+        try:
+            save_state(state)
+        except Exception:
+            # State persistence must never block the error exit path.
+            pass
     raise typer.Exit(code)
 
 
@@ -82,10 +102,16 @@ def _ok(message: str) -> None:
 
 
 @contextmanager
-def _phase(name: str, cleanup: "GitRepo | None" = None) -> Generator[None, None, None]:
-    """
-    Context manager that wraps a pipeline phase.
-    On unhandled exception: prints traceback summary, calls cleanup, exits 1.
+def _phase(
+    name: str,
+    cleanup: "GitRepo | None" = None,
+    state: "AgentState | None" = None,
+) -> Generator[None, None, None]:
+    """Context manager that wraps a pipeline phase.
+
+    On unhandled exception: prints traceback summary, persists the failure
+    to ``state`` (if given) so the cockpit can surface it, calls cleanup,
+    and exits 1.
     """
     console.print()
     console.print(Rule(f"[primary]{name}[/primary]", style="primary"))
@@ -105,6 +131,13 @@ def _phase(name: str, cleanup: "GitRepo | None" = None) -> Generator[None, None,
                 border_style="danger",
             )
         )
+        if state is not None:
+            state.errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            state.current_operation = f"FAILED in {name}: {str(exc)[:120]}"
+            try:
+                save_state(state)
+            except Exception:
+                pass
         if cleanup:
             _safe_cleanup(cleanup)
         raise typer.Exit(1)
@@ -488,7 +521,7 @@ def run(
     # ────────────────────────────────────────────────────────────────────────
     # PHASE 1 — ANALYZE
     # ────────────────────────────────────────────────────────────────────────
-    with _phase("PHASE 1 — ANALYSIS", cleanup=git_repo):
+    with _phase("PHASE 1 — ANALYSIS", cleanup=git_repo, state=state):
         from gitoma.analyzers.registry import AnalyzerRegistry, ALL_ANALYZER_CLASSES
 
         registry = AnalyzerRegistry(
@@ -540,7 +573,7 @@ def run(
     # ────────────────────────────────────────────────────────────────────────
     # PHASE 2 — PLAN
     # ────────────────────────────────────────────────────────────────────────
-    with _phase("PHASE 2 — PLANNING", cleanup=git_repo):
+    with _phase("PHASE 2 — PLANNING", cleanup=git_repo, state=state):
         from gitoma.planner.planner import PlannerAgent
         from gitoma.planner.llm_client import LLMError
 
@@ -607,7 +640,7 @@ def run(
     # ────────────────────────────────────────────────────────────────────────
     # PHASE 3 — EXECUTE
     # ────────────────────────────────────────────────────────────────────────
-    with _phase("PHASE 3 — EXECUTION", cleanup=git_repo):
+    with _phase("PHASE 3 — EXECUTION", cleanup=git_repo, state=state):
         from gitoma.worker.worker import WorkerAgent
 
         # Create branch
@@ -618,6 +651,7 @@ def run(
             _abort(
                 f"Failed to create branch '{branch}': {e}",
                 hint="The branch may already exist locally. Use --reset to start fresh.",
+                state=state,
             )
 
         console.print()
@@ -688,7 +722,7 @@ def run(
     # ────────────────────────────────────────────────────────────────────────
     # PHASE 4 — PULL REQUEST
     # ────────────────────────────────────────────────────────────────────────
-    with _phase("PHASE 4 — PULL REQUEST", cleanup=git_repo):
+    with _phase("PHASE 4 — PULL REQUEST", cleanup=git_repo, state=state):
         from gitoma.pr.pr_agent import PRAgent
 
         console.print(f"[muted]Pushing {branch} to origin and opening PR…[/muted]")
@@ -712,6 +746,7 @@ def run(
                         "Ensure your token has 'contents:write' permission "
                         "on this repo. Also check the branch isn't protected."
                     ),
+                    state=state,
                 )
             elif "422" in err_str or "Unprocessable" in err_str:
                 _abort(
@@ -720,6 +755,7 @@ def run(
                         "Possible causes: PR already exists, branch not pushed, "
                         "or head/base branch names are wrong."
                     ),
+                    state=state,
                 )
             else:
                 raise  # re-raise for the _phase guard to catch

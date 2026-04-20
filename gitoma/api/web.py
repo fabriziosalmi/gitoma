@@ -428,6 +428,93 @@ main {
   .banner .body { flex-basis: 100%; }
 }
 
+/* ── Agents row ────────────────────────────────────────────────────────── */
+.agents-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+@media (max-width: 700px) { .agents-row { grid-template-columns: repeat(2, 1fr); } }
+.agent-cell {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-height: 62px;
+  transition: all .2s var(--ease);
+}
+.agent-cell .icon { width: 16px; height: 16px; color: var(--fg-dim); flex-shrink: 0; }
+.agent-cell .info { flex: 1; min-width: 0; }
+.agent-cell .name {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.4px;
+  color: var(--fg); text-transform: uppercase;
+  line-height: 1.3;
+}
+.agent-cell .state-label {
+  font-size: 10px; color: var(--fg-dim);
+  letter-spacing: 0.3px;
+}
+.agent-cell .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--fg-faint); flex-shrink: 0;
+  box-shadow: 0 0 0 0 transparent;
+  transition: background .2s, box-shadow .2s;
+}
+.agent-cell[data-state="active"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.agent-cell[data-state="active"] .icon,
+.agent-cell[data-state="active"] .name { color: var(--accent); }
+.agent-cell[data-state="active"] .state-label { color: var(--accent); }
+.agent-cell[data-state="active"] .dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+.agent-cell[data-state="done"] {
+  border-color: rgba(34,197,94,0.3);
+  background: var(--ok-soft);
+}
+.agent-cell[data-state="done"] .icon,
+.agent-cell[data-state="done"] .name { color: var(--ok); }
+.agent-cell[data-state="done"] .state-label { color: var(--ok); }
+.agent-cell[data-state="done"] .dot { background: var(--ok); }
+.agent-cell[data-state="failed"] {
+  border-color: rgba(239,68,68,0.35);
+  background: var(--fail-soft);
+}
+.agent-cell[data-state="failed"] .icon,
+.agent-cell[data-state="failed"] .name { color: var(--fail); }
+.agent-cell[data-state="failed"] .state-label { color: var(--fail); }
+.agent-cell[data-state="failed"] .dot { background: var(--fail); }
+
+/* ── Errors banner (state.errors) ──────────────────────────────────────── */
+#errors-banner[hidden] { display: none; }
+.errors-banner {
+  margin: 12px 20px 0;
+  padding: 12px 14px;
+  background: var(--fail-soft);
+  border: 1px solid rgba(239,68,68,0.3);
+  border-left: 3px solid var(--fail);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+}
+.errors-banner .head {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--fail); font-weight: 600;
+  margin-bottom: 6px;
+}
+.errors-banner .head .icon { width: 14px; height: 14px; }
+.errors-banner ul {
+  margin: 0; padding-left: 22px;
+  color: var(--fg); font-size: 12px;
+}
+.errors-banner li { margin: 2px 0; word-wrap: break-word; }
+.errors-banner .hint { color: var(--fg-dim); margin-top: 6px; font-size: 11.5px; }
+@media (max-width: 640px) { .errors-banner { margin: 10px 12px 0; } }
+
 /* ── Task plan list ────────────────────────────────────────────────────── */
 .task-list { display: flex; flex-direction: column; gap: 6px; }
 .task-row {
@@ -1265,30 +1352,33 @@ function renderCurrentOp(state) {
   const phase = state.phase || "IDLE";
   const terminal = phase === "DONE";
   const op = state.current_operation || "";
+  const hasErrors = (state.errors || []).length > 0;
 
   // Hide the row if there's no activity signal and we're in a terminal state.
-  if (!op && terminal) {
+  if (!op && terminal && !hasErrors) {
     row.hidden = true;
     return;
   }
   row.hidden = false;
-  $("current-op-text").textContent = op || `${phase.replace("_", " ")} — awaiting`;
 
-  // Age based on updated_at
-  const ageEl = $("current-op-age");
-  if (state.updated_at) {
-    const ms = Date.now() - new Date(state.updated_at).getTime();
-    const { text, kind } = _ageBucket(ms);
-    ageEl.textContent = text;
-    ageEl.className = "age" + (kind ? " " + kind : "");
-  } else {
-    ageEl.textContent = "—";
-    ageEl.className = "age";
+  // Default label — but if phase is non-terminal and updated_at is old and no
+  // explicit operation is recorded, tell the user the run looks stalled.
+  let label = op || `${phase.replace("_", " ")} — awaiting`;
+  const ageInfo = state.updated_at
+    ? _ageBucket(Date.now() - new Date(state.updated_at).getTime())
+    : { text: "—", kind: "" };
+  if (!op && !terminal && !hasErrors && ageInfo.kind === "fail") {
+    label = `${phase.replace("_", " ")} — appears stalled (no updates)`;
   }
+  $("current-op-text").textContent = label;
 
-  // Spin the icon only while actively progressing (non-terminal phases).
+  const ageEl = $("current-op-age");
+  ageEl.textContent = ageInfo.text;
+  ageEl.className = "age" + (ageInfo.kind ? " " + ageInfo.kind : "");
+
+  // Spin the icon only while actively progressing (non-terminal, no errors).
   const icon = $("current-op-icon");
-  icon.classList.toggle("spin", !terminal);
+  icon.classList.toggle("spin", !terminal && !hasErrors);
 }
 
 function renderTaskPlan(state) {
@@ -1322,12 +1412,77 @@ function renderTaskPlan(state) {
   }).join("");
 }
 
+function renderAgents(state) {
+  const card = $("agents-card");
+  if (!state) { card.hidden = true; return; }
+  card.hidden = false;
+
+  const phase = state.phase || "IDLE";
+  const plan = state.task_plan || {};
+  const tasks = plan.tasks || [];
+  const subs = tasks.flatMap(t => t.subtasks || []);
+  const allSubsTerminal = subs.length > 0 && subs.every(s => ["completed", "skipped", "failed"].includes(s.status));
+  const hasPR = !!state.pr_url;
+  const hasErrors = (state.errors || []).length > 0;
+
+  const pastAnalyzing = ["PLANNING","WORKING","PR_OPEN","REVIEWING","DONE"].includes(phase);
+  const pastPlanning  = ["WORKING","PR_OPEN","REVIEWING","DONE"].includes(phase);
+  const workerDone    = (phase === "WORKING" && allSubsTerminal) || ["PR_OPEN","REVIEWING","DONE"].includes(phase);
+  const prDone        = hasPR || ["REVIEWING","DONE"].includes(phase);
+  const reviewerDone  = phase === "DONE";
+
+  function cell(isActive, isDone) {
+    if (isDone) return { state: "done", label: "done" };
+    if (hasErrors && isActive) return { state: "failed", label: "failed" };
+    if (isActive) return { state: "active", label: "active" };
+    return { state: "idle", label: "idle" };
+  }
+
+  const roles = [
+    { id: "analyzer", name: "Analyzer", icon: "icon-phase-analyzing",
+      ...cell(phase === "ANALYZING", pastAnalyzing) },
+    { id: "planner",  name: "Planner",  icon: "icon-phase-planning",
+      ...cell(phase === "PLANNING",  pastPlanning) },
+    { id: "worker",   name: "Worker",   icon: "icon-phase-working",
+      ...cell(phase === "WORKING" && !allSubsTerminal, workerDone) },
+    { id: "pr",       name: "PR Agent", icon: "icon-phase-pr",
+      ...cell(phase === "WORKING" && allSubsTerminal && !hasPR, prDone) },
+    { id: "reviewer", name: "Reviewer", icon: "icon-eye",
+      ...cell(phase === "REVIEWING", reviewerDone) },
+  ];
+
+  $("agents-row").innerHTML = roles.map(r => `
+    <div class="agent-cell" data-state="${r.state}" data-role="${r.id}">
+      ${svg(r.icon)}
+      <div class="info">
+        <div class="name">${r.name}</div>
+        <div class="state-label">${r.label}</div>
+      </div>
+      <span class="dot"></span>
+    </div>`).join("");
+}
+
+function renderErrors(state) {
+  const el = $("errors-banner");
+  const errors = (state && state.errors) || [];
+  if (!errors.length) { el.hidden = true; return; }
+
+  el.hidden = false;
+  const phase = state.phase || "IDLE";
+  $("errors-title").textContent = `Run failed during ${phase.replace("_", " ")}`;
+  $("errors-list").innerHTML = errors.map(err => `<li>${escape(String(err))}</li>`).join("");
+  $("errors-hint").textContent =
+    "Fix the underlying issue and re-run with `gitoma run <url> --reset` to start fresh, or `--resume` to continue.";
+}
+
 function renderAll() {
   if (SELECTED >= STATES.length) SELECTED = 0;
   const state = STATES[SELECTED] || null;
   renderRepoList();
   renderDetail(state);
   renderMetrics(state);
+  renderAgents(state);
+  renderErrors(state);
 }
 
 // ── Banner (persistent, actionable, non-modal) ──────────────────────────
@@ -1763,6 +1918,15 @@ _DASHBOARD_BODY = """
     <button id="banner-action" class="btn btn--sm" type="button" hidden></button>
   </div>
 
+  <div id="errors-banner" class="errors-banner" role="alert" hidden>
+    <div class="head">
+      <svg class="icon"><use href="#icon-alert"/></svg>
+      <span id="errors-title">Run failed</span>
+    </div>
+    <ul id="errors-list"></ul>
+    <div class="hint" id="errors-hint"></div>
+  </div>
+
   <main>
     <aside class="aside">
       <section class="card">
@@ -1827,6 +1991,16 @@ _DASHBOARD_BODY = """
           </button>
         </div>
         <pre id="log-stream" class="log-stream" role="log" aria-label="Live subprocess output"></pre>
+      </section>
+
+      <section id="agents-card" class="card" hidden>
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-logo"/></svg>
+          <span class="title">Agents</span>
+        </div>
+        <div class="card-body">
+          <div id="agents-row" class="agents-row"></div>
+        </div>
       </section>
 
       <section class="card">
