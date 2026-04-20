@@ -1247,31 +1247,6 @@ def serve(
     uvicorn.run("gitoma.api.server:app", host=host, port=port, log_level="info")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# gitoma tui
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.command(name="tui")
-def tui() -> None:
-    """
-    🖥  Launch the fullscreen interactive TUI dashboard.
-
-    A cyberpunk-styled cockpit with live pipeline status, metrics, log stream,
-    agent event feed and keyboard-driven controls for all major operations.
-
-    Requirements: terminal with 24-bit color and 120+ column width.
-    """
-    try:
-        from gitoma.ui.tui import run_tui
-    except ImportError:
-        console.print(
-            "[danger]Textual is required for the TUI.[/danger]\n"
-            "[muted]Install it with: [primary]pip install 'textual>=0.60'[/primary][/muted]"
-        )
-        raise typer.Exit(1)
-    run_tui()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # gitoma mcp
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -132,6 +132,21 @@ gitoma serve --port 8000
 # Swagger Docs available at: http://localhost:8000/docs
 ```
 
+### Live Web Cockpit
+
+`gitoma serve` also publishes a real-time, read-only dashboard at `/` that
+reflects the state of every tracked run as the CLI progresses through its
+phases. It streams updates over WebSocket (`/ws/state`, 500 ms polling) and
+is fully self-contained — no build step, no third-party JS.
+
+```bash
+gitoma serve --port 8000
+open http://localhost:8000   # live cockpit
+```
+
+The cockpit is unauthenticated and intended for localhost / VPN use. The
+`/api/v1/*` routes remain Bearer-protected.
+
 ### Run as MCP server
 
 Expose GitHub context tools (file reads, repo tree, CI failures, PR comments)
