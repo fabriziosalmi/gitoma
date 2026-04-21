@@ -26,6 +26,12 @@ dependencies = [
     "radon>=6.0",
     "fastapi>=0.111.0",
     "uvicorn>=0.30.0",
+    # uvicorn alone cannot handle the WebSocket /ws/state handshake — it
+    # delegates to a protocol impl (websockets or wsproto). Without either
+    # the upgrade responds 502. Starlette's default pick is ``websockets``;
+    # pin it here so a minimal ``pip install gitoma`` deploy never ships a
+    # cockpit that fails to push state snapshots.
+    "websockets>=13.0",
     "mcp[cli]>=1.0",
 ]
 
