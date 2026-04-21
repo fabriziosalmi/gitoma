@@ -293,13 +293,13 @@
       <div class="field">
         <label for="run-url">Repository URL</label>
         <input id="run-url" type="url" required placeholder="https://github.com/owner/repo"
-               pattern="https://github\.com/[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9._-]+/?"/>
+               pattern="https://github\.com/[A-Za-z0-9][A-Za-z0-9._\-]{0,38}/[A-Za-z0-9._\-]+/?"/>
         <div class="hint">Public or private GitHub repository you have access to.</div>
       </div>
       <div class="field">
         <label for="run-branch">Branch (optional)</label>
         <input id="run-branch" type="text" placeholder="gitoma/improve-2026…"
-               pattern="[A-Za-z0-9._/-]{1,255}"/>
+               pattern="[A-Za-z0-9._/\-]{1,255}"/>
       </div>
       <label class="check">
         <input id="run-dry" type="checkbox"/>
