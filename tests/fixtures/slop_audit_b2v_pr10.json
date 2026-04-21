@@ -15,8 +15,8 @@
     "deletions": 9,
     "changed_files": 4
   },
-  "baseline_slop_ratio": 0.67,
-  "baseline_slop_ratio_note": "~65 of ~97 added lines are either non-functional (broken hooks / orphan links) or redundant/regressive. Target for a working critic panel: flag at least the 3 blocker-level findings below. If this ratio is not detectable by the panel, the panel is too lenient.",
+  "baseline_slop_ratio": 0.45,
+  "baseline_slop_ratio_note": "~44 of ~97 added lines are problematic: 23 lines of non-functional pre-commit config (F001 blocker), 26 lines of redundant duplicate doc index (F002 minor), and ~4-6 lines of regression+rewording in CONTRIBUTING.md (F003 major). Target for a working critic panel: flag at least the 1 blocker (F001), the 1 major (F003), and ideally the redundancy (F002). The minor template scope-confusion (F004) is bonus. NOTE: an earlier version of this fixture quoted 0.67 because F002 was mis-categorised as a blocker (orphan links). Re-audit corrected to 0.45.",
   "expected_findings": [
     {
       "id": "F001",
@@ -40,16 +40,17 @@
       "id": "F002",
       "file": "docs/guide/index.md",
       "lines_range": [1, 26],
-      "severity": "blocker",
-      "category": "orphan_cross_references",
-      "summary": "doc index lists links to 7 files that do not exist, no mkdocs.yml in the PR either",
+      "severity": "minor",
+      "category": "redundant_duplicate",
+      "summary": "creates docs/guide/index.md duplicating the already-existing docs/index.md (and docs/mkdocs.yml)",
       "symptoms": [
-        "references ./architecture.md, ./getting-started.md, ./recommended-platforms.md, plus 4 code/*.md files — none of which are created by this PR",
-        "no mkdocs.yml in the repo so even if the files existed, MkDocs would not be configured",
-        "the parent task was 'Improve Documentation Generation' — the PR creates only a table-of-contents, not the docs themselves"
+        "the linked files (architecture.md, getting-started.md, code/*.md, recommended-platforms.md) DO exist in docs/guide/ already — relative links resolve correctly",
+        "BUT a top-level docs/index.md was already in the repo with the same nav, and docs/mkdocs.yml already configures MkDocs",
+        "the LLM did not check what was already in the repo before generating a new index — created a parallel TOC instead of editing the existing one"
       ],
-      "expected_personas": ["arch", "contributor"],
-      "user_impact": "Every link in docs/guide/index.md is a 404; the docs entry point is broken on first click"
+      "expected_personas": ["arch"],
+      "user_impact": "two index files for the same docs nav; mild confusion, not breakage. MkDocs will use whatever mkdocs.yml points to (which is docs/index.md); docs/guide/index.md is dead weight",
+      "audit_correction_note": "An earlier pass of this fixture wrongly tagged this as 'blocker / orphan_cross_references' on the assumption that the linked files did not exist. They do. Lesson: a critic must inspect the file system / repo layout before declaring something orphan. The audit was performed only on the unified diff, which is insufficient context."
     },
     {
       "id": "F003",
