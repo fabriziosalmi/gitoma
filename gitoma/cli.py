@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import threading
 import traceback
@@ -172,6 +173,277 @@ def _pid_alive(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+def _classify_github_token(token: str) -> str:
+    """Identify the token flavor from its prefix.
+
+    * `ghp_…`                 — classic personal access token
+    * `github_pat_…`          — fine-grained PAT (per-repo scope)
+    * `gho_…` / `ghu_…`       — OAuth user tokens
+    * `ghs_…`                 — installation / server tokens
+    Anything else → "unknown".
+    """
+    if not token:
+        return "missing"
+    if token.startswith("ghp_"):
+        return "classic"
+    if token.startswith("github_pat_"):
+        return "fine-grained"
+    if token.startswith(("gho_", "ghu_")):
+        return "oauth"
+    if token.startswith("ghs_"):
+        return "server"
+    return "unknown"
+
+
+def _doctor_push(repo_url: str) -> None:
+    """Ordered diagnostic pass for push-permission failures.
+
+    Walks every layer that can say `403 Permission denied`:
+      1. Token present + classifiable
+      2. Token authenticates as SOME user (GET /user)
+      3. Token user matches the configured BOT_GITHUB_USER
+      4. Token has `repo` scope (classic) or the repo is in its allowed list
+         (fine-grained)
+      5. User has push permission on the repo
+      6. Target default branch protection
+    Each step prints a verdict and, on failure, a concrete remediation.
+    """
+    import requests
+
+    from gitoma.core.config import load_config
+    from gitoma.core.repo import parse_repo_url
+
+    try:
+        owner, name = parse_repo_url(repo_url)
+    except ValueError as exc:
+        _abort(f"Invalid repo URL: {exc}")
+
+    cfg = load_config()
+    token = cfg.github.token
+    bot_user = cfg.bot.github_user
+    kind = _classify_github_token(token)
+
+    console.print(f"\n[heading]Target[/heading]:            {owner}/{name}")
+    console.print(f"[heading]Token kind[/heading]:        {kind}")
+    console.print(f"[heading]Configured bot user[/heading]: {bot_user}")
+
+    # ── 1. Token presence ────────────────────────────────────────────────
+    if kind == "missing":
+        _abort(
+            "GITHUB_TOKEN is not configured.",
+            hint="gitoma config set GITHUB_TOKEN=<token>",
+        )
+
+    # ── 2. Token authenticates ───────────────────────────────────────────
+    console.print("\n[heading]① Token identity[/heading]")
+    try:
+        user_resp = requests.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        _abort(f"Network error contacting GitHub API: {exc}")
+    if user_resp.status_code == 401:
+        _abort(
+            "Token is invalid or expired (401).",
+            hint="Rotate the token on GitHub and update with `gitoma config set GITHUB_TOKEN=<new>`.",
+        )
+    if user_resp.status_code != 200:
+        _abort(f"GitHub API /user returned {user_resp.status_code}: {user_resp.text[:200]}")
+
+    token_user = user_resp.json().get("login", "?")
+    _ok(f"Authenticated as [bold]{token_user}[/bold]")
+
+    # ── 3. Bot user match ────────────────────────────────────────────────
+    if token_user != bot_user:
+        _warn(
+            f"BOT_GITHUB_USER is '{bot_user}' but the token authenticates as '{token_user}'.",
+            hint=(
+                f"Either set BOT_GITHUB_USER={token_user} (recommended), or "
+                f"replace the token with one owned by {bot_user}."
+            ),
+        )
+
+    # ── 4. Scopes (classic) / repo-scope (fine-grained) ──────────────────
+    console.print("\n[heading]② Token scope[/heading]")
+    if kind == "classic":
+        scopes = [s.strip() for s in user_resp.headers.get("X-OAuth-Scopes", "").split(",") if s.strip()]
+        console.print(f"  scopes: {', '.join(scopes) if scopes else '(none)'}")
+        if "repo" not in scopes and "public_repo" not in scopes:
+            console.print(
+                "[danger]✗ Classic token is missing the [bold]repo[/bold] scope.[/danger]"
+            )
+            console.print(
+                "[muted]  → Regenerate at github.com/settings/tokens, tick 'repo' "
+                "(full control of private repositories).[/muted]"
+            )
+            return
+        _ok(f"'repo' scope present — {', '.join(scopes)}")
+    elif kind == "fine-grained":
+        console.print(
+            "[muted]  fine-grained PAT — scopes are declared per-token in GitHub UI. "
+            "Verifying via repo probe below.[/muted]"
+        )
+    else:
+        _warn(f"Unusual token kind '{kind}' — proceeding but results may vary.")
+
+    # ── 5. Repo visibility + collaborator permission ────────────────────
+    console.print("\n[heading]③ Repository access[/heading]")
+    repo_resp = requests.get(
+        f"https://api.github.com/repos/{owner}/{name}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        timeout=10,
+    )
+    if repo_resp.status_code == 404:
+        console.print(f"[danger]✗ 404 — the token cannot see {owner}/{name}.[/danger]")
+        if kind == "fine-grained":
+            console.print(
+                "[muted]  → Most common cause: the fine-grained PAT wasn't granted "
+                "access to this repo.\n"
+                f"     Edit the token at github.com/settings/personal-access-tokens, "
+                f"add [bold]{owner}/{name}[/bold] to 'Repository access', set\n"
+                "     'Repository permissions → Contents: Read and write' and "
+                "'Pull requests: Read and write'.[/muted]"
+            )
+        else:
+            console.print(
+                f"[muted]  → Confirm [bold]{token_user}[/bold] is a collaborator on "
+                f"[bold]{owner}/{name}[/bold] (the invite must be accepted), then retry.[/muted]"
+            )
+        return
+    if repo_resp.status_code != 200:
+        _abort(f"/repos returned {repo_resp.status_code}: {repo_resp.text[:200]}")
+
+    repo_info = repo_resp.json()
+    visibility = "private" if repo_info.get("private") else "public"
+    _ok(f"Visible: {repo_info['full_name']} ({visibility})")
+
+    perms = repo_info.get("permissions") or {}
+    pull_ok = perms.get("pull", False)
+    push_ok = perms.get("push", False)
+    admin_ok = perms.get("admin", False)
+    console.print(f"  permissions: pull={pull_ok}  push={push_ok}  admin={admin_ok}")
+
+    if not push_ok:
+        console.print(
+            f"\n[danger]✗ {token_user} has NO push permission on {owner}/{name}.[/danger]"
+        )
+        if kind == "fine-grained":
+            console.print(
+                "[muted]  → Fine-grained PATs default to read-only per-repo. Edit the token:\n"
+                "     Repository permissions → [bold]Contents: Read and write[/bold]\n"
+                "     Repository permissions → [bold]Pull requests: Read and write[/bold][/muted]"
+            )
+        elif kind == "classic":
+            console.print(
+                f"[muted]  → The token can see the repo but {token_user} is either not a "
+                f"collaborator or has only Read role.\n"
+                f"     Invite as Write or Admin at "
+                f"github.com/{owner}/{name}/settings/access.[/muted]"
+            )
+        else:
+            console.print("[muted]  → Role is below Write. Ask the repo owner to raise it.[/muted]")
+        return
+
+    _ok(f"{token_user} has push permission.")
+
+    # ── 5b. Active write-probe ──────────────────────────────────────────
+    # The /repos `permissions` map reflects the USER's rights, not the
+    # TOKEN's. Fine-grained PATs commonly have Contents: Read (default) even
+    # though the user has write — and the only way to be sure is to actually
+    # try a write. We create a temporary ref that points to the current
+    # default-branch HEAD, then immediately delete it.
+    console.print("\n[heading]④ Write probe (create + delete throwaway ref)[/heading]")
+    import uuid as _uuid
+    default_branch = repo_info.get("default_branch", "main")
+    head_resp = requests.get(
+        f"https://api.github.com/repos/{owner}/{name}/git/refs/heads/{default_branch}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        timeout=10,
+    )
+    if head_resp.status_code != 200:
+        _warn(
+            f"Could not read '{default_branch}' HEAD ({head_resp.status_code}) — skipping probe."
+        )
+    else:
+        sha = head_resp.json().get("object", {}).get("sha")
+        probe_name = f"gitoma-doctor-probe-{_uuid.uuid4().hex[:8]}"
+        create_resp = requests.post(
+            f"https://api.github.com/repos/{owner}/{name}/git/refs",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            json={"ref": f"refs/heads/{probe_name}", "sha": sha},
+            timeout=10,
+        )
+        if create_resp.status_code == 201:
+            _ok("Write probe succeeded — the token CAN write to this repo.")
+            # Cleanup best-effort.
+            requests.delete(
+                f"https://api.github.com/repos/{owner}/{name}/git/refs/heads/{probe_name}",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+                timeout=10,
+            )
+        elif create_resp.status_code == 403:
+            console.print(
+                "[danger]✗ 403 on write probe — /repos lied: the TOKEN itself lacks write permission.[/danger]"
+            )
+            if kind == "fine-grained":
+                console.print(
+                    "[muted]  → Root cause for your fine-grained PAT: edit the token at\n"
+                    "     github.com/settings/personal-access-tokens, select the token,\n"
+                    "     [bold]Repository permissions[/bold] →\n"
+                    "       Contents:      set to [bold]Read and write[/bold]\n"
+                    "       Pull requests: set to [bold]Read and write[/bold]\n"
+                    "     Save. The user has access; the token didn't.[/muted]"
+                )
+            else:
+                console.print(
+                    "[muted]  → Token lacks 'repo' scope or the user's role is below Write.[/muted]"
+                )
+            return
+        else:
+            _warn(
+                f"Write probe returned {create_resp.status_code}: "
+                f"{create_resp.text[:200]} — skipping."
+            )
+
+    # ── 6. Branch protection on default branch ──────────────────────────
+    console.print("\n[heading]⑤ Default-branch protection[/heading]")
+    default_branch = repo_info.get("default_branch", "main")
+    prot_resp = requests.get(
+        f"https://api.github.com/repos/{owner}/{name}/branches/{default_branch}/protection",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        timeout=10,
+    )
+    if prot_resp.status_code == 404:
+        _ok(f"'{default_branch}' has no protection rules — feature branches push freely.")
+    elif prot_resp.status_code == 200:
+        rules = prot_resp.json()
+        _warn(
+            f"'{default_branch}' is PROTECTED.",
+            hint=(
+                "Feature-branch pushes (gitoma/improve-*) should still succeed, "
+                "but PR merge may require review. Rules snapshot below."
+            ),
+        )
+        console.print(f"  [dim]{json.dumps({k: v for k, v in rules.items() if not k.startswith('url')}, default=str)[:200]}…[/dim]")
+    else:
+        _warn(f"Branch-protection probe returned {prot_resp.status_code} — skipping.")
+
+    # ── Verdict ─────────────────────────────────────────────────────────
+    console.print()
+    console.print(Rule("[primary]Verdict[/primary]", style="primary"))
+    if push_ok:
+        console.print(
+            "[success]✓ Every layer checked says push should succeed.[/success]\n"
+            "[muted]If `git push` still 403s, the problem is below the HTTP API: "
+            "check git's credential helper, SSO enforcement on an org, or a personal "
+            "mirror that points to the wrong fork.[/muted]"
+        )
+    else:
+        console.print("[danger]✗ Push will fail until the step above is fixed.[/danger]")
 
 
 def _doctor_runs() -> None:
@@ -442,19 +714,31 @@ def doctor(
         bool,
         typer.Option("--runs", help="Scan tracked runs for orphans (dead CLI processes)"),
     ] = False,
+    push: Annotated[
+        Optional[str],
+        typer.Option(
+            "--push",
+            help="Diagnose why `git push` might fail for <url> (token type, scopes, "
+            "repo visibility, collaborator role, branch protection)",
+        ),
+    ] = None,
 ) -> None:
     """
     🩺 Run a full pre-flight health check.
 
     Checks: config, LM Studio (connection + models + target model), GitHub token.
-    With --runs: also scans ~/.gitoma/state for runs whose owning process is
-    gone. Always safe to run — no writes, no clones.
+    With --runs: also scans ~/.gitoma/state for runs whose owning process is gone.
+    With --push <url>: drills into why a push might be rejected for that repo.
+    Always safe to run — no writes, no clones.
     """
     print_banner(__version__)
     console.print(Rule("[primary]🩺 Health Check[/primary]", style="primary"))
 
     if runs:
         _doctor_runs()
+        return
+    if push:
+        _doctor_push(push)
         return
 
     all_ok = True

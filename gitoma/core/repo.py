@@ -206,9 +206,16 @@ class GitRepo:
     # ── Helpers ────────────────────────────────────────────────────────────
 
     def _authed_url(self) -> str:
-        """Build authenticated HTTPS URL with GitHub token."""
+        """Build authenticated HTTPS URL with GitHub token.
+
+        Uses the `x-access-token` convention (same as the GitHub CLI): the
+        token authenticates its owner, so embedding a bot username would
+        only introduce a way for the two to disagree. Works for classic
+        PATs, fine-grained PATs, GitHub App installation tokens, and OAuth
+        tokens without special-casing.
+        """
         token = self.config.github.token
-        return f"https://{self.config.bot.github_user}:{token}@github.com/{self.owner}/{self.name}.git"
+        return f"https://x-access-token:{token}@github.com/{self.owner}/{self.name}.git"
 
     def github_url(self) -> str:
         return f"https://github.com/{self.owner}/{self.name}"
