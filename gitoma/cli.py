@@ -162,6 +162,60 @@ def _safe_cleanup(git_repo: "GitRepo") -> None:
 _HEARTBEAT_INTERVAL_S = 30.0
 
 
+def _run_self_review(
+    config: "Config",
+    owner: str,
+    name: str,
+    pr_number: int,
+    state: "AgentState",
+) -> None:
+    """Phase 5 — adversarial LLM critic posts findings to the freshly-opened PR.
+
+    Never re-raises: a failed self-review must not undo a successful
+    Phase 4 (the PR exists and the branch is pushed). Failures are
+    logged to the trace + user's terminal; state advances regardless.
+    """
+    from gitoma.review.self_critic import SelfCriticAgent
+
+    console.print()
+    console.print(Rule("[primary]PHASE 5 — SELF-REVIEW[/primary]", style="primary"))
+    console.print(
+        f"[muted]Running adversarial critic on PR #{pr_number}…[/muted]"
+    )
+
+    state.current_operation = f"Self-reviewing PR #{pr_number}"
+    save_state(state)
+
+    try:
+        agent = SelfCriticAgent(config)
+        result = agent.review_pr(owner, name, pr_number)
+    except Exception as exc:
+        _warn(
+            f"Self-review failed: {exc}",
+            hint="The PR is still open. Rerun with `gitoma review` when ready.",
+        )
+        state.current_operation = f"Self-review failed: {exc}"
+        save_state(state)
+        return
+
+    n = len(result.findings)
+    if result.skipped_reason:
+        console.print(f"[muted]Self-review skipped — {result.skipped_reason}[/muted]")
+        state.current_operation = f"Self-review skipped: {result.skipped_reason}"
+    elif n == 0:
+        _ok("Self-review: no issues flagged.")
+        state.current_operation = "Self-review: no findings"
+    else:
+        by_sev = {"blocker": 0, "major": 0, "minor": 0, "nit": 0}
+        for f in result.findings:
+            by_sev[f.severity] = by_sev.get(f.severity, 0) + 1
+        summary = ", ".join(f"{v} {k}" for k, v in by_sev.items() if v)
+        posted_note = "comment posted" if result.comment_posted else "post failed"
+        _ok(f"Self-review: {n} finding(s) ({summary}) — {posted_note}.")
+        state.current_operation = f"Self-review: {n} findings ({summary})"
+    save_state(state)
+
+
 def _pid_alive(pid: int | None) -> bool:
     """True iff `pid` still names a running process on this machine."""
     if not pid or pid <= 0:
@@ -900,6 +954,13 @@ def run(
     resume: Annotated[bool, typer.Option("--resume", help="Resume an existing agent run")] = False,
     reset_state: Annotated[bool, typer.Option("--reset", help="Delete existing state and start fresh")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompts")] = False,
+    no_self_review: Annotated[
+        bool,
+        typer.Option(
+            "--no-self-review",
+            help="Skip the Phase 5 self-critic pass that posts a review comment on the PR",
+        ),
+    ] = False,
     skip_lm: Annotated[bool, typer.Option("--skip-lm-check", hidden=True, help="Skip LM Studio check (testing)")] = False,
 ) -> None:
     """
@@ -1256,10 +1317,24 @@ def run(
         save_state(state)
         _safe_cleanup(git_repo)
 
-        console.print(
-            f"\n[muted]Next: run [primary]gitoma review {repo_url}[/primary] "
-            "once Copilot reviews the PR.[/muted]"
-        )
+        # ────────────────────────────────────────────────────────────────────
+        # PHASE 5 — SELF-REVIEW (optional, default on)
+        # Adversarial critic LLM reads the PR diff + posts findings as a
+        # summary comment. The run stays at PR_OPEN; current_operation
+        # narrates the critic pass so the cockpit shows progress.
+        # ────────────────────────────────────────────────────────────────────
+        if no_self_review:
+            console.print(
+                f"\n[muted]Self-review skipped (--no-self-review). "
+                f"Next: run [primary]gitoma review {repo_url}[/primary] "
+                "once Copilot reviews the PR.[/muted]"
+            )
+        else:
+            _run_self_review(config, owner, name, pr_info.number, state)
+            console.print(
+                f"\n[muted]Next: run [primary]gitoma review {repo_url}[/primary] "
+                "when you want to integrate external review comments.[/muted]"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
