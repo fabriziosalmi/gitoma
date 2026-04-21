@@ -122,6 +122,39 @@ def _require_str_size(name: str, value: str, max_chars: int) -> None:
         )
 
 
+def _require_repo_path(path: str) -> None:
+    """Reject file paths with traversal, absolute, or NUL byte shapes.
+
+    MCP tools that accept a ``path`` argument forward it to PyGithub,
+    which in turn hits GitHub's REST API. GitHub rejects truly
+    absolute paths, but ``..`` segments resolve WITHIN the repo scope
+    — which means an LLM-suggested ``../other/file`` can escape an
+    intended subdir or clobber files the caller didn't expect. The
+    REST API (routers.py) already validates similar inputs; mirror
+    that philosophy here so MCP has the same contract.
+    """
+    if not isinstance(path, str):
+        raise ToolInputError("path must be a string")
+    if not path:
+        raise ToolInputError("path must not be empty")
+    if "\x00" in path:
+        raise ToolInputError("path contains a NUL byte")
+    if path.startswith(("/", "\\")):
+        raise ToolInputError(
+            f"absolute paths are not allowed: {path!r} "
+            "(paths are always repo-relative)"
+        )
+    # ``..`` at any position breaks out of the intended directory.
+    # Compare against ``PurePosixPath(...).parts`` so Windows-style
+    # ``..\\x`` also trips the check.
+    from pathlib import PurePosixPath as _PPP
+    parts = _PPP(path.replace("\\", "/")).parts
+    if any(p == ".." for p in parts):
+        raise ToolInputError(
+            f"path contains a '..' segment (traversal): {path!r}"
+        )
+
+
 # ── Retry decorator for rate-limit handling ─────────────────────────────────
 # GitHub's secondary rate limit ("abuse detection") fires at ~10 req/s and
 # returns 403 with a Retry-After header. We back off exponentially + jitter
@@ -316,6 +349,7 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         """
         try:
             _require_repo(owner, repo)
+            _require_repo_path(path)
         except ToolInputError as e:
             return _error(e, owner=owner, repo=repo)
 
@@ -355,6 +389,12 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
                 raise ToolInputError(
                     f"too many paths: {len(paths)} > {MAX_BATCH_PATHS}"
                 )
+            # Validate every path up-front — one bad path in a 50-element
+            # batch shouldn't silently skip others, and should fail the
+            # whole call clearly. Cheaper than discovering the problem
+            # mid-fetch after N successful reads.
+            for p in paths:
+                _require_repo_path(p)
         except ToolInputError as e:
             return _error(e, owner=owner, repo=repo, path_count=len(paths))
 
@@ -599,6 +639,7 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
             _require_str_size("message", message, MAX_COMMIT_MESSAGE_CHARS)
             _require_str_size("branch", branch, 255)
             _require_str_size("path", path, 1024)
+            _require_repo_path(path)
 
             r = _gh_client().get_repo(owner, repo)
             # PyGithub update_file requires the existing blob SHA; we try

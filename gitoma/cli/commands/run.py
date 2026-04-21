@@ -65,8 +65,23 @@ def _phase_already_done(state: AgentState, phase: AgentPhase) -> bool:
     scratch — which is correct for ANALYZING/PLANNING (no partial output
     persisted) and harmless for WORKING (the worker skips already-completed
     subtasks via ``status == "completed"``).
+
+    Defensive: an unknown phase value (corrupted state file, version
+    drift, manual edit) used to silently fall through as "before
+    ANALYZING" via ``_PHASE_ORDER.get(..., 0)`` — re-running the whole
+    pipeline without telling the operator the state was broken. We now
+    warn loudly so the audit trail shows what happened, then still
+    fail-safe (re-plan everything) so resume doesn't crash on bad data.
     """
-    return _PHASE_ORDER.get(state.phase, 0) > _PHASE_ORDER[phase.value]
+    if state.phase not in _PHASE_ORDER:
+        console.print(
+            f"[warning]⚠ Unknown phase {state.phase!r} in state file — "
+            "treating as pre-ANALYZING. The state may be corrupt or from "
+            "a different gitoma version. Use [primary]--reset[/primary] "
+            "if resume misbehaves.[/warning]"
+        )
+        return False
+    return _PHASE_ORDER[state.phase] > _PHASE_ORDER[phase.value]
 from gitoma.ui.console import console
 from gitoma.ui.panels import (
     make_analyzer_progress,
@@ -279,10 +294,24 @@ def run(
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 1 — ANALYZE
         # ────────────────────────────────────────────────────────────────────────
+        # Resume gate on ANALYZING: skip only when we can actually rehydrate
+        # the persisted metric report. A partial / schema-drifted state
+        # file used to crash the whole resume with a KeyError out of
+        # ``MetricReport.from_dict`` — we now fall back to re-running
+        # analysis with a warning so the run still makes progress.
+        report = None
         if _phase_already_done(state, AgentPhase.ANALYZING) and state.metric_report:
-            console.print("[muted]↩ Skipping PHASE 1 — analysis already in state.[/muted]")
-            report = MetricReport.from_dict(state.metric_report)
-        else:
+            try:
+                report = MetricReport.from_dict(state.metric_report)
+                console.print("[muted]↩ Skipping PHASE 1 — analysis already in state.[/muted]")
+            except Exception as exc:
+                console.print(
+                    f"[warning]⚠ Could not restore metric_report from state "
+                    f"({type(exc).__name__}: {str(exc)[:80]}). "
+                    "Re-running PHASE 1.[/warning]"
+                )
+                report = None
+        if report is None:
             with _phase("PHASE 1 — ANALYSIS", cleanup=git_repo, state=state):
                 from gitoma.analyzers.registry import AnalyzerRegistry, ALL_ANALYZER_CLASSES
 
@@ -335,10 +364,22 @@ def run(
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 2 — PLAN
         # ────────────────────────────────────────────────────────────────────────
+        # Resume gate on PLANNING: skip only if we can actually rehydrate.
+        # Same reasoning as PHASE 1 — fall back to re-planning on deser
+        # failure instead of crashing the whole resume.
+        plan = None
         if _phase_already_done(state, AgentPhase.PLANNING) and state.task_plan:
-            console.print("[muted]↩ Skipping PHASE 2 — task plan already in state.[/muted]")
-            plan = TaskPlan.from_dict(state.task_plan)
-        else:
+            try:
+                plan = TaskPlan.from_dict(state.task_plan)
+                console.print("[muted]↩ Skipping PHASE 2 — task plan already in state.[/muted]")
+            except Exception as exc:
+                console.print(
+                    f"[warning]⚠ Could not restore task_plan from state "
+                    f"({type(exc).__name__}: {str(exc)[:80]}). "
+                    "Re-running PHASE 2.[/warning]"
+                )
+                plan = None
+        if plan is None:
             with _phase("PHASE 2 — PLANNING", cleanup=git_repo, state=state):
                 from gitoma.planner.planner import PlannerAgent
                 from gitoma.planner.llm_client import LLMError

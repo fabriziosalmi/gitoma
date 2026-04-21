@@ -244,14 +244,28 @@ function _memo(key, payload, fn) {
 function _invalidateMemo(key) { _renderMemo.delete(key); }
 
 // ── Toast system ────────────────────────────────────────────────────────
+// ``_seen`` used to grow unboundedly — a cockpit left open overnight on a
+// busy tailnet would accumulate thousands of keys, each with a long title/
+// body string, stressing GC. ``show`` now prunes entries whose timestamp
+// is older than 2× the dedup window on every call (amortised O(1) in
+// typical use since the map stays small).
 const Toast = {
   _seen: new Map(),   // key → timestamp of last emission (for de-dup)
   _dedupMs: 2500,
 
   host() { return $("toasts"); },
+  _prune(now) {
+    const cutoff = now - this._dedupMs * 2;
+    for (const [k, ts] of this._seen) {
+      if (ts < cutoff) this._seen.delete(k);
+    }
+  },
   show(level, title, msg = "") {
     const key = `${level}:${title}:${msg}`;
     const now = Date.now();
+    // Prune first so the Map never retains entries past the point where
+    // they could meaningfully de-dup anything.
+    this._prune(now);
     const last = this._seen.get(key) || 0;
     if (now - last < this._dedupMs) return;
     this._seen.set(key, now);
@@ -457,8 +471,17 @@ const LogStream = {
     const decoder = new TextDecoder();
     let buffer = "";
     while (true) {
+      // Orphan-stream guard: if the user dispatched ANOTHER run while
+      // this stream was pumping, ``open()`` flipped ``this.jobId`` and
+      // ``this.controller`` to the new one. Our fetch's AbortController
+      // should have been aborted by ``close()``, but reader.read() can
+      // still flush a buffered chunk before it sees the abort. Drop
+      // any frame whose owning jobId no longer matches so old-job log
+      // lines never land in the new job's <pre>.
+      if (this.jobId !== jobId) return;
       const { done, value } = await reader.read();
       if (done) break;
+      if (this.jobId !== jobId) return;  // re-check after await
       buffer += decoder.decode(value, { stream: true });
       const frames = buffer.split(/\n\n/);
       buffer = frames.pop() || "";
@@ -475,6 +498,7 @@ const LogStream = {
           }
           const text = payload.line || "";
           if (text.startsWith("__END__")) {
+            if (this.jobId !== jobId) return;
             const status = text.split(":").slice(1).join(":") || "completed";
             const kind = status === "cancelled" ? "cancelled"
                        : status.startsWith("failed") || status === "timed_out" ? "fail"
@@ -487,7 +511,7 @@ const LogStream = {
       }
     }
     // Stream ended without __END__ (network drop, server shutdown…).
-    this._setStatus("done", "closed");
+    if (this.jobId === jobId) this._setStatus("done", "closed");
   },
 
   _appendLine(text) {
@@ -562,13 +586,14 @@ function renderRepoList() {
   const ranOnce = _memo("repo-list", { slice, selected: Store.selected }, () => {
     const host = $("repo-list");
     $("repo-count").textContent = Store.states.length;
-    // Capture the focused index before clearing so we can restore focus
-    // to the equivalent item after rebuild — otherwise a WS tick during
-    // keyboard navigation silently sends focus back to <body>.
+    // Capture the focused repo's IDENTITY (owner/name slug) before
+    // clearing. We used to use just the index, which broke when a repo
+    // was removed: prevFocusIdx=2 would silently jump focus to what
+    // was repo #3 after #1 got deleted. Identity survives re-ordering.
     const prevFocus = document.activeElement;
-    const prevFocusIdx = (prevFocus && prevFocus.classList && prevFocus.classList.contains("repo-item"))
-      ? parseInt(prevFocus.dataset.idx, 10)
-      : -1;
+    const prevFocusSlug = (prevFocus && prevFocus.classList && prevFocus.classList.contains("repo-item"))
+      ? (prevFocus.querySelector(".slug")?.textContent || null)
+      : null;
     clear(host);
     if (!Store.states.length) {
       const empty = el("div", { class: "empty", role: "status" },
@@ -604,11 +629,17 @@ function renderRepoList() {
       );
       host.appendChild(item);
     });
-    // Restore focus to the equivalent item if the user was navigating.
-    if (prevFocusIdx >= 0 && prevFocusIdx < Store.states.length) {
-      const restored = host.querySelector(`.repo-item[data-idx="${prevFocusIdx}"]`);
-      if (restored) {
-        try { restored.focus({ preventScroll: true }); } catch {}
+    // Restore focus to the repo with the same slug (owner/name) — not
+    // the same index. The slug is stable across list shuffles (a repo
+    // being added/removed/re-ordered doesn't change existing slugs),
+    // so focus lands back on the row the user was actually on.
+    if (prevFocusSlug) {
+      const items = host.querySelectorAll(".repo-item");
+      for (const it of items) {
+        if (it.querySelector(".slug")?.textContent === prevFocusSlug) {
+          try { it.focus({ preventScroll: true }); } catch {}
+          break;
+        }
       }
     }
   });
@@ -1314,7 +1345,18 @@ function wireDialogs() {
   $("confirm-ok").addEventListener("click", () => {
     const fn = window.__confirmAction;
     closeDialog("confirm-dialog");
+    // Clear BEFORE invoking so a re-entrant confirmAndX() inside fn()
+    // doesn't see a stale pointer — set fresh by the re-entering call.
+    window.__confirmAction = null;
     if (fn) fn();
+  });
+  // Native ``<dialog>`` fires a "close" event on any close path
+  // (Esc, backdrop click, button, showModal() replacement). Attaching
+  // here guarantees ``__confirmAction`` never outlives the dialog it
+  // was queued for — the old code only cleared on the OK branch, so
+  // cancelling one confirm and then opening a different one could
+  // arm the OK button with the STALE first callback.
+  $("confirm-dialog").addEventListener("close", () => {
     window.__confirmAction = null;
   });
 }
@@ -1588,3 +1630,29 @@ if (document.readyState === "loading") {
 } else {
   init();
 }
+
+// ── Global error handlers ───────────────────────────────────────────────
+// Without these, an unhandled exception in a render callback or a
+// rejected Promise from any of the API helpers would vanish into the
+// browser console and leave the user staring at a half-rendered
+// cockpit with no feedback. We surface them as red toasts — short
+// messages only, no stack traces (those stay in the console for the
+// dev who wants them).
+window.addEventListener("error", (ev) => {
+  console.error("cockpit.window_error", ev.error || ev.message, {
+    filename: ev.filename, lineno: ev.lineno, colno: ev.colno,
+  });
+  // Toast may not exist yet if the crash happened before module init.
+  if (typeof Toast !== "undefined") {
+    const msg = (ev.error && ev.error.message) || ev.message || "Unhandled error";
+    Toast.error("UI error", String(msg).slice(0, 180));
+  }
+});
+window.addEventListener("unhandledrejection", (ev) => {
+  console.error("cockpit.unhandled_rejection", ev.reason);
+  if (typeof Toast !== "undefined") {
+    const reason = ev.reason;
+    const msg = (reason && (reason.message || reason.toString())) || "Unhandled async error";
+    Toast.error("UI async error", String(msg).slice(0, 180));
+  }
+});
