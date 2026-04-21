@@ -895,3 +895,80 @@ def test_r1_finalised_pr_skips_self_review_and_ci_watch():
         "PHASE 6 gate must check pr_finalised — otherwise CI-watch polls "
         "Actions on a deleted branch and chases 404s"
     )
+
+
+# ── R1b (review): --integrate short-circuits on merged/closed PRs ─────────
+
+
+def test_r1b_review_integrate_skips_before_cloning_when_pr_finalised():
+    """Sibling of the R1 ``run`` guard: ``gitoma review --integrate`` must
+    check the live PR state BEFORE cloning. Cloning a 40MB repo only to
+    bomb at ``git checkout <auto-deleted-branch>`` is wasteful at best and
+    misleading at worst — the cockpit live-ran this exact failure
+    (RC=1, pathspec did not match) against a merged PR whose branch
+    GitHub auto-deleted."""
+    src = Path(__file__).resolve().parents[1] / "gitoma/cli/commands/review.py"
+    text = src.read_text(encoding="utf-8")
+
+    # The guard must live in the integrate branch; locate it by anchoring
+    # on "INTEGRATING REVIEW COMMENTS" and slicing forward.
+    integrate_idx = text.find("INTEGRATING REVIEW COMMENTS")
+    assert integrate_idx != -1
+    guard_region = text[integrate_idx : integrate_idx + 4000]
+
+    # Must query GitHub for the PR state.
+    assert "gh.get_pr(owner, name, pr_number)" in guard_region, (
+        "review --integrate must query GitHub for the PR state before "
+        "cloning — a merged/closed PR is a waste of clone + a misleading "
+        "checkout failure"
+    )
+    # Must short-circuit on merged explicitly.
+    assert "gh_pr.merged" in guard_region, (
+        "review --integrate must check ``gh_pr.merged`` — merged PRs "
+        "should not receive further fix commits"
+    )
+    # Must short-circuit on closed explicitly.
+    assert 'gh_pr.state == "closed"' in guard_region, (
+        "review --integrate must check for closed PRs — pushing to a "
+        "closed PR's (possibly revived) branch is wrong"
+    )
+    # Must advance state to DONE on the skip paths so the cockpit pipeline
+    # lights up correctly and the orphan detector doesn't flag the run.
+    assert "AgentPhase.DONE" in guard_region, (
+        "review --integrate skip paths must advance state to DONE — "
+        "otherwise the cockpit's Pipeline strip is stuck mid-flight"
+    )
+    # Must early-return via ``return`` (not _abort) — this is a clean
+    # no-op, not an error condition.
+    skip_block = guard_region[guard_region.find("gh_pr.merged") : guard_region.find("gh_pr.merged") + 1500]
+    assert skip_block.count("return") >= 2, (
+        "review --integrate must ``return`` cleanly (not _abort) on merged "
+        "and closed — both are expected states, not errors"
+    )
+    # 404 on the PR must _abort with a clear message.
+    assert 'getattr(exc, "status", None) == 404' in guard_region, (
+        "review --integrate must special-case 404 on the PR lookup — a "
+        "deleted PR is distinct from a transient API error"
+    )
+
+
+def test_r1b_review_integrate_guard_runs_before_clone():
+    """Belt-and-braces: the guard's GitHub query must textually precede
+    the clone call. If a future refactor moves clone above the guard the
+    performance + UX win evaporates — we'd clone, then discover the PR
+    is merged, then throw away the clone. Pin the ordering."""
+    src = Path(__file__).resolve().parents[1] / "gitoma/cli/commands/review.py"
+    text = src.read_text(encoding="utf-8")
+
+    integrate_idx = text.find("INTEGRATING REVIEW COMMENTS")
+    assert integrate_idx != -1
+    region = text[integrate_idx:]
+
+    guard_idx = region.find("gh_pr.merged")
+    clone_idx = region.find("_clone_repo(repo_url, config)")
+    assert guard_idx != -1, "PR-state guard missing"
+    assert clone_idx != -1, "_clone_repo call missing"
+    assert guard_idx < clone_idx, (
+        "PR-state guard must textually precede _clone_repo — otherwise "
+        "we pay for a 40MB clone before discovering the PR is finalised"
+    )

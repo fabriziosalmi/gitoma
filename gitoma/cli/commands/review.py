@@ -109,13 +109,69 @@ def review(
 
     console.print(Rule("[primary]INTEGRATING REVIEW COMMENTS[/primary]", style="primary"))
 
+    # Validate PR state on GitHub BEFORE cloning. A merged/closed PR means
+    # its branch is often already auto-deleted (GitHub's default post-merge
+    # behaviour), and even when the branch survives, pushing new fixes onto
+    # a finalised PR is wrong — the maintainer moved past it. Mirror of the
+    # ``pr_finalised`` guard in ``gitoma run`` but at the review entry point,
+    # since ``review --integrate`` is the other code path that relies on a
+    # mutable agent branch.
+    try:
+        from github import GithubException
+        gh_pr = gh.get_pr(owner, name, pr_number)
+        if gh_pr.merged:
+            console.print(
+                f"\n[info]PR #{pr_number} was merged on GitHub — "
+                "nothing to integrate (branch is finalised).[/info]"
+            )
+            if state:
+                state.current_operation = f"PR #{pr_number} merged — review integration skipped"
+                state.advance(AgentPhase.DONE)
+                save_state(state)
+            return
+        if gh_pr.state == "closed":
+            console.print(
+                f"\n[info]PR #{pr_number} is closed on GitHub — "
+                "nothing to integrate.[/info]"
+            )
+            if state:
+                state.current_operation = f"PR #{pr_number} closed — review integration skipped"
+                state.advance(AgentPhase.DONE)
+                save_state(state)
+            return
+    except GithubException as exc:
+        if getattr(exc, "status", None) == 404:
+            _abort(
+                f"PR #{pr_number} not found on GitHub",
+                hint=(
+                    "The PR or its repository may have been deleted. "
+                    "Run [primary]gitoma status --remote[/primary] to verify, "
+                    "or pass a different [primary]--pr[/primary] number."
+                ),
+            )
+        # Other API errors — warn and continue. Worst case the checkout
+        # below still fails with its own clearer diagnostic.
+        console.print(
+            f"[warning]⚠ Could not verify PR #{pr_number} state "
+            f"({exc}); attempting integration anyway.[/warning]"
+        )
+    except Exception as exc:
+        console.print(
+            f"[warning]⚠ Unexpected error verifying PR #{pr_number}: "
+            f"{exc}; attempting integration anyway.[/warning]"
+        )
+
     # LM Studio check before integrating
     llm = _check_lmstudio(config)
 
     console.print(f"[muted]Cloning repo to apply fixes on branch {state.branch}…[/muted]")
     git_repo = _clone_repo(repo_url, config)
 
-    # Checkout agent branch
+    # Checkout agent branch. At this point the PR is open on GitHub per
+    # the pre-flight above, so a pathspec failure here is the narrow
+    # case: PR is open but its head branch was deleted out from under it
+    # (manual delete, force-pushed to a different ref, …). Sharpen the
+    # hint for that specific shape.
     try:
         git_repo.repo.git.checkout(state.branch)
         _ok(f"Checked out branch: {state.branch}")
@@ -123,7 +179,13 @@ def review(
         _safe_cleanup(git_repo)
         _abort(
             f"Could not checkout branch '{state.branch}': {e}",
-            hint="The branch may have been deleted on remote. Use gitoma status --remote to verify.",
+            hint=(
+                f"PR #{pr_number} is open on GitHub but its branch "
+                f"'{state.branch}' no longer exists on the remote. "
+                "Someone likely deleted it. Options: restore the branch "
+                "from the PR's commit history, or run "
+                "[primary]gitoma run --reset[/primary] to start fresh."
+            ),
         )
 
     from gitoma.review.integrator import ReviewIntegrator
