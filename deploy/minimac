@@ -33,6 +33,9 @@
 #   MINIMAC_HOST=user@host             # bypasses USER/IP if set
 #   INSTALL_DIR=gitoma                 # remote $HOME-relative
 #   SERVICE_PORT=8000                  # default
+#
+# Global flags (any position):
+#   -y / --yes / --force                skip "there are running jobs" prompts
 
 set -euo pipefail
 
@@ -46,6 +49,25 @@ LAUNCH_LABEL="dev.gitoma.serve"
 URL="http://${MINIMAC_IP}:${SERVICE_PORT}"
 
 LOCAL_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Global force flag — short-circuits every "are you sure?" interstitial.
+# Scanned out of $@ before subcommand dispatch so any of `-y`/`--yes`/
+# `--force` can appear in any position (`minimac deploy -y`,
+# `minimac -y deploy`, etc.).
+FORCE=0
+_filtered=()
+for _arg in "$@"; do
+    case "$_arg" in
+        -y|--yes|--force) FORCE=1 ;;
+        *) _filtered+=("$_arg") ;;
+    esac
+done
+if [[ ${#_filtered[@]} -gt 0 ]]; then
+    set -- "${_filtered[@]}"
+else
+    set --
+fi
+unset _filtered _arg
 
 # ── Output helpers ───────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -62,12 +84,17 @@ die()  { printf "%sFAIL%s %s\n"         "$R" "$RESET" "$*" >&2; exit 1; }
 
 # ── Tiny utilities ───────────────────────────────────────────────────────
 
-# Probe: fast ping (200ms timeout) → fail fast if Tailscale is down.
+# Probe: fast ping → fail fast if Tailscale is down. macOS ping can drop
+# individual packets on ~150ms Tailscale links, so we try twice with a
+# short backoff before declaring the link dead. ``-c 2 -t 3`` sends two
+# packets, waits up to 3s for a reply. If EITHER succeeds, we're alive.
 _check_tailscale() {
-    if ping -c 1 -t 2 "$MINIMAC_IP" >/dev/null 2>&1; then
+    if ping -c 2 -t 3 "$MINIMAC_IP" >/dev/null 2>&1; then
         return 0
     fi
-    return 1
+    # One more retry — some Tailscale relays take a second to wake up.
+    sleep 1
+    ping -c 2 -t 3 "$MINIMAC_IP" >/dev/null 2>&1
 }
 
 # Probe: SSH with BatchMode so a missing key fails instead of hanging.
@@ -92,8 +119,59 @@ _wait_for_http() {
 }
 
 # Fetch the runtime token. Empty string if absent.
+# ``< /dev/null`` is critical: this function runs inside pipelines (e.g.
+# ``printf y | minimac deploy``) where the parent stdin has real data
+# meant for a later ``read`` prompt. Without the redirection, ``ssh -T``
+# inherits and consumes that stdin, leaving ``read -r reply`` EOF'd and
+# the script exiting under ``set -e`` with no visible error.
 _remote_token() {
-    ssh -T "$MINIMAC_HOST" 'cat ~/.gitoma/runtime_token 2>/dev/null || true' | tr -d '\r\n'
+    ssh -T "$MINIMAC_HOST" 'cat ~/.gitoma/runtime_token 2>/dev/null || true' < /dev/null | tr -d '\r\n'
+}
+
+# Count background jobs currently in ``status=running`` on the remote
+# server. Queries /api/v1/jobs with the bearer. Returns 0 (zero running)
+# on any failure (unreachable server, missing token, malformed JSON) —
+# we fail open because the caller's action should still proceed; the
+# downstream SSH+launchctl calls will surface any real problem clearly.
+_running_jobs_count() {
+    # Grouped ``< /dev/null`` on the whole block: every SSH/curl/python
+    # inside this function inherits /dev/null as stdin, so the function
+    # can never consume the parent shell's stdin — critical for the
+    # ``printf y | minimac deploy`` pipeline where stdin is reserved
+    # for the y/N prompt that fires after this function returns.
+    {
+        local tok
+        tok="$(_remote_token)"
+        [[ -z "$tok" ]] && { echo 0; return; }
+        local resp
+        resp="$(curl -sS --max-time 3 -H "Authorization: Bearer $tok" "${URL}/api/v1/jobs" 2>/dev/null || true)"
+        [[ -z "$resp" ]] && { echo 0; return; }
+        python3 -c '
+import sys, json
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    print(0); sys.exit(0)
+print(sum(1 for v in d.values() if isinstance(v, dict) and v.get("status") == "running"))
+' <<< "$resp" 2>/dev/null || echo 0
+    } < /dev/null
+}
+
+# Prompt the user before a disruptive action if there's work in flight.
+# Respects ``-y``/``--force``. Args: $1=action label shown in the warning.
+_confirm_if_running() {
+    local action="$1"
+    [[ "${FORCE:-0}" == "1" ]] && return 0
+    local n
+    n="$(_running_jobs_count)"
+    [[ "$n" -eq 0 ]] && return 0
+    warn "${n} running job(s) on the remote — ${action} will interrupt them"
+    warn "  (the CLI subprocess gets SIGTERM; state is left mid-phase)"
+    warn "  (to continue afterwards: gitoma run <url> --resume)"
+    printf "  Proceed with %s anyway? [y/N] " "$action"
+    local reply
+    read -r reply
+    [[ "${reply:-}" =~ ^[Yy]$ ]] || die "Aborted (pass -y/--force to skip this prompt)"
 }
 
 # ── Subcommand: deploy ───────────────────────────────────────────────────
@@ -113,6 +191,12 @@ cmd_deploy() {
         die "SSH: cannot reach $MINIMAC_HOST (authorized_keys?)"
     fi
     ok "SSH: key authorised"
+
+    # Don't silently kill a running job. The server is about to be
+    # unloaded + reloaded, which SIGTERMs the CLI subprocess of any
+    # in-flight `gitoma run`. Warn + ask — the user can continue after
+    # the new code is live with `gitoma run <url> --resume`.
+    _confirm_if_running "Deploy (uvicorn restart)"
 
     if [[ -n "$(git -C "$LOCAL_REPO" status --porcelain 2>/dev/null || true)" ]]; then
         warn "Local tree has uncommitted changes — they WILL ship to minimac"
@@ -407,12 +491,16 @@ cmd_start() {
     else warn "Service loaded but HTTP not green yet — run: deploy/minimac status"; fi
 }
 cmd_stop() {
+    _confirm_if_running "Stop"
     step "Stopping service"
     ssh -T "$MINIMAC_HOST" "launchctl unload ~/Library/LaunchAgents/${LAUNCH_LABEL}.plist 2>&1" | sed 's/^/  /' || true
     ok "Service unloaded"
 }
 cmd_restart() {
-    cmd_stop
+    _confirm_if_running "Restart"
+    # FORCE=1 propagates to ``cmd_stop`` so the user isn't re-prompted;
+    # the bash "VAR=val func" assignment is scoped to the single call.
+    FORCE=1 cmd_stop
     sleep 1
     cmd_start
 }
@@ -450,6 +538,9 @@ cmd_token() {
 
 # ── Subcommand: rotate-token ─────────────────────────────────────────────
 cmd_rotate_token() {
+    # Token rotation requires the uvicorn process to restart so the new
+    # token is minted + loaded into env. Any in-flight run is interrupted.
+    _confirm_if_running "Rotate token (restart)"
     step "Rotating runtime token"
     ssh -T "$MINIMAC_HOST" "
         rm -f \$HOME/.gitoma/runtime_token
@@ -631,12 +722,16 @@ cmd_ssh() {
 
 # ── Subcommand: uninstall ────────────────────────────────────────────────
 cmd_uninstall() {
+    # Uninstall is destructive AND interrupts jobs; warn on both.
+    _confirm_if_running "Uninstall"
     warn "This removes:  launchd plist · venv · runtime_token · source tree · logs"
     warn "It KEEPS:      ~/.gitoma/.env (contains your GITHUB_TOKEN — delete by hand if wanted)"
-    printf "  Proceed? [y/N] "
-    local reply
-    read -r reply
-    [[ "${reply:-}" =~ ^[Yy]$ ]] || die "Aborted"
+    if [[ "${FORCE:-0}" != "1" ]]; then
+        printf "  Proceed? [y/N] "
+        local reply
+        read -r reply
+        [[ "${reply:-}" =~ ^[Yy]$ ]] || die "Aborted"
+    fi
 
     ssh -T "$MINIMAC_HOST" "
         launchctl unload \$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist 2>/dev/null || true
@@ -651,7 +746,10 @@ cmd_uninstall() {
 
 # ── Dispatch ─────────────────────────────────────────────────────────────
 usage() {
-    sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'
+    # Extract the full banner comment (lines 3..38 cover the header +
+    # commands table + env overrides + global flags) and strip the
+    # leading "# " to turn it into plain help text.
+    sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 cmd="${1:-}"
