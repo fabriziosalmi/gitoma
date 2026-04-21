@@ -26,6 +26,7 @@ from gitoma.cli._helpers import (
     _warn,
     _watch_ci_and_maybe_fix,
 )
+from gitoma.analyzers.base import MetricReport
 from gitoma.core.github_client import GitHubClient
 from gitoma.core.repo import parse_repo_url
 from gitoma.core.state import (
@@ -37,6 +38,35 @@ from gitoma.core.state import (
     release_run_lock,
     save_state,
 )
+from gitoma.planner.task import TaskPlan
+
+
+# Ordering used to decide "have we already passed this phase?" when
+# resuming. ANALYZING < PLANNING < WORKING < PR_OPEN < REVIEWING < DONE;
+# IDLE is a sentinel meaning "never started" and treated as before
+# ANALYZING.
+_PHASE_ORDER: dict[str, int] = {
+    AgentPhase.IDLE.value: 0,
+    AgentPhase.ANALYZING.value: 1,
+    AgentPhase.PLANNING.value: 2,
+    AgentPhase.WORKING.value: 3,
+    AgentPhase.PR_OPEN.value: 4,
+    AgentPhase.REVIEWING.value: 5,
+    AgentPhase.DONE.value: 6,
+}
+
+
+def _phase_already_done(state: AgentState, phase: AgentPhase) -> bool:
+    """True when ``state.phase`` is strictly past ``phase``.
+
+    Used by the ``--resume`` path to skip phases whose output is already
+    persisted on the state file. A phase that crashed mid-execution leaves
+    ``state.phase`` equal to itself (not past it), so it gets re-run from
+    scratch — which is correct for ANALYZING/PLANNING (no partial output
+    persisted) and harmless for WORKING (the worker skips already-completed
+    subtasks via ``status == "completed"``).
+    """
+    return _PHASE_ORDER.get(state.phase, 0) > _PHASE_ORDER[phase.value]
 from gitoma.ui.console import console
 from gitoma.ui.panels import (
     make_analyzer_progress,
@@ -129,6 +159,15 @@ def run(
             existing_state = None
             _warn("Existing state deleted — starting fresh")
         elif resume:
+            # Refuse to "resume" something already finished — the operator
+            # almost certainly meant --reset. Clearer than silently doing
+            # nothing or re-running a DONE run.
+            if existing_state.phase == AgentPhase.DONE.value:
+                console.print(
+                    "[info]✓ This run is already DONE. "
+                    "Use [primary]--reset[/primary] to start over.[/info]"
+                )
+                raise typer.Exit(0)
             console.print(
                 f"[info]↩ Resuming from phase: [bold]{existing_state.phase}[/bold][/info]"
             )
@@ -144,9 +183,20 @@ def run(
             raise typer.Exit(0)
 
     # ── Branch name ─────────────────────────────────────────────────────────
+    # Granularity: microseconds. The previous ``%Y%m%d-%H%M%S`` format
+    # collided silently when two ``gitoma run`` invocations started in the
+    # same wall-clock second (CI matrix, parallel cockpit dispatches…), so
+    # the second run would silently get the same branch name and overwrite
+    # the first. ``%f`` (microseconds) makes a same-second collision
+    # cryptographically improbable; the explicit collision check below is
+    # defence-in-depth in case two invocations land on the same microsecond
+    # (e.g. clock-skew across nodes pushing to the same repo).
+    def _generate_branch_name() -> str:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        return f"gitoma/improve-{ts}"
+
     if not branch:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        branch = f"gitoma/improve-{ts}"
+        branch = _generate_branch_name()
 
     # ── GitHub check ────────────────────────────────────────────────────────
     gh = GitHubClient(config)
@@ -154,17 +204,31 @@ def run(
     print_repo_info(repo_info)
     base_branch = base or repo_info["default_branch"]
 
-    # Verify the target branch doesn't already exist remotely
+    # Verify the target branch doesn't already exist remotely. We retry
+    # generation up to a few times rather than once — if the operator's
+    # clock jumped backward or the API call took long enough that the
+    # first regenerated name also collides, we don't want to ship the
+    # collision either.
     try:
         remote_branches = gh.list_branches(owner, name)
-        if branch in remote_branches:
+        attempts = 0
+        while branch in remote_branches and attempts < 5:
             _warn(
                 f"Branch '{branch}' already exists on GitHub",
-                hint="A new timestamped branch will be used instead.",
+                hint="Generating a new microsecond-stamped branch instead.",
             )
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            branch = f"gitoma/improve-{ts}"
+            branch = _generate_branch_name()
+            attempts += 1
             console.print(f"[muted]  New branch: {branch}[/muted]")
+        if branch in remote_branches:
+            # Five rolls of microsecond timestamps and still colliding —
+            # the clock is stuck, or someone is mass-creating ``gitoma/``
+            # branches. Either way: stop, don't silently ship a collision.
+            _abort(
+                f"Could not produce a unique branch name after {attempts} attempts.",
+                hint="Check the system clock and the existing 'gitoma/improve-*' "
+                "branches on GitHub; pass --branch <name> to override.",
+            )
     except Exception:
         pass  # non-fatal — continue
 
@@ -183,54 +247,75 @@ def run(
     languages = git_repo.detect_languages() or ["Unknown"]
     console.print(f"[muted]Languages detected: {', '.join(languages)}[/muted]")
 
-    # ── Initialize state ────────────────────────────────────────────────────
-    state = AgentState(
-        repo_url=repo_url,
-        owner=owner,
-        name=name,
-        branch=branch,
-        phase=AgentPhase.ANALYZING,
-    )
+    # ── Initialize state (fresh run) or reuse the persisted one (--resume) ─
+    # On --resume we keep ``existing_state`` (so phase, metric_report,
+    # task_plan and PR fields survive). The branch from the persisted
+    # state wins over the freshly-generated one — otherwise we'd push
+    # commits to a different branch than the one the prior run created.
+    if existing_state and resume:
+        state = existing_state
+        if state.branch:
+            branch = state.branch
+    else:
+        state = AgentState(
+            repo_url=repo_url,
+            owner=owner,
+            name=name,
+            branch=branch,
+            phase=AgentPhase.ANALYZING,
+        )
     save_state(state)
+
+    # Local handles populated by their respective phases. When --resume
+    # skips a phase, we rehydrate the handle from the persisted state so
+    # later phases (which take ``report``/``plan``/``pr_info`` as inputs)
+    # see the same values they would have on a fresh run.
+    report = None
+    plan = None
+    pr_info = None
 
     with _heartbeat(state):
 
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 1 — ANALYZE
         # ────────────────────────────────────────────────────────────────────────
-        with _phase("PHASE 1 — ANALYSIS", cleanup=git_repo, state=state):
-            from gitoma.analyzers.registry import AnalyzerRegistry, ALL_ANALYZER_CLASSES
+        if _phase_already_done(state, AgentPhase.ANALYZING) and state.metric_report:
+            console.print("[muted]↩ Skipping PHASE 1 — analysis already in state.[/muted]")
+            report = MetricReport.from_dict(state.metric_report)
+        else:
+            with _phase("PHASE 1 — ANALYSIS", cleanup=git_repo, state=state):
+                from gitoma.analyzers.registry import AnalyzerRegistry, ALL_ANALYZER_CLASSES
 
-            registry = AnalyzerRegistry(
-                root=git_repo.root,
-                languages=languages,
-                repo_url=repo_url,
-                owner=owner,
-                name=name,
-                default_branch=base_branch,
-            )
-
-            n_analyzers = len(ALL_ANALYZER_CLASSES)
-            with make_analyzer_progress() as progress:
-                task_id = progress.add_task(
-                    "[heading]Analyzing repository…[/heading]", total=n_analyzers
+                registry = AnalyzerRegistry(
+                    root=git_repo.root,
+                    languages=languages,
+                    repo_url=repo_url,
+                    owner=owner,
+                    name=name,
+                    default_branch=base_branch,
                 )
 
-                def on_progress(analyzer_name: str, idx: int, total: int) -> None:
-                    progress.update(
-                        task_id,
-                        description=f"[heading]{analyzer_name}[/heading]",
-                        advance=1,
+                n_analyzers = len(ALL_ANALYZER_CLASSES)
+                with make_analyzer_progress() as progress:
+                    task_id = progress.add_task(
+                        "[heading]Analyzing repository…[/heading]", total=n_analyzers
                     )
-                    state.current_operation = f"Analyzing: {analyzer_name}"
-                    save_state(state)
 
-                report = registry.run(on_progress=on_progress)
+                    def on_progress(analyzer_name: str, idx: int, total: int) -> None:
+                        progress.update(
+                            task_id,
+                            description=f"[heading]{analyzer_name}[/heading]",
+                            advance=1,
+                        )
+                        state.current_operation = f"Analyzing: {analyzer_name}"
+                        save_state(state)
 
-            state.metric_report = report.to_dict()
-            state.current_operation = "Analysis complete"
-            state.advance(AgentPhase.PLANNING)
-            save_state(state)
+                    report = registry.run(on_progress=on_progress)
+
+                state.metric_report = report.to_dict()
+                state.current_operation = "Analysis complete"
+                state.advance(AgentPhase.PLANNING)
+                save_state(state)
 
         print_metric_report(report)
 
@@ -250,45 +335,57 @@ def run(
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 2 — PLAN
         # ────────────────────────────────────────────────────────────────────────
-        with _phase("PHASE 2 — PLANNING", cleanup=git_repo, state=state):
-            from gitoma.planner.planner import PlannerAgent
-            from gitoma.planner.llm_client import LLMError
+        if _phase_already_done(state, AgentPhase.PLANNING) and state.task_plan:
+            console.print("[muted]↩ Skipping PHASE 2 — task plan already in state.[/muted]")
+            plan = TaskPlan.from_dict(state.task_plan)
+        else:
+            with _phase("PHASE 2 — PLANNING", cleanup=git_repo, state=state):
+                from gitoma.planner.planner import PlannerAgent
+                from gitoma.planner.llm_client import LLMError
 
-            console.print(
-                f"[muted]Asking {config.lmstudio.model} to generate improvement plan…[/muted]"
-            )
-            state.current_operation = f"Planning with {config.lmstudio.model}"
-            save_state(state)
-            file_tree = git_repo.file_tree(max_files=100)
-            planner = PlannerAgent(llm)
-
-            try:
-                plan = planner.plan(report, file_tree)
-            except LLMError as e:
-                # LLM-specific error — give actionable hint
                 console.print(
-                    Panel(
-                        f"[danger]LLM planning failed:[/danger] {e}\n\n"
-                        "[muted]Possible causes:\n"
-                        "  → LM Studio was closed during inference\n"
-                        "  → Model context window exceeded (try a smaller repo)\n"
-                        "  → Model returned malformed JSON (retry with --reset)[/muted]",
-                        title="[danger]🤖 LLM Error[/danger]",
-                        border_style="danger",
-                    )
+                    f"[muted]Asking {config.lmstudio.model} to generate improvement plan…[/muted]"
                 )
-                _safe_cleanup(git_repo)
-                raise typer.Exit(1)
+                state.current_operation = f"Planning with {config.lmstudio.model}"
+                save_state(state)
+                file_tree = git_repo.file_tree(max_files=100)
+                planner = PlannerAgent(llm)
 
-            if not plan.tasks:
-                console.print("[warning]⚠ LLM returned an empty task plan. Nothing to do.[/warning]")
-                _safe_cleanup(git_repo)
-                return
+                try:
+                    plan = planner.plan(report, file_tree)
+                except LLMError as e:
+                    # LLM-specific error — give actionable hint
+                    console.print(
+                        Panel(
+                            f"[danger]LLM planning failed:[/danger] {e}\n\n"
+                            "[muted]Possible causes:\n"
+                            "  → LM Studio was closed during inference\n"
+                            "  → Model context window exceeded (try a smaller repo)\n"
+                            "  → Model returned malformed JSON (retry with --reset)[/muted]",
+                            title="[danger]🤖 LLM Error[/danger]",
+                            border_style="danger",
+                        )
+                    )
+                    _safe_cleanup(git_repo)
+                    raise typer.Exit(1)
 
-            state.task_plan = plan.to_dict()
-            state.current_operation = f"Plan ready — {plan.total_tasks} tasks, {plan.total_subtasks} subtasks"
-            state.advance(AgentPhase.WORKING)
-            save_state(state)
+                if not plan.tasks:
+                    console.print("[warning]⚠ LLM returned an empty task plan. Nothing to do.[/warning]")
+                    _safe_cleanup(git_repo)
+                    # Advance to DONE so the cockpit / `gitoma status` show a
+                    # clean terminal — without this the state was left at
+                    # PLANNING + exit_clean=True (set by the heartbeat
+                    # finally), which observers correctly read as "WORKING
+                    # but stalled" → false orphan flag.
+                    state.current_operation = "Plan was empty — nothing to do"
+                    state.advance(AgentPhase.DONE)
+                    save_state(state)
+                    return
+
+                state.task_plan = plan.to_dict()
+                state.current_operation = f"Plan ready — {plan.total_tasks} tasks, {plan.total_subtasks} subtasks"
+                state.advance(AgentPhase.WORKING)
+                save_state(state)
 
         print_task_plan(plan)
 
@@ -302,6 +399,12 @@ def run(
                 )
             )
             _safe_cleanup(git_repo)
+            # Dry-run completed its declared scope (analyze + plan, no
+            # commit). DONE + an explanatory current_operation makes that
+            # explicit instead of leaving phase=WORKING + exit_clean=True.
+            state.current_operation = "Dry run complete — plan generated, no commits made"
+            state.advance(AgentPhase.DONE)
+            save_state(state)
             return
 
         if not yes:
@@ -312,6 +415,13 @@ def run(
             ):
                 console.print("[muted]Aborted by user.[/muted]")
                 _safe_cleanup(git_repo)
+                # User-driven abort is a clean exit, but we still need a
+                # terminal phase for the cockpit — otherwise the state
+                # shows WORKING + exit_clean=True, which previously
+                # confused observers ("did it finish? did it crash?").
+                state.current_operation = "Aborted by user at confirmation prompt"
+                state.advance(AgentPhase.DONE)
+                save_state(state)
                 return
 
         # ────────────────────────────────────────────────────────────────────────
@@ -320,10 +430,22 @@ def run(
         with _phase("PHASE 3 — EXECUTION", cleanup=git_repo, state=state):
             from gitoma.worker.worker import WorkerAgent
 
-            # Create branch
+            # Branch handling. On --resume the prior run may have pushed
+            # partial commits to ``origin/<branch>``; we must check out
+            # those commits and continue on top of them, otherwise
+            # we'd commit fresh on the default base and the eventual
+            # push would be a non-fast-forward. ``checkout_existing_branch``
+            # returns False if there's no remote branch, in which case
+            # we fall back to the normal "fresh local branch" path.
             try:
-                git_repo.create_branch(branch)
-                _ok(f"Branch created: {branch}")
+                resumed_branch = False
+                if resume:
+                    resumed_branch = git_repo.checkout_existing_branch(branch)
+                if resumed_branch:
+                    _ok(f"Resumed existing branch: {branch}")
+                else:
+                    git_repo.create_branch(branch)
+                    _ok(f"Branch created: {branch}")
             except Exception as e:
                 _abort(
                     f"Failed to create branch '{branch}': {e}",
@@ -394,55 +516,94 @@ def run(
                 )
             )
             _safe_cleanup(git_repo)
+            # Advance to DONE before Exit so the cockpit's orphan
+            # detector doesn't flag this deliberate failure as "process
+            # vanished mid-run". The errors already on state explain
+            # what went wrong; phase=DONE + non-empty errors is the
+            # canonical "tried, failed cleanly" terminal.
+            state.current_operation = (
+                f"Worker phase failed: 0 of {plan.total_tasks} tasks completed"
+            )
+            failure_msg = "All subtasks failed during PHASE 3 (WORKING) — no PR created."
+            if failure_msg not in state.errors:
+                state.errors.append(failure_msg)
+            state.advance(AgentPhase.DONE)
+            save_state(state)
             raise typer.Exit(1)
 
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 4 — PULL REQUEST
         # ────────────────────────────────────────────────────────────────────────
-        with _phase("PHASE 4 — PULL REQUEST", cleanup=git_repo, state=state):
-            from gitoma.pr.pr_agent import PRAgent
+        # On --resume from PR_OPEN (or later), the prior run already pushed
+        # the branch and opened the PR; state.pr_number / state.pr_url are
+        # populated. We rebuild a thin _PRInfo from those instead of
+        # re-running push_and_open_pr (which is mostly idempotent on an
+        # existing PR but would still re-push, re-edit the body, and burn
+        # GitHub API quota for nothing).
+        from dataclasses import dataclass as _pr_dc
 
-            console.print(f"[muted]Pushing {branch} to origin and opening PR…[/muted]")
-            state.current_operation = f"Pushing branch {branch} to origin"
+        @_pr_dc
+        class _PRInfo:
+            number: int
+            url: str
+
+        if (
+            _phase_already_done(state, AgentPhase.WORKING)
+            and state.pr_number
+            and state.pr_url
+        ):
+            console.print(
+                f"[muted]↩ Skipping PHASE 4 — PR #{state.pr_number} already open.[/muted]"
+            )
+            pr_info = _PRInfo(number=state.pr_number, url=state.pr_url)
+            _safe_cleanup(git_repo)
+        else:
+            with _phase("PHASE 4 — PULL REQUEST", cleanup=git_repo, state=state):
+                from gitoma.pr.pr_agent import PRAgent
+
+                console.print(f"[muted]Pushing {branch} to origin and opening PR…[/muted]")
+                state.current_operation = f"Pushing branch {branch} to origin"
+                save_state(state)
+                pr_agent = PRAgent(git_repo=git_repo, gh_client=gh, config=config, state=state)
+
+                try:
+                    pr_info = pr_agent.push_and_open_pr(
+                        report=report,
+                        plan=plan,
+                        branch=branch,
+                        base=base_branch,
+                    )
+                except Exception as e:
+                    err_str = str(e)
+                    if "push" in err_str.lower() or "rejected" in err_str.lower():
+                        _abort(
+                            f"Git push failed: {e}",
+                            hint=(
+                                "Ensure your token has 'contents:write' permission "
+                                "on this repo. Also check the branch isn't protected."
+                            ),
+                            state=state,
+                        )
+                    elif "422" in err_str or "Unprocessable" in err_str:
+                        _abort(
+                            "GitHub rejected the PR (422 Unprocessable Entity)",
+                            hint=(
+                                "Possible causes: PR already exists, branch not pushed, "
+                                "or head/base branch names are wrong."
+                            ),
+                            state=state,
+                        )
+                    else:
+                        raise  # re-raise for the _phase guard to catch
+
+            print_pr_panel(pr_info.url, pr_info.number, branch)
+
+            state.current_operation = f"PR #{pr_info.number} opened"
+            state.pr_number = pr_info.number
+            state.pr_url = pr_info.url
+            state.advance(AgentPhase.PR_OPEN)
             save_state(state)
-            pr_agent = PRAgent(git_repo=git_repo, gh_client=gh, config=config, state=state)
-
-            try:
-                pr_info = pr_agent.push_and_open_pr(
-                    report=report,
-                    plan=plan,
-                    branch=branch,
-                    base=base_branch,
-                )
-            except Exception as e:
-                err_str = str(e)
-                if "push" in err_str.lower() or "rejected" in err_str.lower():
-                    _abort(
-                        f"Git push failed: {e}",
-                        hint=(
-                            "Ensure your token has 'contents:write' permission "
-                            "on this repo. Also check the branch isn't protected."
-                        ),
-                        state=state,
-                    )
-                elif "422" in err_str or "Unprocessable" in err_str:
-                    _abort(
-                        "GitHub rejected the PR (422 Unprocessable Entity)",
-                        hint=(
-                            "Possible causes: PR already exists, branch not pushed, "
-                            "or head/base branch names are wrong."
-                        ),
-                        state=state,
-                    )
-                else:
-                    raise  # re-raise for the _phase guard to catch
-
-        print_pr_panel(pr_info.url, pr_info.number, branch)
-
-        state.current_operation = f"PR #{pr_info.number} opened"
-        state.advance(AgentPhase.PR_OPEN)
-        save_state(state)
-        _safe_cleanup(git_repo)
+            _safe_cleanup(git_repo)
 
         # ────────────────────────────────────────────────────────────────────
         # PHASE 5 — SELF-REVIEW (optional, default on)
@@ -478,3 +639,20 @@ def run(
                 f"\n[muted]Next: run [primary]gitoma review {repo_url}[/primary] "
                 "when you want to integrate external review comments.[/muted]"
             )
+
+        # ────────────────────────────────────────────────────────────────────
+        # Terminal phase: ``gitoma run`` has finished its declared scope
+        # (analyze → plan → execute → PR → self-review → ci-watch). The
+        # subsequent ``gitoma review`` is an explicit, separate user
+        # action; until the user invokes it, *this* run is done. Without
+        # this advance the state was left at PR_OPEN forever, which the
+        # cockpit (and the orphan detector — PR_OPEN ∈ _NON_TERMINAL)
+        # read as "still working". Phase=DONE + a clear current_operation
+        # is the canonical "succeeded, ready for next manual step".
+        state.current_operation = (
+            f"Run complete — PR #{state.pr_number} open at {state.pr_url}"
+            if state.pr_number
+            else "Run complete"
+        )
+        state.advance(AgentPhase.DONE)
+        save_state(state)

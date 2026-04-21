@@ -90,10 +90,14 @@ def test_no_span_role_button_in_body():
 
 def test_icon_sprite_is_hidden_from_assistive_tech():
     icons = _ICONS.read_text()
+    css = _CSS.read_text()
     # The sprite container must hide from both visual + AT.
     assert 'aria-hidden="true"' in icons
     assert 'focusable="false"' in icons
-    assert 'style="display:none"' in icons
+    # ``display:none`` moved from inline ``style="..."`` to a CSS class
+    # so the dashboard CSP can drop ``style-src 'unsafe-inline'``.
+    assert 'class="icon-sprite"' in icons
+    assert ".icon-sprite" in css and "display: none" in css.split(".icon-sprite")[1][:120]
 
 
 # ── Banners + role discipline ───────────────────────────────────────────
@@ -180,12 +184,21 @@ def test_css_status_down_is_red_not_grey():
 
 
 def test_js_uses_session_storage_for_token():
-    """The token moved to sessionStorage — tests here pin that contract
-    so nobody silently reverts it to localStorage."""
+    """The token lives in sessionStorage only — pin that contract so no
+    one silently reverts it to localStorage (which survives browser
+    close, expanding the XSS exfiltration window indefinitely)."""
     js = _JS.read_text()
+    # Token API uses sessionStorage.
     assert "sessionStorage" in js
-    # Legacy fallback from localStorage is one-shot migration, not persisted.
-    assert 'legacyKey: "gitoma.api_token"' in js
+    # Regression guards: the Token API itself must NOT use localStorage
+    # for read/write. The only mention of localStorage is the one-shot
+    # eviction that wipes any stale legacy token.
+    assert "localStorage.setItem" not in js, (
+        "Token must not be written to localStorage anymore"
+    )
+    assert "localStorage.removeItem" in js, (
+        "Eviction of the legacy localStorage token must remain"
+    )
 
 
 def test_js_has_store_singleton_and_no_global_states_variable():

@@ -80,6 +80,30 @@ class GitRepo:
         """Create and checkout a new branch."""
         self.repo.git.checkout("-b", branch_name)
 
+    def checkout_existing_branch(self, branch_name: str) -> bool:
+        """Check out a branch that may already exist on the remote.
+
+        Used by ``--resume``: when a prior run pushed partial commits to
+        ``origin/<branch>``, the resumed run must continue on top of those
+        commits instead of branching off the default base. We fetch first
+        (in case the local clone is stale), then ``checkout -B`` which
+        creates the local branch (or resets it) to the remote tip.
+
+        Returns True when the remote branch existed and was checked out;
+        False when no remote branch was found and the caller should fall
+        back to ``create_branch``.
+        """
+        origin = self.repo.remotes.origin
+        origin.fetch()
+        remote_ref_name = f"origin/{branch_name}"
+        if not any(ref.name == remote_ref_name for ref in origin.refs):
+            return False
+        # ``-B`` is "create or reset"; combined with a remote-tracking
+        # source it gives us a fast-forward-equivalent local branch
+        # whether or not a stale local copy already exists.
+        self.repo.git.checkout("-B", branch_name, remote_ref_name)
+        return True
+
     def current_branch(self) -> str:
         return self.repo.active_branch.name
 

@@ -1023,3 +1023,12 @@ kbd {
 @keyframes toast-out {
   to { opacity: 0; transform: translateX(20px); }
 }
+
+/* ── Utility classes (replace former inline `style="..."` attributes) ───
+   Moved here so the dashboard CSP can drop `style-src 'unsafe-inline'`.
+   Adding new inline styles in HTML/JS will now trigger CSP violations. */
+.icon-sprite { display: none; }
+.palette-btn-spaced { gap: var(--sp-2); }
+.ml-auto { margin-left: auto; }
+.current-op-row.with-card-margin { margin: 0 var(--sp-5) var(--sp-4); }
+.confirm-body-text { margin: 0; color: var(--fg-mid); font-size: var(--fs-sm); }

@@ -159,8 +159,14 @@ def test_dashboard_has_mobile_viewport():
 
 def test_dashboard_ships_current_op_and_task_plan_widgets():
     """Current-op row + task-plan card make run progress visible between
-    coarse phase transitions. Regression guard for the `cosa sta facendo?` UX fix."""
+    coarse phase transitions. Regression guard for the `cosa sta facendo?` UX fix.
+
+    The render hooks moved from inline `<script>` into the externalised
+    `/dashboard.js` asset (CSP tightening), so the JS-symbol checks live
+    against that endpoint now.
+    """
     body = client.get("/").text
+    js = client.get("/dashboard.js").text
     # Current operation row (shows what the agent is doing right now)
     assert 'id="current-op-row"' in body
     assert 'id="current-op-text"' in body
@@ -168,23 +174,24 @@ def test_dashboard_ships_current_op_and_task_plan_widgets():
     # Task plan card (shows the full plan with per-task status)
     assert 'id="task-plan-card"' in body
     assert 'id="task-list"' in body
-    # JS hooks
-    assert "renderCurrentOp" in body
-    assert "renderTaskPlan" in body
+    # JS hooks (now in /dashboard.js, not inline)
+    assert "renderCurrentOp" in js
+    assert "renderTaskPlan" in js
 
 
 def test_dashboard_ships_agents_and_errors_widgets():
     """Agents card + Errors banner. Regression guard for the
     `cosa non torna nel giro?` visibility fix."""
     body = client.get("/").text
+    js = client.get("/dashboard.js").text
     # Agents card (Analyzer / Planner / Worker / PR Agent / Reviewer)
     assert 'id="agents-card"' in body
     assert 'id="agents-row"' in body
-    assert "renderAgents" in body
+    assert "renderAgents" in js
     # Errors banner (shows state.errors when persisted by _abort/_phase)
     assert 'id="errors-banner"' in body
     assert 'id="errors-list"' in body
-    assert "renderErrors" in body
+    assert "renderErrors" in js
     # Orphan banner (shows when CLI process is gone mid-run)
     assert 'id="orphan-banner"' in body
-    assert "renderOrphan" in body
+    assert "renderOrphan" in js

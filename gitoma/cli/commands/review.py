@@ -171,6 +171,11 @@ def review(
                 hint="Check token permissions (contents:write) and that the branch still exists.",
             )
 
+        # Briefly mark REVIEWING for the in-progress flash, then advance
+        # to DONE below — the cockpit Pipeline strip catches both. The
+        # previous code stopped at REVIEWING, which the orphan detector
+        # (REVIEWING ∈ _NON_TERMINAL) read as "still going" forever even
+        # though the integration was finished and the branch pushed.
         state.advance(AgentPhase.REVIEWING)
         save_state(state)
         console.print(
@@ -180,3 +185,14 @@ def review(
         console.print("[warning]⚠ No fixes pushed (nothing committed).[/warning]")
 
     _safe_cleanup(git_repo)
+
+    # Terminal advance: ``gitoma review`` has finished. State must move
+    # to DONE so the cockpit's Pipeline strip lights up the final step
+    # and the orphan detector stops considering this run "in flight".
+    state.current_operation = (
+        f"Review integration complete — {fixed} fix(es) pushed"
+        if fixed > 0
+        else "Review integration complete — no fixes needed"
+    )
+    state.advance(AgentPhase.DONE)
+    save_state(state)

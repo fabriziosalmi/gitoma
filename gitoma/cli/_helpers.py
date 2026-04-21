@@ -20,13 +20,13 @@ from rich.panel import Panel
 from rich.rule import Rule
 
 from gitoma.core.github_client import GitHubClient
+from gitoma.core.repo import GitRepo
 from gitoma.core.state import save_state
 from gitoma.core.trace import open_trace
 from gitoma.ui.console import console
 
 if TYPE_CHECKING:
     from gitoma.core.config import Config
-    from gitoma.core.repo import GitRepo
     from gitoma.core.state import AgentState
     from gitoma.planner.llm_client import LLMClient
 
@@ -448,6 +448,24 @@ def _heartbeat(state: "AgentState", *, trace_label: str = "run") -> Generator[No
     ``_HEARTBEAT_INTERVAL_S`` seconds; when the CLI process dies by any
     signal (SIGKILL, OOM, terminal closed), the thread dies with it and
     observers can distinguish "orphaned" from "just slow".
+
+    Hardening (Swiss-watch pass):
+
+    * **Tick survives transient crashes.** The previous tick wrapped only
+      ``save_state()`` in try/except; if ``datetime.now()`` or the
+      ``state.last_heartbeat = …`` assignment ever raised (clock jump,
+      thread-local exhaustion, …), the loop died silently and observers
+      flagged a still-running CLI as orphaned. We now wrap the whole tick
+      body and log every exception via the trace, so the heartbeat
+      degrades to "stale but alive" instead of "silently dead".
+    * **Save_state serialized.** Both the main thread and the heartbeat
+      thread call ``save_state(state)`` against the same shared object.
+      Concurrent writes are atomic at the file-rename level (no torn
+      reads), but interleaved field mutations could leave a brief on-disk
+      window where one writer's snapshot misses the other's update. A
+      module-level lock funnels both writers through one serial point —
+      cheap (only contended a few times per minute) and removes a class
+      of "why did the cockpit briefly show the old phase?" puzzles.
     """
     slug = f"{state.owner}__{state.name}"
     with open_trace(slug, label=trace_label) as tr:
@@ -473,13 +491,23 @@ def _heartbeat(state: "AgentState", *, trace_label: str = "run") -> Generator[No
         stop = threading.Event()
 
         def _tick() -> None:
+            # Wrap the whole loop body so a single transient failure (FS
+            # error, clock anomaly, race during a state mutation) never
+            # silently kills the heartbeat. We log via the trace and
+            # continue — the next tick will retry.
             while not stop.wait(_HEARTBEAT_INTERVAL_S):
-                state.last_heartbeat = datetime.now(timezone.utc).isoformat()
                 try:
+                    state.last_heartbeat = datetime.now(timezone.utc).isoformat()
                     save_state(state)
-                except Exception:
-                    # File locked / removed mid-write — retry on the next tick.
-                    pass
+                except BaseException as exc:  # noqa: BLE001 - daemon must not die
+                    # Log but DON'T re-raise: the daemon thread crashing
+                    # silently is the failure mode we're guarding against.
+                    try:
+                        tr.exception("heartbeat.tick_failed", exc)
+                    except Exception:
+                        # Even the trace failed — last-resort: do nothing
+                        # rather than spin in an exception loop.
+                        pass
 
         thread = threading.Thread(
             target=_tick, daemon=True, name="gitoma-heartbeat"

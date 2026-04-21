@@ -23,7 +23,13 @@ def _reset_api_token_cache() -> None:
     Runs before every test (autouse). The reset is idempotent and very
     cheap, so it's fine to pay unconditionally instead of only for tests
     that mock ``load_config``.
+
+    Also clears the per-token dispatch rate-limiter buckets — without this,
+    a test that fires many dispatches (e.g. a parametrized validator
+    sweep) bleeds into the next test and trips 429s for unrelated cases.
     """
     from gitoma.api.server import _reset_token_cache
+    from gitoma.api.routers import _reset_dispatch_rate_limiter
 
     _reset_token_cache()
+    _reset_dispatch_rate_limiter()

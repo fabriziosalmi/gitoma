@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -12,6 +13,17 @@ from pathlib import Path
 from typing import Any
 
 STATE_DIR = Path.home() / ".gitoma" / "state"
+
+# Serialize ``save_state`` writes within a single process. Both the CLI
+# main thread and the heartbeat daemon mutate the same ``AgentState``
+# object and call ``save_state`` from different threads. ``os.replace``
+# already gives us a torn-write-free file at the FS layer, but two
+# concurrent writers can still snapshot the dataclass at slightly
+# different points in a multi-field mutation, leaving a brief on-disk
+# window where one writer's update isn't visible. A short lock around
+# the dataclass→JSON serialization removes that window — held only for
+# microseconds, contended at most a few times per minute.
+_SAVE_STATE_LOCK = threading.Lock()
 
 
 class AgentPhase(str, Enum):
@@ -101,26 +113,36 @@ def save_state(state: AgentState) -> None:
     observer with invalid JSON. We write to a sibling temp file and
     `os.replace` it over the real path — atomic on every POSIX filesystem
     (and on NTFS via MoveFileEx).
+
+    A module-level ``threading.Lock`` serializes concurrent callers in
+    the same process so the snapshot taken by ``state.to_dict()`` is
+    always coherent with the JSON dump that immediately follows. Without
+    it, a heartbeat tick firing between two related main-thread mutations
+    could persist a ``state`` with one mutation visible and the other
+    not — never inconsistent JSON, but a brief on-disk window where the
+    cockpit shows an intermediate state. Held for microseconds; never
+    blocks on I/O paths external to ``save_state``.
     """
-    state.updated_at = _now()
-    path = _state_path(state.owner, state.name)
-    data = json.dumps(state.to_dict(), indent=2)
-    # tempfile in the same dir so os.replace stays on-device.
-    fd, tmp = tempfile.mkstemp(
-        prefix=f".{state.slug}.", suffix=".json.tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except Exception:
-        # Best-effort cleanup of the temp file; re-raise so callers see it.
-        if os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-        raise
+    with _SAVE_STATE_LOCK:
+        state.updated_at = _now()
+        path = _state_path(state.owner, state.name)
+        data = json.dumps(state.to_dict(), indent=2)
+        # tempfile in the same dir so os.replace stays on-device.
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{state.slug}.", suffix=".json.tmp", dir=path.parent
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except Exception:
+            # Best-effort cleanup of the temp file; re-raise so callers see it.
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            raise
 
 
 def load_state(owner: str, name: str) -> AgentState | None:

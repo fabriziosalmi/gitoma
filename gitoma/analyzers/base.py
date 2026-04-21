@@ -67,6 +67,26 @@ class MetricResult:
             "weight": self.weight,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MetricResult":
+        """Inverse of ``to_dict`` — used by ``--resume`` to rehydrate a
+        prior run's metric report from disk so the planner / PR agent
+        don't need to re-run the analyzers.
+
+        Tolerates missing fields (older state files predate ``weight``)
+        by falling back to the dataclass defaults; ignores unknown keys
+        for forward-compat.
+        """
+        return cls(
+            name=d.get("name", ""),
+            display_name=d.get("display_name", ""),
+            score=float(d.get("score", 0.0)),
+            status=d.get("status", "fail"),
+            details=d.get("details", ""),
+            suggestions=list(d.get("suggestions", [])),
+            weight=float(d.get("weight", 1.0)),
+        )
+
 
 @dataclass
 class MetricReport:
@@ -109,6 +129,19 @@ class MetricReport:
             "analyzed_at": self.analyzed_at,
             "metrics": [m.to_dict() for m in self.metrics],
         }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MetricReport":
+        """Inverse of ``to_dict`` — see :meth:`MetricResult.from_dict`."""
+        return cls(
+            repo_url=d.get("repo_url", ""),
+            owner=d.get("owner", ""),
+            name=d.get("name", ""),
+            languages=list(d.get("languages", [])),
+            default_branch=d.get("default_branch", "main"),
+            metrics=[MetricResult.from_dict(m) for m in d.get("metrics", [])],
+            analyzed_at=d.get("analyzed_at", ""),
+        )
 
 
 class BaseAnalyzer(ABC):

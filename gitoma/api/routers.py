@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
@@ -34,13 +35,14 @@ import re
 import shutil
 import signal
 import sys
+import time as _time
 import uuid
-from collections import deque
+from collections import defaultdict, deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -66,6 +68,14 @@ _REPO_URL_RE = re.compile(
 )
 # Git ref names: see git-check-ref-format(1) — we apply a conservative subset.
 _BRANCH_RE = re.compile(r"^(?!-)[A-Za-z0-9._/-]{1,255}$")
+
+# State filenames are interpolated into ``STATE_DIR / f"{owner}__{name}.json"``
+# (see :func:`gitoma.core.state._state_path`). Any character that lets the
+# value escape that directory — slash, backslash, NUL, leading dot — must be
+# rejected at the HTTP boundary so a percent-decoded ``..%2F..%2Fpasswd``
+# can never reach ``Path.unlink`` on something outside ``~/.gitoma/state``.
+# The allow-set matches GitHub's own owner/repo charset.
+_STATE_SLUG_RE = re.compile(r"^(?!\.)[A-Za-z0-9._-]{1,100}$")
 
 
 class RunRequest(BaseModel):
@@ -174,6 +184,13 @@ class CancelResponse(BaseModel):
 
 _LOG_BUFFER_LINES = 500
 _SUBSCRIBER_QUEUE_DEPTH = 1000
+# Hard cap on concurrent SSE consumers per job. Without this an
+# authenticated client can open hundreds of /stream/{job_id} subscriptions
+# and balloon RAM (each subscriber owns a ``_SUBSCRIBER_QUEUE_DEPTH``-deep
+# queue × ``_MAX_LINE_BYTES``). 16 covers every realistic case (one cockpit
+# tab + a handful of curl tails); past that we 429 the new connection so
+# the existing subscribers stay live.
+_MAX_SUBSCRIBERS_PER_JOB = 16
 _END_SENTINEL = "__END__"
 # A runaway CLI that prints one 50 MB line would blow up both the ring
 # buffer and every subscriber queue. Truncate first, ship a short marker.
@@ -200,6 +217,39 @@ _SSE_HEARTBEAT_SECONDS = 15.0
 # CLI has no business seeing it, and we don't want it in the child's
 # /proc/<pid>/environ where another user could read it.
 _SECRET_ENV_VARS: frozenset[str] = frozenset({"GITOMA_API_TOKEN"})
+
+# Pattern-based scrub: anything whose UPPERCASED name ends with one of
+# these suffixes is presumed to be a secret and stripped, EVEN IF we
+# don't know what it is. Belt-and-braces for the long tail of vendor
+# credentials (AWS_*, GCP_*, DOCKER_*, NPM_TOKEN, CARGO_REGISTRY_TOKEN,
+# DATABASE_URL with embedded creds, …) that the operator may have in
+# their shell env. Without this the CLI subprocess inherits everything
+# and another local user can read /proc/<pid>/environ.
+_SECRET_NAME_SUFFIXES: tuple[str, ...] = (
+    "_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PASS",
+    "_CREDENTIAL", "_CREDENTIALS", "_PRIVATE_KEY", "_API_KEY",
+    "_ACCESS_KEY", "_AUTH",
+)
+# Names that *match* the suffix rule above but are legitimately needed by
+# the CLI — kept on the explicit allow-list so they survive the scrub.
+# Anything not in this set, with a secret-shaped name, is dropped.
+_SECRET_NAME_ALLOWLIST: frozenset[str] = frozenset({
+    "GITHUB_TOKEN",       # core/config.py: GitHub API auth for the worker
+    "GH_TOKEN",           # alias gh CLI uses; harmless if unset
+    "LM_STUDIO_API_KEY",  # core/config.py: LMStudio (placeholder, but read)
+    "OPENAI_API_KEY",     # planner uses OpenAI-compat clients pointed at LM Studio
+    "ANTHROPIC_API_KEY",  # self-critic / future LLM backends
+    "SSH_AUTH_SOCK",      # not a "secret" but matches no suffix; here for clarity
+})
+
+
+def _looks_like_secret(name: str) -> bool:
+    """True if ``name`` matches a known secret-name suffix and is not
+    on the explicit allow-list of credentials the CLI legitimately uses."""
+    if name in _SECRET_NAME_ALLOWLIST:
+        return False
+    upper = name.upper()
+    return any(upper.endswith(suffix) for suffix in _SECRET_NAME_SUFFIXES)
 
 # Strip embedded credentials in git/https URLs before publishing to the
 # ring buffer. Matches `https://user:password@host/…` and `ssh://…`.
@@ -240,6 +290,71 @@ _JOBS: dict[str, JobRecord] = {}
 # cancel races. Held only for short dictionary mutations — no I/O happens
 # under the lock.
 _JOBS_LOCK = asyncio.Lock()
+
+
+# ── Per-token dispatch rate limiter ─────────────────────────────────────────
+#
+# ``MAX_JOBS`` already caps total in-memory jobs at 50, but a compromised or
+# runaway client can saturate the pool in <1 s, denying legitimate users
+# for 15 min and burning the LM-Studio / GitHub quota. A sliding-window
+# counter per bearer token is the smallest sufficient defence:
+#
+#   * ``DISPATCH_RATE_LIMIT_BURST`` requests
+#   * within ``DISPATCH_RATE_LIMIT_WINDOW_S`` seconds
+#   * per (sha256-truncated) bearer token
+#
+# We hash the token before using it as a key so an accidental log dump
+# (a future ``logger.debug({...this dict...})``) doesn't leak the secret.
+# Anonymous (no Authorization) requests share a single bucket — they
+# can't reach the dispatch endpoints anyway (verify_token rejects them).
+DISPATCH_RATE_LIMIT_BURST = 20
+DISPATCH_RATE_LIMIT_WINDOW_S = 60.0
+
+_dispatch_recent: dict[str, deque[float]] = defaultdict(deque)
+_dispatch_recent_lock = asyncio.Lock()
+
+
+def _token_bucket_key(request: Request) -> str:
+    """Return a stable, non-reversible bucket id for the rate limiter.
+
+    Hash protects against the secret leaking via a log line that prints
+    the limiter's internal state. Truncated to 16 hex chars — collisions
+    here would just merge two clients' buckets, never confuse auth.
+    """
+    auth = request.headers.get("authorization", "")
+    return "sha256:" + hashlib.sha256(auth.encode("utf-8")).hexdigest()[:16]
+
+
+async def _enforce_dispatch_rate_limit(request: Request) -> None:
+    """Raise 429 when the caller exceeds the dispatch burst quota."""
+    key = _token_bucket_key(request)
+    now = _time.monotonic()
+    cutoff = now - DISPATCH_RATE_LIMIT_WINDOW_S
+    async with _dispatch_recent_lock:
+        bucket = _dispatch_recent[key]
+        # Drop entries older than the window. Cheap: deques are O(1)
+        # popleft and we only walk until we hit something fresh.
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= DISPATCH_RATE_LIMIT_BURST:
+            # Compute Retry-After from the oldest in-window timestamp so
+            # the client can wait minimum sufficient time, not a fixed value.
+            retry_after = max(1, int(bucket[0] + DISPATCH_RATE_LIMIT_WINDOW_S - now) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Dispatch rate limit exceeded "
+                    f"({DISPATCH_RATE_LIMIT_BURST} per {int(DISPATCH_RATE_LIMIT_WINDOW_S)}s). "
+                    f"Retry after {retry_after}s."
+                ),
+                headers={"Retry-After": str(retry_after)},
+            )
+        bucket.append(now)
+
+
+def _reset_dispatch_rate_limiter() -> None:
+    """Clear the rate-limit buckets (used by tests)."""
+    _dispatch_recent.clear()
 
 
 async def _evict_stale_locked() -> None:
@@ -286,14 +401,30 @@ def _gitoma_cli_argv() -> list[str]:
 
 
 def _scrubbed_env() -> dict[str, str]:
-    """Return ``os.environ`` minus the server's own secrets.
+    """Return ``os.environ`` minus secrets the CLI subprocess shouldn't see.
 
-    The spawned CLI doesn't need (and mustn't see) the API's Bearer token —
-    that's a secret of the HTTP surface, not of the agent. If the CLI ever
-    dumped ``os.environ`` into a trace file, we'd be leaking the server's
-    auth credential by proxy.
+    Two layers, both deny-by-default:
+
+    1. **Explicit drops** (``_SECRET_ENV_VARS``): the API's own Bearer
+       token. The CLI has no business seeing it, and we don't want it in
+       the child's ``/proc/<pid>/environ`` where another user could read it.
+    2. **Pattern drops** (``_looks_like_secret``): anything whose name
+       matches a known credential suffix (``_TOKEN``, ``_KEY``,
+       ``_SECRET``, ``_PASSWORD``, …) UNLESS it's on the explicit
+       allow-list of secrets the CLI legitimately needs (``GITHUB_TOKEN``,
+       ``LM_STUDIO_API_KEY``, ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``).
+
+    The pattern layer catches the long tail of vendor credentials the
+    operator may have in their shell env (AWS_*, GCP_*, DOCKER_*,
+    NPM_TOKEN, CARGO_REGISTRY_TOKEN, DATABASE_URL-style creds, etc.)
+    that would otherwise silently leak to the child process and to any
+    trace/debug log it might produce.
     """
-    return {k: v for k, v in os.environ.items() if k not in _SECRET_ENV_VARS}
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _SECRET_ENV_VARS and not _looks_like_secret(k)
+    }
 
 
 # ── Pub/sub plumbing for live log streaming ─────────────────────────────────
@@ -348,11 +479,12 @@ async def _spawn_cli_job(job: JobRecord) -> None:
     job.status = "running"
     _publish(job, f"$ {' '.join(job.argv)}")
 
-    # POSIX: create a new session so the whole process tree gets SIGTERM
-    # on cancel (``os.killpg``). On Windows we skip — no setsid, and our
-    # cancel path doesn't support killing process trees there anyway.
-    preexec_fn = os.setsid if sys.platform != "win32" else None
-
+    # POSIX: ``start_new_session`` makes the child the leader of a new
+    # session/process group so ``os.killpg`` reaps the whole tree on cancel.
+    # We used to pass ``preexec_fn=os.setsid``, but that is deprecated in
+    # 3.12 and deadlock-prone in multi-threaded parents (uvicorn's default
+    # threadpool counts). ``start_new_session=True`` does the same thing
+    # without forking a Python callback. Ignored on Windows.
     try:
         proc = await asyncio.create_subprocess_exec(
             *job.argv,
@@ -360,7 +492,7 @@ async def _spawn_cli_job(job: JobRecord) -> None:
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL,
             env=_scrubbed_env(),
-            preexec_fn=preexec_fn,
+            start_new_session=(sys.platform != "win32"),
         )
     except (OSError, ValueError):
         eid = uuid.uuid4().hex[:12]
@@ -372,7 +504,24 @@ async def _spawn_cli_job(job: JobRecord) -> None:
         _publish(job, f"{_END_SENTINEL}:{job.status}")
         return
 
-    assert proc.stdout is not None
+    # ``stdout=PIPE`` was passed above, so this should never trigger — but
+    # ``assert`` is stripped under ``python -O`` and the next line would
+    # crash with a less actionable AttributeError. Fail loudly instead.
+    if proc.stdout is None:
+        eid = uuid.uuid4().hex[:12]
+        logger.error(
+            "job_subprocess_no_stdout",
+            extra={"job_id": job.id, "error_id": eid, "pid": proc.pid},
+        )
+        _kill_process_group(proc, signal.SIGKILL)
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        job.status = "failed"
+        job.error_id = eid
+        job.finished_at = _dt.datetime.now(_dt.timezone.utc)
+        _publish(job, f"[error] subprocess started without stdout (error_id={eid})")
+        _publish(job, f"{_END_SENTINEL}:{job.status}")
+        return
     try:
         # Readline coroutine wrapped in wait_for enforces the global job
         # timeout. If no line arrives within the remaining budget, the
@@ -401,14 +550,36 @@ async def _spawn_cli_job(job: JobRecord) -> None:
     except asyncio.CancelledError:
         # Cancel requested (via /cancel or server shutdown): SIGTERM the
         # whole process group so git/ssh children get reaped, give them
-        # 5 s, then SIGKILL. Always set a terminal status + end sentinel.
-        _kill_process_group(proc, signal.SIGTERM)
+        # 5 s, then SIGKILL. If even SIGKILL doesn't reap inside its
+        # grace window, the process is wedged (kernel-level hang, broken
+        # signal mask, …) — record an error_id so the client can tell
+        # that "cancelled" is suspect and the operator can investigate
+        # the leftover PID.
+        term_outcome = _kill_process_group(proc, signal.SIGTERM)
+        kill_failed = term_outcome == "failed"
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            _kill_process_group(proc, signal.SIGKILL)
-            with suppress(asyncio.CancelledError):
-                await proc.wait()
+            kill_outcome = _kill_process_group(proc, signal.SIGKILL)
+            if kill_outcome == "failed":
+                kill_failed = True
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                # Process is wedged past SIGKILL — surface it.
+                kill_failed = True
+        if kill_failed:
+            eid = uuid.uuid4().hex[:12]
+            logger.error(
+                "cancel_did_not_reap",
+                extra={"job_id": job.id, "error_id": eid, "pid": proc.pid},
+            )
+            job.error_id = eid
+            _publish(
+                job,
+                f"[warn] cancel may have left pid={proc.pid} alive "
+                f"(error_id={eid}); inspect server log",
+            )
         job.status = "cancelled"
         job.finished_at = _dt.datetime.now(_dt.timezone.utc)
         _publish(job, f"{_END_SENTINEL}:cancelled")
@@ -431,24 +602,51 @@ async def _spawn_cli_job(job: JobRecord) -> None:
     _publish(job, f"{_END_SENTINEL}:{job.status}")
 
 
-def _kill_process_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGTERM) -> None:
-    """Best-effort kill of the whole process group.
+def _kill_process_group(
+    proc: asyncio.subprocess.Process, sig: int = signal.SIGTERM
+) -> str:
+    """Signal the process group; return a short outcome code.
 
-    We spawned with ``setsid`` on POSIX; its pgid == pid. On Windows the
-    ``preexec_fn`` was not applied, so we fall back to ``proc.kill`` /
-    ``proc.terminate`` semantics which only target the immediate child.
-    Either way we swallow ProcessLookupError — the child may already be
-    gone, which is fine.
+    Outcomes:
+      * ``"signaled"`` — the signal was delivered (process may not yet
+        be reaped; the caller still has to ``proc.wait()``).
+      * ``"already_gone"`` — the kernel says the target is no longer
+        there (``ProcessLookupError`` / ``ESRCH``). Effectively success.
+      * ``"failed"`` — the syscall failed for another reason (permission,
+        invalid signal, …). Logged at warning level so an operator can
+        diagnose; the caller should treat the cancel as suspect and not
+        report unconditional success.
+
+    We spawned with ``start_new_session=True`` on POSIX; the child's pgid
+    equals its pid. On Windows we fall back to ``proc.kill``/``terminate``
+    semantics which only target the immediate child.
     """
     if sys.platform == "win32" or proc.pid is None:
-        with suppress(ProcessLookupError):
+        try:
             if sig == signal.SIGKILL:
                 proc.kill()
             else:
                 proc.terminate()
-        return
-    with suppress(ProcessLookupError, OSError):
+        except ProcessLookupError:
+            return "already_gone"
+        except OSError as e:
+            logger.warning(
+                "kill_process_group_failed",
+                extra={"pid": proc.pid, "sig": int(sig), "error": str(e)[:200]},
+            )
+            return "failed"
+        return "signaled"
+    try:
         os.killpg(os.getpgid(proc.pid), sig)
+    except ProcessLookupError:
+        return "already_gone"
+    except OSError as e:
+        logger.warning(
+            "kill_process_group_failed",
+            extra={"pid": proc.pid, "sig": int(sig), "error": str(e)[:200]},
+        )
+        return "failed"
+    return "signaled"
 
 
 async def _dispatch(label: str, argv: list[str]) -> JobRecord:
@@ -473,14 +671,20 @@ async def cancel_all_jobs() -> None:
     without leaving orphan gitoma subprocesses behind.
     """
     async with _JOBS_LOCK:
+        # Filter out the None tasks here (instead of `assert`-ing later)
+        # so the loops below never have to second-guess the invariant.
+        # ``assert`` would be stripped under ``python -O``.
         victims = [job for job in _JOBS.values() if job.task and not job.task.done()]
     for job in victims:
-        assert job.task is not None
+        if job.task is None:
+            continue
         job.task.cancel()
     for job in victims:
-        assert job.task is not None
+        task = job.task
+        if task is None:
+            continue
         try:
-            await asyncio.wait_for(job.task, timeout=6.0)
+            await asyncio.wait_for(task, timeout=6.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
         except Exception:
@@ -490,14 +694,51 @@ async def cancel_all_jobs() -> None:
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 
+# /health is hit by load balancers, k8s liveness probes, the cockpit
+# banner, and humans curling for sanity. None of those callers can wait
+# 10 s for ``check_lmstudio`` (which is sync and does its own network
+# round-trip). We call it on a worker thread with a hard wall-clock
+# budget; a stalled LM Studio surfaces as ``status="timeout"`` instead
+# of a hung probe that flaps the upstream service as unhealthy.
+_HEALTH_LM_TIMEOUT_S = 2.5
+
+
 @router.get("/health", response_model=HealthResponse, tags=["system"])
-def health_check() -> HealthResponse:
-    """Verify system health and configuration."""
+async def health_check() -> HealthResponse:
+    """Verify system health and configuration.
+
+    The handler is **async** so a slow ``check_lmstudio`` cannot tie up
+    a sync threadpool slot indefinitely — we run it in ``to_thread`` and
+    cap it at ``_HEALTH_LM_TIMEOUT_S``. Past the budget we return a
+    structured "timeout" result; the rest of the payload (config presence,
+    GitHub token state) is still useful even when LM Studio is down.
+    """
     config = load_config()
-    lm_state = check_lmstudio(config)
+    try:
+        lm_state = await asyncio.wait_for(
+            asyncio.to_thread(check_lmstudio, config, _HEALTH_LM_TIMEOUT_S),
+            timeout=_HEALTH_LM_TIMEOUT_S + 0.5,
+        )
+        lm_payload: dict[str, object] = dataclasses.asdict(lm_state)
+    except asyncio.TimeoutError:
+        # Hard timeout: ``check_lmstudio``'s own httpx timeout should fire
+        # first and return a clean ERROR result, but a hung DNS or kernel
+        # half-open socket can still wedge the call. The outer
+        # ``wait_for`` is the belt-and-braces guarantee.
+        lm_payload = {
+            "level": "error",
+            "message": "LM Studio health check timed out",
+            "detail": (
+                f"check_lmstudio did not return within "
+                f"{_HEALTH_LM_TIMEOUT_S + 0.5:.1f}s; the LLM endpoint is "
+                f"unresponsive or the network is wedged."
+            ),
+            "available_models": [],
+            "target_model_loaded": False,
+        }
     return HealthResponse(
         status="ok",
-        lm_studio=dataclasses.asdict(lm_state),
+        lm_studio=lm_payload,
         github_token_set=bool(config.github.token),
     )
 
@@ -509,8 +750,9 @@ def health_check() -> HealthResponse:
     tags=["jobs"],
     responses={422: {"description": "Invalid repo_url or branch"}},
 )
-async def trigger_agent_run(req: RunRequest) -> JobResponse:
+async def trigger_agent_run(req: RunRequest, request: Request) -> JobResponse:
     """Trigger a full autonomous run pipeline (Analyzer → Planner → Worker → PR)."""
+    await _enforce_dispatch_rate_limit(request)
     argv = [*_gitoma_cli_argv(), "run", req.repo_url, "--yes"]
     if req.branch:
         argv += ["--branch", req.branch]
@@ -527,8 +769,9 @@ async def trigger_agent_run(req: RunRequest) -> JobResponse:
     tags=["jobs"],
     responses={400: {"description": "Missing branch"}},
 )
-async def trigger_fix_ci(req: RunRequest) -> JobResponse:
+async def trigger_fix_ci(req: RunRequest, request: Request) -> JobResponse:
     """Trigger the CIDiagnostic Agent (Reflexion Dual-Agent) to fix a CI breakage."""
+    await _enforce_dispatch_rate_limit(request)
     if not req.branch:
         raise HTTPException(status_code=400, detail="branch is required for fix-ci")
     argv = [*_gitoma_cli_argv(), "fix-ci", req.repo_url, "--branch", req.branch]
@@ -542,8 +785,9 @@ async def trigger_fix_ci(req: RunRequest) -> JobResponse:
     status_code=202,
     tags=["jobs"],
 )
-async def trigger_analyze(req: AnalyzeRequest) -> JobResponse:
+async def trigger_analyze(req: AnalyzeRequest, request: Request) -> JobResponse:
     """Trigger a read-only analysis pass (no commits, no PR)."""
+    await _enforce_dispatch_rate_limit(request)
     argv = [*_gitoma_cli_argv(), "analyze", req.repo_url]
     job = await _dispatch("analyze", argv)
     return JobResponse(job_id=job.id, status="started", message="Analysis dispatched in background.")
@@ -555,8 +799,9 @@ async def trigger_analyze(req: AnalyzeRequest) -> JobResponse:
     status_code=202,
     tags=["jobs"],
 )
-async def trigger_review(req: ReviewRequest) -> JobResponse:
+async def trigger_review(req: ReviewRequest, request: Request) -> JobResponse:
     """Fetch Copilot review comments; optionally auto-integrate them."""
+    await _enforce_dispatch_rate_limit(request)
     argv = [*_gitoma_cli_argv(), "review", req.repo_url]
     if req.integrate:
         argv.append("--integrate")
@@ -619,8 +864,18 @@ async def cancel_job(job_id: str) -> CancelResponse:
 
 
 @router.get("/jobs", tags=["jobs"])
-def list_jobs() -> dict[str, dict[str, object]]:
-    """List every in-memory job with its current status and a buffered-lines count."""
+async def list_jobs() -> dict[str, dict[str, object]]:
+    """List every in-memory job with its current status and a buffered-lines count.
+
+    Holds ``_JOBS_LOCK`` while *snapshotting* the dict — never while doing
+    I/O — so a concurrent ``_dispatch`` eviction can't mutate the dict
+    mid-iteration. Today the comprehension is GIL-safe because nothing
+    awaits inside it; this guard locks in that invariant against any
+    future refactor that adds an ``await`` (e.g. enriching a job record
+    with a live state lookup).
+    """
+    async with _JOBS_LOCK:
+        snapshot = list(_JOBS.items())
     return {
         jid: {
             "status": job.status,
@@ -630,7 +885,7 @@ def list_jobs() -> dict[str, dict[str, object]]:
             "finished_at": job.finished_at.isoformat() if job.finished_at else None,
             "error_id": job.error_id,
         }
-        for jid, job in _JOBS.items()
+        for jid, job in snapshot
     }
 
 
@@ -647,6 +902,20 @@ async def stream_job_output(job_id: str) -> StreamingResponse:
     job = _JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    # Subscriber cap: refuse the connection BEFORE building the response so
+    # the client gets a clean 429 instead of an SSE that times out. The
+    # set lookup is racy with concurrent unsubscribes — that's acceptable;
+    # at worst we accept one extra subscriber under contention. We never
+    # accept arbitrarily many, which is the actual DoS we care about.
+    if len(job.subscribers) >= _MAX_SUBSCRIBERS_PER_JOB:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many concurrent subscribers for this job "
+                f"(limit {_MAX_SUBSCRIBERS_PER_JOB})."
+            ),
+            headers={"Retry-After": "5"},
+        )
 
     async def event_stream() -> AsyncIterator[str]:
         # Replay history first so the client can render whatever happened
@@ -661,6 +930,12 @@ async def stream_job_output(job_id: str) -> StreamingResponse:
             return
 
         q: "asyncio.Queue[str]" = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_DEPTH)
+        # Re-check the cap inside the generator — between the route-level
+        # check above and here, other subscribers may have arrived. If we
+        # blew the cap, drop the connection silently (the client gets an
+        # empty stream + close, equivalent to a server-side hang-up).
+        if len(job.subscribers) >= _MAX_SUBSCRIBERS_PER_JOB:
+            return
         job.subscribers.add(q)
         try:
             while True:
@@ -703,9 +978,22 @@ def _format_event(event: str, line: str) -> str:
     "/state/{owner}/{name}",
     response_model=StateDeleteResponse,
     tags=["state"],
+    responses={422: {"description": "Invalid owner or name"}},
 )
 def reset_repo_state(owner: str, name: str) -> StateDeleteResponse:
-    """Delete the persisted agent state for a repo (idempotent)."""
+    """Delete the persisted agent state for a repo (idempotent).
+
+    ``owner``/``name`` flow into a filesystem path downstream, so anything
+    outside the GitHub-style charset is rejected here with 422 — never
+    forwarded to ``_delete_state``. Without this guard a percent-encoded
+    traversal (``..%2F..%2Fetc%2Fpasswd``) decoded after route matching
+    could let an authenticated client unlink files outside the state dir.
+    """
+    if not _STATE_SLUG_RE.match(owner) or not _STATE_SLUG_RE.match(name):
+        raise HTTPException(
+            status_code=422,
+            detail="owner and name must match [A-Za-z0-9._-]{1,100} and not start with a dot",
+        )
     existed = _load_state(owner, name) is not None
     _delete_state(owner, name)
     return StateDeleteResponse(

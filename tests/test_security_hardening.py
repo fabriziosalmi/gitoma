@@ -320,6 +320,89 @@ def test_ensure_runtime_token_reuses_existing_file(tmp_path, monkeypatch):
     assert token == "already-there"
 
 
+# ── /api/v1/state/{owner}/{name}: path-traversal guard ─────────────────────
+
+
+@pytest.mark.parametrize("bad_owner,bad_name", [
+    ("..",            "passwd"),    # leading-dot rejected
+    (".gitconfig",    "x"),
+    ("ok",            ".."),
+    ("a/b",           "x"),         # raw slash (route matcher catches → 404 anyway, defense-in-depth here)
+    ("ok",            "a b"),       # whitespace
+    ("ok",            ""),
+    ("",              "ok"),
+    ("x" * 101,       "ok"),        # over the 100-char cap
+])
+def test_reset_state_rejects_unsafe_owner_or_name(bad_owner, bad_name, mocker):
+    """``/api/v1/state/{owner}/{name}`` interpolates both segments into a
+    filesystem path downstream (``STATE_DIR / f"{owner}__{name}.json"``).
+    Anything that could escape that directory or smuggle traversal must
+    be rejected at the HTTP boundary with 422 — never reach
+    ``Path.unlink``. Without this guard a percent-encoded
+    ``..%2F..%2Fetc%2Fpasswd``, decoded after route matching, lets an
+    authenticated client unlink files outside the state dir."""
+    from fastapi.testclient import TestClient
+    from gitoma.api.server import app
+
+    cfg = mocker.patch("gitoma.api.server.load_config")
+    cfg.return_value.api_auth_token = "TOKEN"
+
+    delete = mocker.patch("gitoma.api.routers._delete_state")
+    load = mocker.patch("gitoma.api.routers._load_state")
+
+    c = TestClient(app)
+    resp = c.delete(
+        f"/api/v1/state/{bad_owner}/{bad_name}",
+        headers={"Authorization": "Bearer TOKEN"},
+    )
+    # 422 is the validator path; 404 is the router-level path-segment
+    # rejection (raw slash never matches the {name} converter at all).
+    # Either way, the underlying filesystem helpers must NOT be invoked.
+    assert resp.status_code in (404, 422), resp.text
+    delete.assert_not_called()
+    load.assert_not_called()
+
+
+@pytest.mark.parametrize("bad_value", [
+    "..",
+    ".env",
+    "with/slash",
+    "with\\backslash",
+    "with\x00null",          # cannot test via httpx (blocks pre-flight) but the regex must reject
+    "with space",
+    "with\nnewline",
+    "x" * 101,
+    "",
+])
+def test_state_slug_regex_rejects_unsafe_inputs(bad_value):
+    """Unit test for the validator regex itself — covers cases the
+    request-level test can't reach because the HTTP client refuses to
+    send them (NUL byte, newline)."""
+    from gitoma.api.routers import _STATE_SLUG_RE
+
+    assert _STATE_SLUG_RE.match(bad_value) is None, (
+        f"_STATE_SLUG_RE accepted unsafe input {bad_value!r}; the path-traversal "
+        "guard on /api/v1/state/{owner}/{name} depends on this regex"
+    )
+
+
+@pytest.mark.parametrize("good_value", [
+    "octocat",
+    "gitoma",
+    "hello-world",
+    "my_repo",
+    "v1.2.3",
+    "a",
+    "x" * 100,
+])
+def test_state_slug_regex_accepts_github_style_names(good_value):
+    """Sanity guard: the validator must not over-reject. GitHub's own
+    owner/repo allow-set is a strict subset of what we accept."""
+    from gitoma.api.routers import _STATE_SLUG_RE
+
+    assert _STATE_SLUG_RE.match(good_value) is not None
+
+
 # ── heartbeat exit_clean reset ──────────────────────────────────────────────
 
 

@@ -8,8 +8,8 @@
     </div>
     <div class="header-spacer"></div>
     <nav class="header-actions" aria-label="Primary actions">
-      <button id="palette-btn" class="btn btn--ghost btn--sm" title="Command palette"
-              aria-label="Open command palette" style="gap:8px;">
+      <button id="palette-btn" class="btn btn--ghost btn--sm palette-btn-spaced" title="Command palette"
+              aria-label="Open command palette">
         <span>Quick command</span>
         <kbd id="palette-kbd" aria-hidden="true">Ctrl+K</kbd>
       </button>
@@ -146,7 +146,7 @@
         <div class="card-head">
           <svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-activity"/></svg>
           <h2 id="h-pipeline" class="title">Pipeline</h2>
-          <span id="phase-chip-top" class="phase-chip IDLE" style="margin-left:auto"
+          <span id="phase-chip-top" class="phase-chip IDLE ml-auto"
                 role="status" aria-live="polite" aria-label="Current phase">
             <span class="dot" aria-hidden="true"></span><span id="phase-chip-label">IDLE</span>
           </span>
@@ -173,7 +173,7 @@
             <div class="kpi"><dt class="k">Updated</dt><dd class="v mono" id="info-updated">—</dd></div>
           </dl>
         </div>
-        <div id="current-op-row" class="current-op-row" style="margin:0 14px 12px;" hidden
+        <div id="current-op-row" class="current-op-row with-card-margin" hidden
              role="status" aria-live="polite">
           <svg class="icon spin" id="current-op-icon" aria-hidden="true" focusable="false">
             <use href="#icon-phase-working"/>
@@ -385,7 +385,7 @@
     <h2 id="confirm-title" class="title">Are you sure?</h2>
   </div>
   <div class="modal-body">
-    <p id="confirm-body" style="margin:0;color:var(--fg-mid);font-size:var(--fs-sm);"></p>
+    <p id="confirm-body" class="confirm-body-text"></p>
   </div>
   <div class="modal-foot">
     <button type="button" class="btn btn--sm" data-close-dialog="confirm-dialog">Cancel</button>

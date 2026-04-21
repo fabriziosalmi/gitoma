@@ -35,14 +35,39 @@ MAX_PATCH_SIZE_BYTES = 2 * 1024 * 1024
 # both ``.git/config`` and nested ``foo/.git/config`` are blocked. ``.github``
 # itself is allowed (README badges live there); ``.github/workflows`` is not
 # (CI runs with repo secrets — arbitrary workflow = arbitrary secret exfil).
-_DENY_PATH_PARTS: frozenset[str] = frozenset({".git"})
+#
+# The denylist is split by match shape (path part / prefix / exact filename /
+# filename prefix) for efficiency, but its purpose is one thing: stop the LLM
+# from pivoting from "edit a Python file" to "exfiltrate cloud creds" or
+# "poison the dependency graph". When in doubt, add it here.
+_DENY_PATH_PARTS: frozenset[str] = frozenset({
+    ".git",
+    # Cloud / container creds. Local-only by convention but operators
+    # routinely commit them by accident (or store them in a worktree),
+    # and the LLM has no reason to touch any of them.
+    ".aws", ".ssh", ".docker", ".gcp", ".azure", ".kube",
+})
 _DENY_PATH_PREFIXES: tuple[tuple[str, ...], ...] = (
     (".github", "workflows"),
     (".github", "actions"),
 )
 _DENY_FILENAMES: frozenset[str] = frozenset({
+    # Env / dotenv variants
     ".env", ".envrc", ".netrc", ".pypirc",
+    # Git metadata files (separate from the .git directory itself)
     ".gitmodules", ".gitattributes",
+    # Repo-governance files: changing CODEOWNERS would let the LLM
+    # bypass review requirements on the very PR it's about to open.
+    "CODEOWNERS",
+    # Package-manager auth/registry config — leaks publish tokens.
+    ".npmrc", ".yarnrc", ".yarnrc.yml",
+    # Lockfiles: an LLM-generated lockfile edit is a supply-chain poison
+    # vector (silent dependency swap). Lockfiles must only be regenerated
+    # by the package manager itself, never by the LLM patching JSON/TOML
+    # text directly.
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "Pipfile.lock", "poetry.lock", "uv.lock", "Cargo.lock",
+    "Gemfile.lock", "composer.lock", "go.sum",
 })
 _DENY_FILENAME_PREFIXES: tuple[str, ...] = (".env.",)  # .env.prod, .env.local…
 

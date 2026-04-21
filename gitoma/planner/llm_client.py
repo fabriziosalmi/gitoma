@@ -208,6 +208,18 @@ class LLMError(Exception):
     """Raised for unrecoverable LLM errors."""
 
 
+class LLMTruncatedError(LLMError):
+    """Raised when the LLM response was cut off by the token budget.
+
+    A response cut off mid-JSON parses cleanly via best-effort fallback
+    (the brace-matching extractor closes the dangling structure with the
+    last seen ``}``), so the caller would silently accept a partial plan
+    or partial patch. We instead raise an explicit error so the worker /
+    planner can decide to retry with a higher ``max_tokens`` or fail
+    loudly rather than commit a half-baked result.
+    """
+
+
 class LLMClient:
     """OpenAI-compatible client pointing at LM Studio with robust error handling."""
 
@@ -266,9 +278,24 @@ class LLMClient:
                     temperature=self._config.lmstudio.temperature,
                     max_tokens=self._config.lmstudio.max_tokens,
                 )
-                content = response.choices[0].message.content
+                choice = response.choices[0]
+                content = choice.message.content
                 if content is None:
                     raise LLMError("LLM returned an empty response (content=None)")
+                # OpenAI-compatible APIs (LM Studio included) report why the
+                # generation stopped via ``finish_reason``. ``"length"``
+                # means we hit ``max_tokens`` mid-output — the trailing
+                # tokens are silently dropped, so any JSON inside is now
+                # syntactically valid-looking but semantically truncated.
+                # We surface this so the caller can retry / bail instead
+                # of accepting a half-formed response.
+                finish_reason = getattr(choice, "finish_reason", None)
+                if finish_reason == "length":
+                    raise LLMTruncatedError(
+                        f"LLM response was truncated by max_tokens "
+                        f"({self._config.lmstudio.max_tokens} tokens). "
+                        "Increase LM_STUDIO_MAX_TOKENS or shrink the prompt."
+                    )
                 return str(content)
 
             except (APIConnectionError, APITimeoutError) as e:

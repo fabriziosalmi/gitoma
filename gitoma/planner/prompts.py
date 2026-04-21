@@ -7,7 +7,7 @@ from gitoma.analyzers.base import MetricReport
 
 def planner_system_prompt() -> str:
     return (
-        "You are Gitoma, an expert software engineer and DevOps specialist. "
+        "You are FabGPT, an expert software engineer and DevOps specialist. "
         "Your job is to analyze a repository quality report and produce a structured improvement plan. "
         "You MUST respond with ONLY a valid JSON object — no markdown, no prose, no code fences. "
         "Follow the schema exactly."
@@ -76,7 +76,7 @@ Rules:
 
 def worker_system_prompt() -> str:
     return (
-        "You are Gitoma, an expert software engineer. "
+        "You are FabGPT, an expert software engineer. "
         "Your job is to implement a specific improvement task for a code repository. "
         "You MUST respond with ONLY a valid JSON object — no markdown, no prose, no code fences. "
         "The JSON must contain file patches to apply to the repository."
@@ -145,7 +145,7 @@ Rules:
 
 def review_integrator_system_prompt() -> str:
     return (
-        "You are Gitoma, an expert software engineer. "
+        "You are FabGPT, an expert software engineer. "
         "Your job is to address a specific code review comment on a pull request. "
         "You MUST respond with ONLY a valid JSON object — no markdown, no prose, no code fences."
     )

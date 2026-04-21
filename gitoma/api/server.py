@@ -52,14 +52,63 @@ from gitoma.core.config import CONFIG_FILE, ENV_FILE, load_config
 logger = logging.getLogger(__name__)
 
 
+# ── Streaming-aware gzip wrapper ────────────────────────────────────────────
+#
+# ``GZipMiddleware`` happily compresses ``text/event-stream`` responses,
+# which destroys SSE: the compressor buffers bytes until its threshold
+# fires, so heartbeat comments and individual log lines never reach the
+# browser in real time. Reverse proxies see no traffic for >30 s and drop
+# the connection. We bypass the gzip layer for the SSE prefix and let
+# everything else through unchanged.
+
+# Path prefixes that must never go through gzip — kept narrow so we don't
+# accidentally exempt ordinary JSON endpoints.
+_GZIP_BYPASS_PREFIXES: tuple[str, ...] = (
+    "/api/v1/stream/",   # SSE: per-line streaming with heartbeats
+    "/ws/",              # WebSocket upgrade — already excluded by ASGI type, defensive
+)
+
+
+class _ConditionalGZip:
+    """ASGI wrapper that skips ``GZipMiddleware`` for streaming endpoints.
+
+    Built once at import; the inner gzip middleware is allocated lazily so
+    we never run a request through both paths. The decision is made on the
+    raw scope so we don't have to peek at response headers (which would
+    require buffering — exactly what SSE can't tolerate).
+    """
+
+    def __init__(self, app, **gzip_kwargs):
+        self._app = app
+        self._gzip = GZipMiddleware(app, **gzip_kwargs)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "") or ""
+            if path.startswith(_GZIP_BYPASS_PREFIXES):
+                await self._app(scope, receive, send)
+                return
+        await self._gzip(scope, receive, send)
+
+
 # ── Config cache ─────────────────────────────────────────────────────────────
 # ``load_config()`` walks the dotenv file + TOML on every call. Doing that
 # per authenticated request is pure disk I/O for a value that almost
-# never changes. We cache the API token and refresh only when the backing
-# file's mtime moves forward — or when tests call ``_reset_token_cache()``.
+# never changes. We cache the API token and refresh whenever any of the
+# inputs that produce it move:
+#
+#   * ``config.toml`` mtime (TOML source)
+#   * ``.env`` mtime (dotenv source)
+#   * ``os.environ.get("GITOMA_API_TOKEN")`` snapshot — env wins over
+#     both files in load_config(), so an operator rotating the token via
+#     ``export GITOMA_API_TOKEN=…`` MUST be picked up. The previous cache
+#     keyed only on file mtimes silently masked env-driven rotations.
 
 _cached_token: str = ""
-_cached_mtime: tuple[float, float] = (-1.0, -1.0)
+# Cache key triple: (toml_mtime, env_mtime, env_token_snapshot). We
+# include the env snapshot literally — it's the rotation channel that
+# doesn't bump any file's mtime, so it has to live in the key.
+_cached_key: tuple[float, float, str] = (-1.0, -1.0, "\x00")
 
 
 def _config_mtimes() -> tuple[float, float]:
@@ -81,27 +130,31 @@ def _reset_token_cache() -> None:
     — without the reset, an earlier test's token stays cached and the
     patched function never gets called.
     """
-    global _cached_token, _cached_mtime
+    global _cached_token, _cached_key
     _cached_token = ""
-    _cached_mtime = (-1.0, -1.0)
+    _cached_key = (-1.0, -1.0, "\x00")
 
 
 def _current_api_token() -> str:
-    """Return the configured Bearer token, cached until config files change.
+    """Return the configured Bearer token, cached until any input moves.
 
-    If neither ``config.toml`` nor ``.env`` exists on disk (mtime == 0), we
-    never cache — the token has to come from the shell env, which can
-    change without a file mtime, and tests rely on that re-read semantic.
+    The cache key is (toml_mtime, env_mtime, GITOMA_API_TOKEN_in_env). The
+    env snapshot is essential: ``load_config()`` lets the env var override
+    file values, so an operator running ``export GITOMA_API_TOKEN=newone``
+    expects that to take effect on the very next request — not after a
+    config-file edit. The previous cache (mtime-only) made env rotations
+    silently invisible, which is exactly the kind of failure mode that
+    masks a credential leak in production.
     """
-    global _cached_token, _cached_mtime
-    mt = _config_mtimes()
-    # mtime of 0.0 means "no file" — don't cache in that case, since the
-    # token lives in os.environ and could be monkey-patched by tests.
-    if mt == (0.0, 0.0):
-        return load_config().api_auth_token
-    if mt != _cached_mtime:
+    global _cached_token, _cached_key
+    # Sentinel "\x00" distinguishes "env unset" from "env set to empty
+    # string" — both are meaningful and resolve to different load_config()
+    # paths via dotenv's defaults.
+    env_snapshot = os.environ.get("GITOMA_API_TOKEN", "\x00")
+    key = (*_config_mtimes(), env_snapshot)
+    if key != _cached_key:
         _cached_token = load_config().api_auth_token
-        _cached_mtime = mt
+        _cached_key = key
     return _cached_token
 
 
@@ -199,49 +252,108 @@ app = FastAPI(
 
 # GZip any response bigger than 1 KB. Cockpit state snapshots are mostly
 # JSON text and compress ~5× — worth it on flaky links or LAN tunnels.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# Wrapped so /api/v1/stream/* (SSE) and /ws/* (WebSocket) bypass the
+# gzip layer — both rely on un-buffered, real-time delivery.
+app.add_middleware(_ConditionalGZip, minimum_size=1024)
 
-# TrustedHost denies Host-header forgery. Default allows localhost and the
-# loopback IPs plus ``testserver`` (FastAPI TestClient's default Host); ops
-# opening the API to a LAN override via env.
+# TrustedHost denies Host-header forgery. Default: loopback only +
+# ``testserver`` (FastAPI TestClient's default). The previous default also
+# included ``*.local``, which on a LAN with mDNS made the host reachable
+# under any ``<name>.local`` — combined with the WS state stream, anyone
+# on the same broadcast domain could sniff run state. Operators who
+# legitimately need ``.local`` access can opt in via env.
 _allowed_hosts = os.getenv(
     "GITOMA_ALLOWED_HOSTS",
-    "localhost,127.0.0.1,0.0.0.0,*.local,testserver",
+    "localhost,127.0.0.1,0.0.0.0,testserver",
 ).split(",")
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
 
 # CORS off by default (we assume localhost). Set GITOMA_CORS_ORIGINS to a
 # comma-separated list of origins to open the API to a browser app.
+#
+# The wildcard ``*`` combined with ``allow_credentials=True`` is silently
+# rejected by every browser per the CORS spec (forbidden combination). The
+# server would still emit the Access-Control-* headers and the request
+# would fail in the browser dev console with no server-side trace — a
+# classic opaque-misconfig footgun. We refuse to install the middleware
+# in that shape and emit a loud startup warning so the operator gets a
+# clear remediation path instead of "my cockpit doesn't work".
 _cors_origins_raw = os.getenv("GITOMA_CORS_ORIGINS", "").strip()
 if _cors_origins_raw:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[o.strip() for o in _cors_origins_raw.split(",") if o.strip()],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
-        max_age=600,
-    )
+    _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    if "*" in _cors_origins:
+        # The combination is unusable. Loud refusal beats silent breakage.
+        logger.error(
+            "gitoma_cors_wildcard_with_credentials_rejected",
+            extra={
+                "configured": _cors_origins,
+                "remediation": (
+                    "GITOMA_CORS_ORIGINS=* is incompatible with the "
+                    "Bearer auth model (browsers refuse credentials with "
+                    "wildcard origin). Set explicit origins like "
+                    "https://cockpit.example.com instead."
+                ),
+            },
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=_cors_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["Authorization", "Content-Type"],
+            max_age=600,
+        )
 
 
 # ── Exception handlers ───────────────────────────────────────────────────────
 
 
+import time as _time  # placed at use-site to keep import section tidy
+
+
 @app.middleware("http")
 async def _request_id_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
-    """Attach a request id to every response + log line.
+    """Attach a request id + emit a structured access log per request.
 
-    Cheap to compute, invaluable for correlating a client-side error with
-    the server log line that produced it. The id is set on
-    ``request.state.request_id`` so downstream handlers can include it
-    without recomputing. Clients can also supply ``X-Request-ID`` and we
-    preserve it — useful for end-to-end tracing from the cockpit.
+    The request id correlates a client-side error with the server log line
+    that produced it. Clients can supply ``X-Request-ID`` and we preserve
+    it — useful for end-to-end tracing from the cockpit.
+
+    The access log records method/path/status/duration/client — the
+    minimum kit for incident response. We deliberately log only the
+    ``Authorization`` header's *presence*, never its value, so a debug
+    log dump can't leak the bearer token. Health-probe spam from k8s/LB
+    is demoted to DEBUG so production INFO logs stay readable.
     """
     rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
     request.state.request_id = rid
-    response = await call_next(request)
-    response.headers["x-request-id"] = rid
-    return response
+    started = _time.perf_counter()
+    status_code: int = 500  # default if call_next throws before responding
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["x-request-id"] = rid
+        return response
+    finally:
+        duration_ms = (_time.perf_counter() - started) * 1000.0
+        # Demote noisy probes so prod logs stay readable.
+        is_probe = request.url.path in ("/api/v1/health", "/")
+        log = logger.debug if is_probe else logger.info
+        client = request.client
+        log(
+            "http_access",
+            extra={
+                "request_id": rid,
+                "method": request.method,
+                "path": request.url.path,
+                "status": status_code,
+                "duration_ms": round(duration_ms, 1),
+                "client_ip": client.host if client else None,
+                # Authorization presence only — never the value.
+                "auth_present": "authorization" in request.headers,
+            },
+        )
 
 
 @app.exception_handler(Exception)
