@@ -202,13 +202,74 @@ class GitHubClient:
         import requests
         url = f"https://api.github.com/repos/{owner}/{name}/actions/jobs/{job_id}/logs"
         resp = requests.get(
-            url, 
+            url,
             headers={"Authorization": f"Bearer {self._config.github.token}", "Accept": "application/vnd.github.v3+json"},
             allow_redirects=True
         )
         if resp.status_code == 200:
             return resp.text[-5000:]
         return f"Could not fetch logs (HTTP {resp.status_code}). Please check permissions."
+
+    def get_latest_ci_status(
+        self, owner: str, name: str, branch: str
+    ) -> dict[str, Any]:
+        """Return the aggregate status of the most recent workflow run on ``branch``.
+
+        Returns a dict shaped as::
+
+            {
+              "state":      "pending" | "success" | "failure" | "no_runs",
+              "run_id":     int | None,
+              "run_url":    str | None,
+              "conclusion": str | None,       # raw GitHub Actions conclusion
+              "workflow":   str | None,       # workflow name
+              "updated_at": str | None,       # ISO timestamp of the latest update
+            }
+
+        A "pending" state covers every GitHub Actions status that isn't a
+        terminal conclusion yet (``queued``, ``in_progress``, ``waiting``,
+        ``pending``, ``requested``). A "failure" state covers any terminal
+        non-success conclusion (``failure``, ``cancelled``, ``timed_out``,
+        ``action_required``) so the caller can fan into fix-ci on any of
+        them. "no_runs" means the branch has never triggered a workflow
+        — legitimate state right after the first push, treat as pending.
+        """
+        r = self.get_repo(owner, name)
+        # PyGithub's stubs expect a Branch object, but the API takes a string.
+        runs = list(r.get_workflow_runs(branch=branch))  # type: ignore[arg-type]
+        if not runs:
+            return {
+                "state": "no_runs",
+                "run_id": None,
+                "run_url": None,
+                "conclusion": None,
+                "workflow": None,
+                "updated_at": None,
+            }
+        # Newest first — get_workflow_runs yields in reverse-chronological order.
+        run = runs[0]
+        status = (run.status or "").lower()
+        conclusion = (run.conclusion or "").lower()
+
+        if status != "completed":
+            # queued / in_progress / waiting / pending / requested → not done
+            state = "pending"
+        elif conclusion == "success":
+            state = "success"
+        else:
+            # failure / cancelled / timed_out / action_required / neutral / skipped
+            # Everything non-success gets bucketed as failure so the caller
+            # can decide to auto-remediate via fix-ci.
+            state = "failure"
+
+        return {
+            "state": state,
+            "run_id": run.id,
+            "run_url": run.html_url,
+            "conclusion": conclusion or None,
+            "workflow": run.name,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        }
 
     # ── Labels ─────────────────────────────────────────────────────────────
 

@@ -1,0 +1,277 @@
+/* =============================================================================
+ * Gitoma docs — Apple-style override on top of the VitePress default theme.
+ *
+ * Philosophy: generous whitespace, quiet type, monochrome-first palette,
+ * a single accent reserved for genuine calls-to-action. Nothing shouts.
+ *
+ * We override VitePress's CSS custom properties rather than writing our
+ * own components, so every built-in widget (sidebar, outline, search
+ * modal, code blocks) inherits the new tokens for free.
+ * ============================================================================= */
+
+:root {
+  /* ── Typography: SF Pro first, then system fallbacks ───────────────── */
+  --vp-font-family-base:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
+    "Helvetica Neue", Arial, sans-serif;
+  --vp-font-family-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* ── Light palette: Apple-white with a single blue accent ──────────── */
+  --vp-c-bg:            #ffffff;
+  --vp-c-bg-alt:        #f7f7f8;    /* very subtle stripe for code blocks */
+  --vp-c-bg-soft:       #f2f2f4;
+  --vp-c-bg-elv:        #ffffff;
+
+  --vp-c-border:        #e6e6ea;
+  --vp-c-divider:       #eceef0;
+  --vp-c-gutter:        #eceef0;
+
+  /* Foreground layers — tighter contrast ramp than the default. */
+  --vp-c-text-1:        #101113;    /* headlines / prose */
+  --vp-c-text-2:        #3a3a3c;    /* body text */
+  --vp-c-text-3:        #6e6e73;    /* meta, captions */
+
+  /* The accent. Apple uses a warm electric blue. Keep only one; every
+     non-informative chrome stays monochrome. */
+  --vp-c-brand-1:       #0060df;    /* link default */
+  --vp-c-brand-2:       #0071e3;    /* link hover / focus */
+  --vp-c-brand-3:       #0077ed;    /* pressed */
+  --vp-c-brand-soft:    rgba(0, 113, 227, 0.08);
+
+  /* Harmonise the built-in "tip/warning/danger" callouts to match. */
+  --vp-c-tip-1:         var(--vp-c-brand-1);
+  --vp-c-tip-soft:      var(--vp-c-brand-soft);
+  --vp-c-warning-1:     #b25e00;
+  --vp-c-warning-soft:  rgba(178, 94, 0, 0.08);
+  --vp-c-danger-1:      #c21a1a;
+  --vp-c-danger-soft:   rgba(194, 26, 26, 0.08);
+
+  /* Focus outline — WCAG-visible, matches the accent. */
+  --vp-c-focus:         rgba(0, 113, 227, 0.45);
+
+  /* ── Layout: wider reading column than default, generous gutters ──── */
+  --vp-layout-max-width: 1440px;
+  --vp-sidebar-width:    272px;
+
+  /* ── Nav + sidebar chrome ─────────────────────────────────────────── */
+  --vp-nav-height:           64px;
+  --vp-nav-bg-color:         rgba(255, 255, 255, 0.78);
+
+  /* ── Code block restyle ───────────────────────────────────────────── */
+  --vp-code-bg:              var(--vp-c-bg-alt);
+  --vp-code-line-height:     1.6;
+  --vp-code-font-size:       13.5px;
+  --vp-code-border-radius:   12px;
+
+  /* ── Button — one accent, otherwise monochrome ─────────────────────── */
+  --vp-button-brand-border:       var(--vp-c-brand-1);
+  --vp-button-brand-text:         #ffffff;
+  --vp-button-brand-bg:           var(--vp-c-brand-1);
+  --vp-button-brand-hover-border: var(--vp-c-brand-2);
+  --vp-button-brand-hover-text:   #ffffff;
+  --vp-button-brand-hover-bg:     var(--vp-c-brand-2);
+
+  /* Home hero — soft, airy, no gradient garbage. */
+  --vp-home-hero-name-color: var(--vp-c-text-1);
+  --vp-home-hero-image-background-image: none;
+  --vp-home-hero-image-filter: none;
+}
+
+/* ── Dark palette: true Apple dark ───────────────────────────────────── */
+.dark {
+  --vp-c-bg:            #0a0a0b;
+  --vp-c-bg-alt:        #111113;
+  --vp-c-bg-soft:       #151517;
+  --vp-c-bg-elv:        #151517;
+
+  --vp-c-border:        #1e1e23;
+  --vp-c-divider:       #1a1a1f;
+  --vp-c-gutter:        #1a1a1f;
+
+  --vp-c-text-1:        #ededed;
+  --vp-c-text-2:        #b5b5bd;
+  --vp-c-text-3:        #8d8d97;
+
+  --vp-c-brand-1:       #0a84ff;    /* Apple dark-mode blue */
+  --vp-c-brand-2:       #409cff;
+  --vp-c-brand-3:       #64aeff;
+  --vp-c-brand-soft:    rgba(10, 132, 255, 0.14);
+  --vp-c-focus:         rgba(64, 156, 255, 0.5);
+
+  --vp-nav-bg-color:    rgba(10, 10, 11, 0.78);
+
+  /* Warmer warning/danger so they read on dark without vibrating. */
+  --vp-c-warning-1:     #f5a623;
+  --vp-c-warning-soft:  rgba(245, 166, 35, 0.14);
+  --vp-c-danger-1:      #ff6b6b;
+  --vp-c-danger-soft:   rgba(255, 107, 107, 0.14);
+}
+
+/* =============================================================================
+ * Cross-cutting polish
+ * ============================================================================= */
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+body {
+  font-feature-settings: "ss01", "cv01", "cv11", "cv05";  /* Inter stylistic sets, harmless if missing */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.003em;
+}
+
+/* Tighter tracking on large text, Apple-signature */
+h1, h2, h3 {
+  letter-spacing: -0.022em;
+  font-weight: 650;
+}
+h1 { letter-spacing: -0.028em; }
+.VPDoc h1 { font-size: clamp(2.1rem, 2.6vw, 2.75rem); line-height: 1.1; }
+.VPDoc h2 { font-size: clamp(1.5rem, 1.8vw, 1.8rem); line-height: 1.2; margin-top: 3rem; }
+.VPDoc h3 { font-size: 1.15rem; margin-top: 2.25rem; }
+
+.VPDoc p,
+.VPDoc li { font-size: 15.5px; line-height: 1.7; color: var(--vp-c-text-2); }
+.VPDoc strong { color: var(--vp-c-text-1); }
+
+/* Blurred translucent nav — Apple HUD feel. */
+.VPNav {
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--vp-c-border);
+}
+
+/* Quieter sidebar links. */
+.VPSidebarItem .text {
+  font-weight: 500 !important;
+  color: var(--vp-c-text-2) !important;
+}
+.VPSidebarItem.is-active > .item > .link > .text {
+  color: var(--vp-c-brand-1) !important;
+}
+
+/* Code blocks: rounder, less loud. */
+.vp-code-group,
+div[class*="language-"] {
+  border-radius: 12px !important;
+  border: 1px solid var(--vp-c-border) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+.dark div[class*="language-"] { box-shadow: none; }
+div[class*="language-"] pre { padding: 18px 20px !important; }
+
+/* Inline code — subtle chip. */
+.VPDoc :not(pre) > code {
+  background: var(--vp-c-bg-alt);
+  border: 1px solid var(--vp-c-border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 0.87em;
+}
+
+/* Links: monochrome underline on hover, accent on focus. */
+.VPDoc a:not(.header-anchor):not(.VPButton) {
+  text-decoration: underline;
+  text-decoration-color: rgba(0, 96, 223, 0.25);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+  transition: text-decoration-color .15s ease;
+}
+.VPDoc a:not(.header-anchor):not(.VPButton):hover {
+  text-decoration-color: var(--vp-c-brand-1);
+}
+
+/* Keyboard focus ring — accent, generous. */
+*:focus-visible {
+  outline: 2px solid var(--vp-c-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Tables: flat, airy. No zebra. */
+.VPDoc table {
+  border-collapse: collapse;
+  font-size: 14.5px;
+  margin: 1.5em 0;
+}
+.VPDoc th, .VPDoc td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--vp-c-border);
+  text-align: left;
+}
+.VPDoc th { font-weight: 600; color: var(--vp-c-text-1); }
+.VPDoc tr { background: transparent !important; }
+
+/* Home hero — breathing room, center column, no loud gradients. */
+.VPHero {
+  padding-top: 6rem !important;
+  padding-bottom: 4rem !important;
+}
+.VPHero .main { max-width: 720px; margin: 0 auto; text-align: left; }
+.VPHero .name,
+.VPHero .text {
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+.VPHero .tagline {
+  color: var(--vp-c-text-3);
+  font-size: 1.05rem;
+  line-height: 1.55;
+  margin-top: 1.25rem;
+  max-width: 560px;
+}
+.VPHero .actions { margin-top: 2rem; }
+
+/* Feature cards: mac-ish glass. */
+.VPFeature {
+  border: 1px solid var(--vp-c-border) !important;
+  background: var(--vp-c-bg) !important;
+  border-radius: 14px !important;
+  padding: 22px 22px 18px !important;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.VPFeature:hover {
+  border-color: var(--vp-c-brand-1) !important;
+  transform: translateY(-2px);
+}
+.VPFeature .box { padding: 0 !important; }
+.VPFeature .icon {
+  background: transparent !important;
+  border: none !important;
+  font-size: 22px !important;
+  margin-bottom: 8px !important;
+  width: auto !important; height: auto !important;
+}
+.VPFeature .title {
+  font-size: 1rem !important;
+  letter-spacing: -0.015em !important;
+  font-weight: 600 !important;
+}
+.VPFeature .details {
+  color: var(--vp-c-text-3) !important;
+  font-size: 14px !important;
+  line-height: 1.55 !important;
+}
+
+/* Callouts: soft, no ALL-CAPS labels. */
+.custom-block.tip,
+.custom-block.warning,
+.custom-block.danger,
+.custom-block.info {
+  border-left-width: 3px !important;
+  border-radius: 10px !important;
+  padding: 14px 18px !important;
+}
+.custom-block-title { font-weight: 600; letter-spacing: -0.01em; }
+
+/* Footer — minimal. */
+.VPFooter {
+  border-top: 1px solid var(--vp-c-border);
+  padding: 2rem 24px !important;
+  color: var(--vp-c-text-3);
+  font-size: 13px;
+}

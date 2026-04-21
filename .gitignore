@@ -59,3 +59,9 @@ env/
 
 .ruff_cache/
 .claude/
+
+# VitePress docs build artefacts — we DO commit docs/package-lock.json so
+# every Pages deploy resolves the same dep tree as local builds.
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

@@ -24,6 +24,7 @@ from gitoma.cli._helpers import (
     _run_self_review,
     _safe_cleanup,
     _warn,
+    _watch_ci_and_maybe_fix,
 )
 from gitoma.core.github_client import GitHubClient
 from gitoma.core.repo import parse_repo_url
@@ -69,6 +70,22 @@ def run(
         typer.Option(
             "--no-self-review",
             help="Skip the Phase 5 self-critic pass that posts a review comment on the PR",
+        ),
+    ] = False,
+    no_ci_watch: Annotated[
+        bool,
+        typer.Option(
+            "--no-ci-watch",
+            help="Skip Phase 6: polling GitHub Actions on the freshly-pushed branch "
+            "and auto-invoking fix-ci on failure",
+        ),
+    ] = False,
+    no_auto_fix_ci: Annotated[
+        bool,
+        typer.Option(
+            "--no-auto-fix-ci",
+            help="Watch CI but do NOT auto-invoke the Reflexion agent on failure "
+            "(the watch still narrates pass/fail)",
         ),
     ] = False,
     skip_lm: Annotated[bool, typer.Option("--skip-lm-check", hidden=True, help="Skip LM Studio check (testing)")] = False,
@@ -434,13 +451,29 @@ def run(
         # narrates the critic pass so the cockpit shows progress.
         # ────────────────────────────────────────────────────────────────────
         if no_self_review:
-            console.print(
-                f"\n[muted]Self-review skipped (--no-self-review). "
-                f"Next: run [primary]gitoma review {repo_url}[/primary] "
-                "once Copilot reviews the PR.[/muted]"
-            )
+            console.print("\n[muted]Self-review skipped (--no-self-review).[/muted]")
         else:
             _run_self_review(config, owner, name, pr_info.number, state)
+
+        # ────────────────────────────────────────────────────────────────────
+        # PHASE 6 — CI WATCH (optional, default on)
+        # Poll GitHub Actions on the freshly-pushed branch. On failure,
+        # invoke the Reflexion agent (same as `gitoma fix-ci`) up to
+        # `max_fix_attempts` times. Never re-raises — the PR is open and
+        # any remediation failure just annotates the state so the cockpit
+        # + `gitoma logs` surface the outcome.
+        # ────────────────────────────────────────────────────────────────────
+        if no_ci_watch:
+            console.print(
+                f"\n[muted]CI watch skipped (--no-ci-watch). "
+                f"Next: run [primary]gitoma review {repo_url}[/primary] "
+                "when you want to integrate external review comments.[/muted]"
+            )
+        else:
+            _watch_ci_and_maybe_fix(
+                config, owner, name, branch, repo_url, state,
+                auto_fix=not no_auto_fix_ci,
+            )
             console.print(
                 f"\n[muted]Next: run [primary]gitoma review {repo_url}[/primary] "
                 "when you want to integrate external review comments.[/muted]"

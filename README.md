@@ -1,230 +1,79 @@
-# Gitoma 🤖
+<div align="center">
 
-> AI-powered GitHub repository improvement agent — analyzes, plans, commits, and opens PRs autonomously.
+# Gitoma
 
-```
-   _____ _ _                        
-  / ____(_) |                       
- | |  __ _| |_ ___  _ __ ___   __ _ 
- | | |_ | | __/ _ \| '_ ` _ \ / _` |
- | |__| | | || (_) | | | | | | (_| |
-  \_____|_|\__\___/|_| |_| |_|\__,_|
-```
+**An autonomous agent that improves your GitHub repo.**
 
-## What it does
+Analyzes. Plans. Commits. Opens a PR. Reviews its own work.
 
-1. **Analyzes** your GitHub repo across 9+ metrics (CI/CD, tests, security, docs, deps…)
-2. **Plans** improvements via local LLM (LM Studio + gemma-4-e2b-it)
-3. **Commits** structured fixes to a `gitoma/improve-*` branch, task by task
-4. **Opens a PR** with a rich description of every change made
-5. **Integrates** Copilot review comments — auto-fixes and pushes them
+[**Documentation**](https://fabriziosalmi.github.io/gitoma/) · [Quickstart](https://fabriziosalmi.github.io/gitoma/guide/quickstart) · [CLI reference](https://fabriziosalmi.github.io/gitoma/guide/cli) · [REST API](https://fabriziosalmi.github.io/gitoma/api/rest)
 
-You just merge.
+</div>
 
 ---
 
-## Install
-
 ```bash
-git clone https://github.com/fabgpt-coder/gitoma
-cd gitoma
-pip install -e .
-```
-
-Or globally with pipx:
-
-```bash
-pipx install .
-```
-
----
-
-## Prerequisites
-
-- **LM Studio** running locally with `gemma-4-e2b-it` loaded (OpenAI-compatible API on port 1234)
-- **GitHub Personal Access Token** (fine-grained) with:
-  - `contents: write`
-  - `pull-requests: write`
-  - `issues: read`
-
----
-
-## Setup
-
-```bash
-# Set your GitHub token
-gitoma config set GITHUB_TOKEN=ghp_your_token_here
-
-# Verify config
-gitoma config show
-```
-
-Or copy `.env.example` to `~/.gitoma/.env` and edit it.
-
----
-
-## Usage
-
-### Full autonomous run
-
-```bash
+pipx install gitoma
+gitoma config set GITHUB_TOKEN=<your-token>
 gitoma run https://github.com/owner/repo
 ```
 
-Options:
-- `--dry-run` — analyze + plan only, no commits
-- `--branch gitoma/custom-branch` — custom branch name
-- `--yes` / `-y` — skip confirmation prompts
-- `--resume` — continue an interrupted run
-- `--reset` — delete state and start fresh
+That's it. A local LLM writes the plan, commits fix-by-fix, opens a pull request, then runs an adversarial self-review on the diff it just shipped.
 
-### Analyze only
+```
+ANALYZE  →  PLAN  →  EXECUTE  →  PR  →  SELF-REVIEW  →  REVIEW (you)
+```
+
+## Why Gitoma
+
+- **Local-first.** The LLM runs on your machine (LM Studio, Ollama, or any OpenAI-compatible endpoint). Code, diffs, and secrets never leave your laptop.
+- **Resumable.** State is persisted per repo. Kill the CLI mid-run; `--resume` picks up at the last committed subtask.
+- **Observable.** A live cockpit at `http://localhost:8000` streams every phase. Structured JSONL trace per invocation.
+- **Scriptable.** Everything the CLI does is also a REST endpoint (`POST /api/v1/run`, SSE at `/stream/{id}`). Bearer-protected, CSP-hardened.
+- **Extensible via MCP.** A built-in Model Context Protocol server exposes GitHub context + write tools to Claude Desktop and any MCP client.
+
+## Quickstart
+
+Three commands to your first PR:
 
 ```bash
-gitoma analyze https://github.com/owner/repo
+# 1. Install
+pipx install gitoma
+
+# 2. Point at your GitHub token (contents:write + pull-requests:write)
+gitoma config set GITHUB_TOKEN=ghp_your_fine_grained_token
+
+# 3. Run
+gitoma run https://github.com/<owner>/<repo>
 ```
 
-### Check progress
+Open the cockpit while it runs:
 
 ```bash
-# Specific repo
-gitoma status https://github.com/owner/repo
-
-# All tracked repos
-gitoma list
-
-# Also show remote branches on GitHub
-gitoma status https://github.com/owner/repo --remote
+gitoma serve &
+open http://localhost:8000
 ```
 
-### Review Copilot feedback
+Full install + prerequisites in the [**Getting Started guide**](https://fabriziosalmi.github.io/gitoma/guide/quickstart).
 
-```bash
-# Show review comments
-gitoma review https://github.com/owner/repo
+## What's under the hood
 
-# Auto-fix all comments and push
-gitoma review https://github.com/owner/repo --integrate
-```
-
-### Auto-Remediate CI/CD Failures (Reflexion Agent)
-
-```bash
-# Auto-detect broken GitHub Actions jobs, stream logs to LLM, evaluate, and push fix
-gitoma fix-ci https://github.com/owner/repo --branch <target-branch>
-```
-
-### Reset state
-
-```bash
-gitoma reset https://github.com/owner/repo
-```
-
-### Run REST API Server (FastAPI)
-
-Unleash the full async REST API server to trigger jobs via VPN or automation layers.
-
-```bash
-gitoma serve --port 8000
-
-# Endpoint available at: http://localhost:8000/api/v1/health
-# Swagger Docs available at: http://localhost:8000/docs
-```
-
-**API authentication** — if `GITOMA_API_TOKEN` is not configured, the
-server auto-generates one at first start and persists it to
-`~/.gitoma/runtime_token` (mode `0600`). The token is printed once in
-the startup banner; reuse it in the cockpit Settings dialog. Delete
-the file and restart to rotate. To pin an explicit token instead:
-
-```bash
-gitoma config set GITOMA_API_TOKEN=my-long-secret
-```
-
-### Live Web Cockpit
-
-`gitoma serve` also publishes a real-time, read-only dashboard at `/` that
-reflects the state of every tracked run as the CLI progresses through its
-phases. It streams updates over WebSocket (`/ws/state`, 500 ms polling) and
-is fully self-contained — no build step, no third-party JS.
-
-```bash
-gitoma serve --port 8000
-open http://localhost:8000   # live cockpit
-```
-
-The cockpit is unauthenticated and intended for localhost / VPN use. The
-`/api/v1/*` routes remain Bearer-protected.
-
-### Run as MCP server
-
-Expose GitHub context tools (file reads, repo tree, CI failures, PR comments)
-to any MCP-capable client (Claude Desktop, MCP Inspector, ...):
-
-```bash
-gitoma mcp
-```
-
----
-
-## Architecture
-
-```
-gitoma run <url>
-  │
-  ├─ Phase 1: ANALYZE    — 9 metric analyzers (README, CI, tests, security…)
-  ├─ Phase 2: PLAN       — LLM (gemma via LM Studio) → structured TaskPlan
-  ├─ Phase 3: EXECUTE    — LLM generates patches → git commit per subtask
-  ├─ Phase 4: PR         — push branch + open GitHub PR
-  ├─ Phase 5: REVIEW     — CopilotWatcher → integrate comments → push fixes
-  └─ Phase 6: FIX-CI     — Reflexion Dual-Agent (Fixer + Critic) remediates broken workflows
-```
-
-### Design patterns
-
-| Pattern | Where |
-|---|---|
-| Strategy | LLM client (swappable backend) |
-| Pipeline | Analyzer → Planner → Worker → PR → Watcher |
-| Async Worker | FastAPI BackgroundTasks for REST endpoints |
-| State Machine | IDLE → ANALYZING → PLANNING → WORKING → PR_OPEN → REVIEWING → DONE |
-| Command | Each SubTask is an executable + replayable unit |
-| Observer | Meta-Cognitive architectural analysis on telemetry |
-| Repository | GitRepo abstracts GitPython + GitHub API |
-| Factory | LLMClient wraps OpenAI-compat API |
-
-### Metrics analyzed
-
-| # | Metric | Languages |
+| Phase | What happens | Where |
 |---|---|---|
-| 1 | README quality | All |
-| 2 | CI/CD pipeline | All |
-| 3 | Test suite | Python, Go, Rust, JS/TS |
-| 4 | Security | All |
-| 5 | Code quality | Python, Go, Rust, JS/TS |
-| 6 | Dependencies | Python, Go, Rust, JS/TS |
-| 7 | Documentation | Python, Rust, JS/TS |
-| 8 | License | All |
-| 9 | Project structure | All |
+| **Analyze** | Nine metric analyzers score the repo | `gitoma/analyzers/*` |
+| **Plan** | Local LLM turns failing metrics into an executable `TaskPlan` | `gitoma/planner/*` |
+| **Execute** | Each subtask becomes a patch + commit on a feature branch | `gitoma/worker/*` |
+| **PR** | Branch is pushed; PR is opened with a structured description | `gitoma/pr/*` |
+| **Self-Review** | Adversarial critic reads the diff + posts findings on the PR | `gitoma/review/self_critic.py` |
+| **Review** *(on demand)* | Copilot feedback is fetched; `--integrate` auto-fixes + pushes | `gitoma/review/*` |
+| **Fix-CI** *(on demand)* | Reflexion dual-agent remediates broken GitHub Actions | `gitoma/review/reflexion.py` |
 
----
+Read the full architecture, state machine, and threat model in the [**docs**](https://fabriziosalmi.github.io/gitoma/architecture/overview).
 
-## State persistence
+## Status
 
-Agent state is saved at `~/.gitoma/state/<owner>__<repo>.json` after every subtask.
-This enables resumability — if gitoma crashes mid-task, run with `--resume`.
-
----
-
-## Bot identity
-
-Commits are authored by:
-- **Name**: FabGPT
-- **Email**: fabgpt.inbox@gmail.com
-- **GitHub**: [@fabgpt-coder](https://github.com/fabgpt-coder)
-
----
+Gitoma passes 250+ tests, mypy strict, ruff clean, and a draconian security/UX audit across the CLI, the REST API, the MCP server, and the web cockpit. See the [security posture](https://fabriziosalmi.github.io/gitoma/architecture/security) page for the full threat model.
 
 ## License
 
-MIT © FabGPT
+MIT © Fabrizio Salmi

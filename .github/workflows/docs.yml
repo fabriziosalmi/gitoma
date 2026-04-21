@@ -1,0 +1,72 @@
+name: Deploy docs to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+# Permissions required for the deploy-pages action.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialise deploys so two rapid pushes don't fight over the Pages environment.
+# We `cancel-in-progress: false` so a freshly-pushed build never kills a deploy
+# that's already uploading the artefact.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build VitePress
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Needed so VitePress's `lastUpdated` feature can read file mtimes
+          # across history. Shallow clones lose that.
+          fetch-depth: 0
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Install dependencies
+        working-directory: docs
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        working-directory: docs
+        env:
+          # VitePress reads NODE_ENV to toggle prod optimisations.
+          NODE_ENV: production
+        run: npm run build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

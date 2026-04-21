@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -178,6 +179,222 @@ def _run_self_review(
         _ok(f"Self-review: {n} finding(s) ({summary}) — {posted_note}.")
         state.current_operation = f"Self-review: {n} findings ({summary})"
     save_state(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CI watch-and-maybe-fix — closes the loop between PR open and a merge-ready branch
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# After the PR is opened and the adversarial self-review has posted its
+# comment, GitHub Actions is almost certainly running on the feature
+# branch. A human-in-the-loop workflow would now sit and wait — and if
+# CI fails, manually invoke `gitoma fix-ci`. That's exactly what this
+# helper automates:
+#
+#   1. Poll the latest workflow run for ``branch`` every
+#      ``poll_interval_s`` seconds, up to ``timeout_s`` total.
+#   2. Success → narrate + return.
+#   3. Failure → invoke the existing ``CIDiagnosticAgent`` (same one
+#      ``gitoma fix-ci`` uses) once; the agent streams logs to the LLM,
+#      a critic reviews, the approved patch is pushed.
+#   4. Re-poll once more so the user sees the remediated CI either pass
+#      or surface as a final failure (bound attempts prevent ping-pong).
+#
+# The whole routine is failure-tolerant: a network blip or a hiccup in
+# the GitHub API logs a warning and keeps polling until the budget is
+# exhausted. ``state.current_operation`` narrates live so the cockpit
+# reflects "Watching CI (2m 30s)…" and the trace captures every poll.
+
+
+# 20 min matches the median GitHub Actions build time across the set of
+# repos gitoma is typically used on. Configurable per-invocation from
+# the ``run`` command if someone has an unusually long test matrix.
+_CI_WATCH_TIMEOUT_S = 1200.0
+_CI_WATCH_POLL_INTERVAL_S = 30.0
+_CI_WATCH_MAX_FIX_ATTEMPTS = 1
+
+
+def _watch_ci_and_maybe_fix(
+    config: "Config",
+    owner: str,
+    name: str,
+    branch: str,
+    repo_url: str,
+    state: "AgentState",
+    *,
+    timeout_s: float = _CI_WATCH_TIMEOUT_S,
+    poll_interval_s: float = _CI_WATCH_POLL_INTERVAL_S,
+    auto_fix: bool = True,
+    max_fix_attempts: int = _CI_WATCH_MAX_FIX_ATTEMPTS,
+) -> str:
+    """Watch GitHub Actions for ``branch``; if it fails, auto-invoke fix-ci.
+
+    Returns the final state as one of:
+
+    * ``"success"``  — CI passed (either first try or after remediation).
+    * ``"failure"``  — CI failed and either auto-fix was off, the fix-ci
+      attempt also failed, or the post-fix CI still failed.
+    * ``"timeout"``  — the poll budget expired before CI reached a
+      terminal state. The run is not aborted; the user can decide.
+    * ``"no_runs"``  — no GitHub Actions workflow triggered on the
+      branch during the watch window. Treated as non-blocking.
+    * ``"skipped"``  — caller asked to skip (returned without polling).
+
+    Never re-raises. A failed watch does not undo a successful PR open;
+    it just annotates ``state.current_operation`` and the trace with
+    the outcome so the cockpit + `gitoma logs` reflect reality.
+    """
+    import gitoma.core.trace as trace_mod
+
+    # `current()` always returns a Trace — a no-op one when there is no
+    # active run, so we can call `.emit()` unconditionally without guards.
+    tr = trace_mod.current()
+    gh = GitHubClient(config)
+
+    console.print()
+    from rich.rule import Rule  # noqa: WPS433 — local import to avoid rich at module import time
+    console.print(Rule("[primary]PHASE 6 — CI WATCH[/primary]", style="primary"))
+    console.print(
+        f"[muted]Polling GitHub Actions on [bold]{branch}[/bold] "
+        f"(every {int(poll_interval_s)}s, up to {int(timeout_s // 60)} min)…[/muted]"
+    )
+    tr.emit("ci.watch.begin", branch=branch, timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s, auto_fix=auto_fix)
+
+    fix_attempts = 0
+    start = time.monotonic()
+
+    def _poll_once() -> dict[str, Any]:
+        try:
+            status = gh.get_latest_ci_status(owner, name, branch)
+        except Exception as exc:
+            # Transient API error — log + return a synthetic "pending" so
+            # the outer loop keeps polling until the budget runs out.
+            _warn(f"CI status probe failed: {exc}")
+            tr.emit("ci.watch.probe_error", level="warn", error=type(exc).__name__)
+            return {"state": "pending", "run_id": None, "conclusion": None}
+        return status
+
+    # One retry loop per fix attempt (including the initial "no fix yet"
+    # attempt as iteration zero). ``max_fix_attempts + 1`` total passes
+    # through the poll: the first one watches the initial CI, every
+    # subsequent pass watches the post-fix-ci rerun.
+    for attempt in range(max_fix_attempts + 1):
+        deadline = start + timeout_s
+        result: dict[str, Any] = {"state": "pending"}
+        while time.monotonic() < deadline:
+            result = _poll_once()
+            elapsed = int(time.monotonic() - start)
+            state.current_operation = (
+                f"Watching CI — {result.get('state', 'pending')} "
+                f"({elapsed // 60}m {elapsed % 60}s)"
+            )
+            try:
+                save_state(state)
+            except Exception:
+                pass
+            tr.emit(
+                "ci.watch.poll",
+                state=result.get("state"),
+                conclusion=result.get("conclusion"),
+                run_id=result.get("run_id"),
+                elapsed_s=elapsed,
+            )
+            if result["state"] in ("success", "failure", "no_runs"):
+                break
+            time.sleep(poll_interval_s)
+        else:
+            # The ``while`` loop fell through because deadline elapsed.
+            _warn(
+                f"CI watch timed out after {int(timeout_s // 60)} min",
+                hint="The PR is still open — check GitHub manually or run `gitoma fix-ci` later.",
+            )
+            state.current_operation = "CI watch timed out"
+            save_state(state)
+            tr.emit("ci.watch.timeout", level="warn")
+            return "timeout"
+
+        final_state = result["state"]
+        if final_state == "success":
+            run_url = result.get("run_url") or ""
+            _ok(f"CI passed{' — ' + str(run_url) if run_url else ''}.")
+            state.current_operation = "CI passed"
+            save_state(state)
+            tr.emit("ci.watch.success", run_url=run_url)
+            return "success"
+
+        if final_state == "no_runs":
+            _warn(
+                "No GitHub Actions workflows ran on this branch",
+                hint="If this repo has no CI, that's fine. Otherwise check that workflows are configured to run on pushes.",
+            )
+            state.current_operation = "CI: no workflows triggered"
+            save_state(state)
+            tr.emit("ci.watch.no_runs", level="warn")
+            return "no_runs"
+
+        # final_state == "failure"
+        console.print(
+            f"[danger]CI failed[/danger] — workflow `{result.get('workflow') or 'unknown'}` "
+            f"ended as `{result.get('conclusion')}`."
+        )
+        tr.emit("ci.watch.failure", level="warn",
+                conclusion=result.get("conclusion"),
+                run_url=result.get("run_url"))
+
+        if not auto_fix or fix_attempts >= max_fix_attempts:
+            hint = (
+                "Re-run with `gitoma fix-ci <repo-url> --branch "
+                f"{branch}` to try again."
+                if auto_fix
+                else "Auto-remediation was disabled (--no-ci-watch / --no-auto-fix-ci)."
+            )
+            _warn("CI failure not auto-remediated.", hint=hint)
+            state.current_operation = f"CI failed ({result.get('conclusion')})"
+            save_state(state)
+            return "failure"
+
+        # Auto-remediate: invoke the same agent `gitoma fix-ci` uses.
+        fix_attempts += 1
+        from gitoma.review.reflexion import CIDiagnosticAgent
+
+        console.print(
+            f"[info]Invoking Reflexion auto-remediation (attempt "
+            f"{fix_attempts}/{max_fix_attempts})…[/info]"
+        )
+        state.current_operation = f"Auto fix-ci (attempt {fix_attempts})"
+        save_state(state)
+        tr.emit("ci.watch.fix.attempt", attempt=fix_attempts)
+
+        try:
+            CIDiagnosticAgent(config).analyze_and_fix(repo_url, branch)
+        except Exception as exc:
+            _warn(
+                f"fix-ci attempt failed: {exc}",
+                hint="The PR is still open; try `gitoma fix-ci` manually.",
+            )
+            tr.emit(
+                "ci.watch.fix.error",
+                level="error",
+                attempt=fix_attempts,
+                error=type(exc).__name__,
+            )
+            state.current_operation = "CI fix-ci failed"
+            save_state(state)
+            return "failure"
+
+        # After fix-ci pushes, GitHub starts a fresh workflow run. Reset
+        # the start timestamp so the second poll gets a fresh budget
+        # rather than inheriting what's left of the first one.
+        console.print("[muted]Waiting for post-remediation CI run to start…[/muted]")
+        time.sleep(poll_interval_s)  # tiny grace window for GitHub to kick the run
+        start = time.monotonic()
+
+    # Exhausted all attempts without success.
+    state.current_operation = "CI still failing after auto-remediation"
+    save_state(state)
+    tr.emit("ci.watch.failure.final", level="error", attempts=fix_attempts)
+    return "failure"
 
 
 def _pid_alive(pid: int | None) -> bool:
