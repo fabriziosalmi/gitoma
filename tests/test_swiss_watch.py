@@ -672,3 +672,226 @@ def test_h9_heartbeat_tick_logs_on_crash_and_continues(tmp_path, monkeypatch):
     assert "tr.exception" in tick_chunk, (
         "heartbeat tick crashes must be logged via the trace, not silently swallowed"
     )
+
+
+# ── R2: GitRepo.sha_reachable() — behavioral test against a real git repo ──
+
+
+def test_r2_sha_reachable_rejects_empty_and_invalid(tmp_path: Path):
+    """``sha_reachable("")`` and unknown SHAs must return False. A crashed
+    resume trusts an empty ``commit_sha`` string from corrupted state —
+    the helper must treat that as "not reachable" instead of letting
+    ``git merge-base`` barf with a non-boolean error."""
+    import git as gitpython
+    from gitoma.core.repo import GitRepo
+
+    r = gitpython.Repo.init(tmp_path)
+    (tmp_path / "seed.txt").write_text("seed", encoding="utf-8")
+    r.index.add(["seed.txt"])
+    actor = gitpython.Actor("t", "t@t")
+    r.index.commit("init", author=actor, committer=actor)
+
+    gr = GitRepo.__new__(GitRepo)
+    gr._tmpdir = str(tmp_path)
+    gr._repo = r
+
+    assert gr.sha_reachable("") is False
+    assert gr.sha_reachable("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") is False
+    assert gr.sha_reachable("not-a-sha") is False
+
+
+def test_r2_sha_reachable_true_for_head_ancestor(tmp_path: Path):
+    """A commit that IS an ancestor of HEAD must return True — this is
+    the happy path that resume relies on to trust persisted completions."""
+    import git as gitpython
+    from gitoma.core.repo import GitRepo
+
+    r = gitpython.Repo.init(tmp_path)
+    actor = gitpython.Actor("t", "t@t")
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    r.index.add(["a.txt"])
+    c1 = r.index.commit("first", author=actor, committer=actor)
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    r.index.add(["b.txt"])
+    c2 = r.index.commit("second", author=actor, committer=actor)
+
+    gr = GitRepo.__new__(GitRepo)
+    gr._tmpdir = str(tmp_path)
+    gr._repo = r
+
+    # HEAD points at c2 → both c1 (ancestor) and c2 (equal) are reachable.
+    assert gr.sha_reachable(c1.hexsha) is True
+    assert gr.sha_reachable(c2.hexsha) is True
+
+
+def test_r2_sha_reachable_false_for_detached_branch(tmp_path: Path):
+    """The R2 scenario in flesh: prior run pushed partial commits but
+    crashed before PHASE 4's branch push. On resume, ``checkout -B``
+    resets to ``origin/<branch>`` and the commit that only ever existed
+    in the prior tempdir is gone. ``sha_reachable`` must return False
+    for that orphaned SHA — otherwise the worker silently skips the
+    subtask and the final branch misses the work."""
+    import git as gitpython
+    from gitoma.core.repo import GitRepo
+
+    r = gitpython.Repo.init(tmp_path)
+    actor = gitpython.Actor("t", "t@t")
+    (tmp_path / "seed.txt").write_text("seed", encoding="utf-8")
+    r.index.add(["seed.txt"])
+    base = r.index.commit("base", author=actor, committer=actor)
+
+    # Simulate a "lost" commit: created on a side branch then HEAD never
+    # includes it — from main's perspective it's not an ancestor.
+    r.git.checkout("-b", "lost-work")
+    (tmp_path / "lost.txt").write_text("lost", encoding="utf-8")
+    r.index.add(["lost.txt"])
+    lost = r.index.commit("lost", author=actor, committer=actor)
+    # HEAD back to base, discarding the lost-work branch from history.
+    r.git.checkout(base.hexsha)
+
+    gr = GitRepo.__new__(GitRepo)
+    gr._tmpdir = str(tmp_path)
+    gr._repo = r
+
+    assert gr.sha_reachable(base.hexsha) is True, "base commit must be reachable from HEAD"
+    assert gr.sha_reachable(lost.hexsha) is False, (
+        "orphaned commit (exists in repo but not ancestor of HEAD) must be "
+        "reported unreachable — this is the signal that drives resume to "
+        "re-run the subtask"
+    )
+
+
+# ── R3: resume flips lost subtasks back to pending ────────────────────────
+
+
+def test_r3_resume_rewinds_completed_subtasks_with_unreachable_shas():
+    """Source-level pin on the resume loop: when a subtask is marked
+    ``status=completed`` with a ``commit_sha`` that is NOT an ancestor
+    of HEAD, the loop MUST (a) flip it to ``pending``, (b) clear the
+    ``commit_sha``, (c) demote the parent task from ``completed`` to
+    ``in_progress``, and (d) persist via ``save_state``.
+
+    The prior resume path trusted the persisted ``completed`` marker
+    unconditionally — after a pre-push crash, the worker silently
+    skipped the subtask and the final PR was missing work. This test
+    fails loudly the moment any of those four guarantees is removed."""
+    src = Path(__file__).resolve().parents[1] / "gitoma/cli/commands/run.py"
+    text = src.read_text(encoding="utf-8")
+
+    # The loop must be gated on the resume flag + a loaded plan — running
+    # it on a fresh run would be pointless and risks breaking the happy path.
+    assert "if resume and plan:" in text, (
+        "SHA-reachability loop must be gated on ``resume and plan`` — "
+        "never run it on fresh (non-resume) invocations"
+    )
+    # The core check: sha_reachable(sub.commit_sha) called inside the loop.
+    assert "git_repo.sha_reachable(sub.commit_sha)" in text, (
+        "resume loop must call ``git_repo.sha_reachable(sub.commit_sha)`` "
+        "to detect lost commits"
+    )
+    # Recovery mutations — all four must be present.
+    assert 'sub.status = "pending"' in text, (
+        "lost subtask must be flipped to status=pending so the worker re-runs it"
+    )
+    assert 'sub.commit_sha = ""' in text, (
+        "lost subtask must have its stale commit_sha cleared"
+    )
+    assert 'task.status = "in_progress"' in text, (
+        "parent task must be demoted from completed → in_progress when any "
+        "subtask is lost"
+    )
+    # Persistence — without save_state the rewind is lost on the next crash.
+    loop_start = text.find("if resume and plan:")
+    loop_slice = text[loop_start : loop_start + 2500]
+    assert "save_state(state)" in loop_slice, (
+        "resume loop must persist the rewound plan via save_state(state) — "
+        "otherwise a second crash before the worker commits loses the fix"
+    )
+
+
+# ── R1: PR-state validation before skipping PHASE 4 ───────────────────────
+
+
+def test_r1_resume_validates_persisted_pr_on_github():
+    """Source-level pin: on resume, a persisted ``pr_number`` is NOT
+    trusted blindly. Before skipping PHASE 4 we query GitHub and branch
+    on the live state (open / merged / closed / missing).
+
+    The prior path trusted the persisted PR unconditionally — if the PR
+    was merged or closed between runs, self-review + CI-watch still ran
+    against a finalised PR (noise at best, 404 chases at worst). If the
+    PR was deleted outright, every follow-up API call was a dead end."""
+    src = Path(__file__).resolve().parents[1] / "gitoma/cli/commands/run.py"
+    text = src.read_text(encoding="utf-8")
+
+    assert "from github import GithubException" in text, (
+        "run.py must import GithubException to handle a missing PR (404) "
+        "distinctly from transient API errors"
+    )
+    assert "gh.get_pr(owner, name, state.pr_number)" in text, (
+        "run.py must query GitHub for the persisted PR before skipping PHASE 4"
+    )
+    # All five states must be present as string literals — losing any one
+    # collapses the branching logic back to the prior blind-trust path.
+    for lit in ('"open"', '"merged"', '"closed"', '"missing"', '"unknown"'):
+        assert lit in text, (
+            f"pr_state literal {lit} missing from run.py — the four "
+            "GitHub-reality branches + unknown fallback are the whole point "
+            "of the validation"
+        )
+    # 404 handling specifically — a missing PR must clear the stale fields
+    # and fall through to PHASE 4 re-creation.
+    assert 'getattr(exc, "status", None) == 404' in text, (
+        "run.py must special-case the 404 via GithubException.status so a "
+        "deleted PR triggers re-creation instead of a crash"
+    )
+    assert "state.pr_number = None" in text and "state.pr_url = None" in text, (
+        "on PR missing/404, run.py must null out pr_number + pr_url so the "
+        "re-created PR's identity isn't confused with the stale one"
+    )
+
+
+def test_r1_finalised_pr_skips_self_review_and_ci_watch():
+    """If GitHub reports the persisted PR as merged or closed, ``pr_finalised``
+    must flip True and BOTH PHASE 5 (self-review) and PHASE 6 (CI watch)
+    must skip. Self-reviewing a merged PR is noise the maintainer already
+    moved past; polling CI on a closed branch is a 404 hunt."""
+    src = Path(__file__).resolve().parents[1] / "gitoma/cli/commands/run.py"
+    text = src.read_text(encoding="utf-8")
+
+    assert "pr_finalised = False" in text, (
+        "pr_finalised flag must be initialised — it gates phases 5 + 6"
+    )
+    assert "pr_finalised = True" in text, (
+        "pr_finalised must be set True on merged/closed branches so "
+        "follow-up phases are skipped"
+    )
+    # The merged/closed branch must set pr_finalised True.
+    merged_closed_idx = text.find('pr_state in ("merged", "closed")')
+    assert merged_closed_idx != -1, (
+        "run.py must branch on pr_state in (merged, closed) — this is the "
+        "signal that the PR is terminal on GitHub"
+    )
+    # Within a reasonable window after the branch, pr_finalised must be set.
+    merged_block = text[merged_closed_idx : merged_closed_idx + 1200]
+    assert "pr_finalised = True" in merged_block, (
+        "merged/closed branch must set pr_finalised=True — otherwise "
+        "phases 5+6 still run against a finalised PR"
+    )
+
+    # Both phases must check pr_finalised before running.
+    self_review_idx = text.find("if no_self_review:")
+    assert self_review_idx != -1
+    self_review_block = text[self_review_idx : self_review_idx + 1000]
+    assert "elif pr_finalised:" in self_review_block, (
+        "PHASE 5 gate must check pr_finalised — otherwise self-review posts "
+        "comments on merged/closed PRs"
+    )
+
+    ci_watch_idx = text.find("if no_ci_watch:")
+    assert ci_watch_idx != -1
+    ci_watch_block = text[ci_watch_idx : ci_watch_idx + 1000]
+    assert "elif pr_finalised:" in ci_watch_block, (
+        "PHASE 6 gate must check pr_finalised — otherwise CI-watch polls "
+        "Actions on a deleted branch and chases 404s"
+    )

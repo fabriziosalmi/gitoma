@@ -112,6 +112,35 @@ class GitRepo:
         origin.fetch()
         return any(ref.name == f"origin/{branch_name}" for ref in origin.refs)
 
+    def sha_reachable(self, sha: str) -> bool:
+        """Return True iff ``sha`` is an ancestor of (or equal to) HEAD.
+
+        Used by the ``--resume`` path to validate that a subtask marked
+        ``status=completed`` with a ``commit_sha`` actually has its
+        commit on the current branch. After a crash + resume where the
+        prior run's tempdir was cleaned up before PHASE 4's push, the
+        commit only ever existed locally in the old tempdir — on the
+        fresh clone + ``checkout_existing_branch`` (which resets to
+        ``origin/<branch>``) it's gone. Resume would trust the stale
+        ``completed`` flag, the worker would skip the subtask, and the
+        final branch would silently miss that work.
+
+        ``git merge-base --is-ancestor <sha> HEAD`` exits 0 when the
+        ancestor relationship holds, 1 when it doesn't, and other codes
+        for other errors (invalid sha, dangling ref, …). GitPython
+        raises ``GitCommandError`` on any non-zero exit, so a bare
+        try/except gives us a clean boolean — and a non-existent sha
+        is "not reachable", which is the right answer for the caller
+        (re-run the subtask).
+        """
+        if not sha:
+            return False
+        try:
+            self.repo.git.merge_base("--is-ancestor", sha, "HEAD")
+            return True
+        except git.exc.GitCommandError:
+            return False
+
     # ── File operations ────────────────────────────────────────────────────
 
     def read_file(self, relative_path: str) -> str | None:

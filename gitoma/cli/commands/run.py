@@ -494,6 +494,39 @@ def run(
                     state=state,
                 )
 
+            # Resume integrity check: a subtask marked ``status=completed``
+            # with a ``commit_sha`` is only ACTUALLY completed if that
+            # commit is reachable from HEAD. After a crash + resume where
+            # the prior tempdir was cleaned before PHASE 4's push, the
+            # commit lived only locally and is now gone. Flip those
+            # subtasks back to "pending" so the worker re-runs them
+            # instead of silently skipping lost work. No cost in the
+            # happy path (all SHAs reachable → zero mutations).
+            if resume and plan:
+                lost: list[str] = []
+                for task in plan.tasks:
+                    any_lost_in_task = False
+                    for sub in task.subtasks:
+                        if sub.status == "completed" and sub.commit_sha:
+                            if not git_repo.sha_reachable(sub.commit_sha):
+                                lost.append(f"{sub.id}({sub.commit_sha[:7]})")
+                                sub.status = "pending"
+                                sub.commit_sha = ""
+                                any_lost_in_task = True
+                    # If any subtask of this task was lost, the task is
+                    # no longer "completed" as a whole.
+                    if any_lost_in_task and task.status == "completed":
+                        task.status = "in_progress"
+                if lost:
+                    _warn(
+                        f"{len(lost)} subtask(s) marked completed but commits not in branch — re-running",
+                        hint=f"Lost SHAs: {', '.join(lost[:5])}"
+                              + ("…" if len(lost) > 5 else "")
+                              + " (commits likely never pushed before a prior crash)",
+                    )
+                    state.task_plan = plan.to_dict()
+                    save_state(state)
+
             console.print()
             worker = WorkerAgent(llm=llm, git_repo=git_repo, config=config, state=state)
 
@@ -588,17 +621,84 @@ def run(
             number: int
             url: str
 
+        # Whether the PR was resolved (merged / closed) on a prior run and
+        # we're only pulling it back into state. When True, phases 5 + 6
+        # (self-review, CI watch) are skipped — self-reviewing a merged
+        # PR is noise, CI watching a closed branch is a 404 hunt.
+        pr_finalised = False
+
+        # Persisted-PR validation: the cockpit may dispatch --resume long
+        # after the prior run opened a PR. Between runs the PR might be
+        # merged, closed, or (rarely) 404 if the repo was archived. We
+        # query GitHub BEFORE trusting the skip so a stale state never
+        # drives self-review / ci-watch against a non-existent PR.
+        pr_state = "unknown"  # "open" | "merged" | "closed" | "missing" | "unknown"
         if (
             _phase_already_done(state, AgentPhase.WORKING)
             and state.pr_number
             and state.pr_url
         ):
+            try:
+                from github import GithubException
+                gh_pr = gh.get_pr(owner, name, state.pr_number)
+                if gh_pr.merged:
+                    pr_state = "merged"
+                elif gh_pr.state == "closed":
+                    pr_state = "closed"
+                else:
+                    pr_state = "open"
+            except GithubException as exc:
+                if getattr(exc, "status", None) == 404:
+                    pr_state = "missing"
+                else:
+                    # Transient API error — degrade to "unknown". Trust the
+                    # persisted state (skip PHASE 4) to avoid re-creating a
+                    # PR that probably still exists.
+                    console.print(
+                        f"[warning]⚠ Could not verify PR #{state.pr_number} "
+                        f"on GitHub ({exc}); trusting persisted state.[/warning]"
+                    )
+                    pr_state = "open"
+            except Exception as exc:
+                console.print(
+                    f"[warning]⚠ Unexpected error verifying PR #{state.pr_number}: "
+                    f"{exc}; trusting persisted state.[/warning]"
+                )
+                pr_state = "open"
+
+        # Decide the flow based on what GitHub told us.
+        if pr_state == "open":
             console.print(
                 f"[muted]↩ Skipping PHASE 4 — PR #{state.pr_number} already open.[/muted]"
             )
             pr_info = _PRInfo(number=state.pr_number, url=state.pr_url)
             _safe_cleanup(git_repo)
-        else:
+        elif pr_state in ("merged", "closed"):
+            # PR terminal on GitHub — run's declared scope is effectively
+            # done. Preserve the persisted pr_info for the final report,
+            # but skip self-review + ci-watch below.
+            verb = "was merged" if pr_state == "merged" else "is closed"
+            console.print(
+                f"[info]PR #{state.pr_number} {verb} on GitHub — "
+                "skipping self-review + CI watch (nothing useful to do).[/info]"
+            )
+            pr_info = _PRInfo(number=state.pr_number, url=state.pr_url)
+            pr_finalised = True
+            _safe_cleanup(git_repo)
+        elif pr_state == "missing":
+            # The persisted PR was deleted (repo archived, or the PR was
+            # hard-deleted by a GH admin). Clear the stale fields and
+            # fall through to PHASE 4 so we re-create.
+            console.print(
+                f"[warning]⚠ Persisted PR #{state.pr_number} no longer exists on GitHub — "
+                "clearing state and re-opening the PR.[/warning]"
+            )
+            state.pr_number = None
+            state.pr_url = None
+            save_state(state)
+            # Fall through to the else branch below (PHASE 4 creation).
+            pr_state = "unknown"
+        if pr_state == "unknown":
             with _phase("PHASE 4 — PULL REQUEST", cleanup=git_repo, state=state):
                 from gitoma.pr.pr_agent import PRAgent
 
@@ -651,9 +751,17 @@ def run(
         # Adversarial critic LLM reads the PR diff + posts findings as a
         # summary comment. The run stays at PR_OPEN; current_operation
         # narrates the critic pass so the cockpit shows progress.
+        #
+        # Skipped when the PR is already merged/closed (pr_finalised) —
+        # posting critique on finalized PRs is noise the maintainer
+        # explicitly moved past.
         # ────────────────────────────────────────────────────────────────────
         if no_self_review:
             console.print("\n[muted]Self-review skipped (--no-self-review).[/muted]")
+        elif pr_finalised:
+            console.print(
+                "\n[muted]Self-review skipped — PR is already finalised on GitHub.[/muted]"
+            )
         else:
             _run_self_review(config, owner, name, pr_info.number, state)
 
@@ -670,6 +778,12 @@ def run(
                 f"\n[muted]CI watch skipped (--no-ci-watch). "
                 f"Next: run [primary]gitoma review {repo_url}[/primary] "
                 "when you want to integrate external review comments.[/muted]"
+            )
+        elif pr_finalised:
+            # Polling a closed branch for CI runs is either noise (merged)
+            # or a wild goose chase (closed → branch may be deleted).
+            console.print(
+                "\n[muted]CI watch skipped — PR is already finalised on GitHub.[/muted]"
             )
         else:
             _watch_ci_and_maybe_fix(
