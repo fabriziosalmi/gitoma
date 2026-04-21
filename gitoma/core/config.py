@@ -207,6 +207,13 @@ def find_overriding_sources(env_key: str) -> list[str]:
     return hits
 
 
+# Prefix for auto-generated API tokens — matches the ``ghp_`` / ``sk-`` /
+# ``xoxb-`` convention of recognisable vendor token shapes. Makes it
+# trivial to grep logs / env dumps / accidental screenshots and know
+# instantly that a leaked blob belongs to this tool.
+RUNTIME_TOKEN_PREFIX = "gitoma_"
+
+
 def ensure_runtime_api_token() -> tuple[str, bool]:
     """Return an API token, generating + persisting one if none is configured.
 
@@ -214,8 +221,10 @@ def ensure_runtime_api_token() -> tuple[str, bool]:
       1. Explicit `GITOMA_API_TOKEN` from env / config.toml — returned as-is.
       2. Previously-generated token in `~/.gitoma/runtime_token` — reused so
          the cockpit's localStorage survives restarts.
-      3. Freshly-generated `secrets.token_urlsafe(32)`, written to the file
-         with mode 0o600.
+      3. Freshly-generated ``gitoma_<32-url-safe-chars>`` token, written
+         to the file with mode 0o600. The prefix is idiomatic (matches
+         ghp_/sk-/xoxb- conventions) and stays constant so tokens are
+         greppable at a glance.
 
     Returns `(token, was_generated_now)`. The caller (typically
     `gitoma serve`) is expected to publish the token via the process env so
@@ -231,7 +240,10 @@ def ensure_runtime_api_token() -> tuple[str, bool]:
         if persisted:
             return persisted, False
 
-    token = secrets.token_urlsafe(32)
+    # 32 url-safe chars ≈ 24 bytes of entropy after the ``gitoma_``
+    # prefix. Plenty — the bottleneck is always operator hygiene, not
+    # brute force.
+    token = RUNTIME_TOKEN_PREFIX + secrets.token_urlsafe(32)
     # Create with 0o600 at the syscall boundary — never let the token exist
     # on disk world-readable, not even for the microsecond between write()
     # and chmod(). On filesystems that can't honor POSIX perms (FAT, some

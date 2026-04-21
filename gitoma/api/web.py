@@ -35,6 +35,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, Response
@@ -55,14 +56,19 @@ _NON_TERMINAL = {"IDLE", "ANALYZING", "PLANNING", "WORKING", "PR_OPEN", "REVIEWI
 
 # WebSockets skip CORS preflights, so an explicit Origin allow-list is the
 # only layer that stops a drive-by page from subscribing to live state.
-# Default: localhost-only, matching the rest of the cockpit's threat model.
-# Operators can widen this via env for a trusted LAN frontend.
+# Default policy: any loopback origin on any port is trusted (localhost,
+# 127.0.0.1, ::1, 0.0.0.0). Hard-coding port 8000 — as the first cut
+# did — breaks `gitoma serve --port 8800` and every dev/test scenario
+# that doesn't happen to pick the default port.
+#
+# Operators who need a LAN frontend can provide an explicit list via env;
+# that list REPLACES the loopback default, so it's a conscious decision.
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({
+    "localhost", "127.0.0.1", "::1", "0.0.0.0",
+})
 _ALLOWED_WS_ORIGINS: set[str] = {
     o.strip()
-    for o in os.getenv(
-        "GITOMA_WS_ALLOWED_ORIGINS",
-        "http://localhost:8000,http://127.0.0.1:8000,http://0.0.0.0:8000",
-    ).split(",")
+    for o in os.getenv("GITOMA_WS_ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
 
@@ -161,7 +167,8 @@ async def _async_snapshot_states() -> list[dict[str, Any]]:
 
 
 def _is_origin_allowed(origin: str | None) -> bool:
-    """Accept: same-origin WebSocket clients and the allow-listed set.
+    """Accept: non-browser clients, loopback origins on any port, and the
+    explicit ``GITOMA_WS_ALLOWED_ORIGINS`` list (if the operator set one).
 
     Browsers always send an ``Origin`` header on WebSocket handshakes. A
     non-browser client (e.g. ``websockets``, ``wscat``) may omit it; we
@@ -169,11 +176,28 @@ def _is_origin_allowed(origin: str | None) -> bool:
     enforce the serious security boundary via Bearer auth — ``/ws/state``
     is read-only derived data and exists primarily for the browser
     cockpit anyway.
+
+    Loopback hosts are trusted regardless of port because:
+      1. ``gitoma serve --port <anything>`` should just work.
+      2. The threat model explicitly says the cockpit runs on localhost /
+         VPN; an attacker with access to loopback can already do worse.
+
+    Explicit env list augments (does not restrict) loopback acceptance —
+    that way an operator can add a VPN origin without accidentally
+    locking themselves out of localhost.
     """
     if origin is None:
         # Non-browser client (CLI test, curl, etc.) — allow.
         return True
-    return origin in _ALLOWED_WS_ORIGINS
+    if origin in _ALLOWED_WS_ORIGINS:
+        return True
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
+    if parsed.scheme in ("http", "https") and parsed.hostname in _LOOPBACK_HOSTS:
+        return True
+    return False
 
 
 @web_router.websocket("/ws/state")
