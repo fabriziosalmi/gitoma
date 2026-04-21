@@ -177,9 +177,32 @@ class WorkerAgent:
         if self._critic_panel is None:
             self._critic_panel = CriticPanel(self._config.critic_panel, self._llm)
 
-        # Diff of files staged on disk vs HEAD — what the committer is about
-        # to commit. Scoped to ``touched`` so we never feed the panel
-        # unrelated noise (other in-flight worktree edits, IDE-droppings).
+        # Diff of files vs HEAD — what the committer is about to commit.
+        # Scoped to ``touched`` so we never feed the panel unrelated noise
+        # (other in-flight worktree edits, IDE-droppings).
+        #
+        # ``git add --intent-to-add`` first: without this, brand-new files
+        # created by the patcher are UNTRACKED, and ``git diff HEAD`` does
+        # not see untracked files at all — the panel would always get an
+        # empty string for new-file subtasks (which is most of them) and
+        # short-circuit to no_op. Caught live in the first real run on b2v:
+        # subtasks that created PR templates / docs files all hit the
+        # diff_text=="" branch silently.
+        # Intent-to-add registers the path in the index with a NULL sha
+        # WITHOUT staging the content. The committer's own ``git add``
+        # later upgrades these entries to real index entries with content,
+        # so this is an additive no-op for the commit pipeline.
+        # Failures here are non-fatal — for already-tracked modified files
+        # the diff still works and the panel still gets useful input.
+        try:
+            self._git.repo.git.add("--intent-to-add", "--", *touched)
+        except Exception as exc:  # noqa: BLE001
+            current_trace().exception(
+                "critic_panel.intent_to_add_failed",
+                subtask_id=subtask.id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
         try:
             diff_text = self._git.repo.git.diff("HEAD", "--", *touched)
         except Exception as exc:  # noqa: BLE001
