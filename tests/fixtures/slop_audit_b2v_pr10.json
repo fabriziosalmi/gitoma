@@ -1,0 +1,92 @@
+{
+  "_doc": "Golden regression fixture for the future multi-persona critic panel (M7). This audit was performed manually on 2026-04-22 on the first real gitoma-generated PR. If the critic panel runs against this same diff and does NOT surface at least these findings at the listed severities, a regression has been introduced. The expected_personas field documents which of {dev, arch, contributor} should flag each finding — any persona not listed may still flag it, that's bonus, but the listed ones MUST.",
+  "pr_ref": "fabriziosalmi/b2v#10",
+  "pr_title": "🤖 [Gitoma] Improve b2v: 6 quality improvements",
+  "pr_state": "closed",
+  "pr_merged": true,
+  "pr_merge_commit": "f401365a72f9d2f8cf952848632f87e696ee7a13",
+  "pr_head_commit": "dff55b4e7b0bb64a0edf1b935ea576d2cd4747b2",
+  "pr_base_commit": "0ae71109cbc7b0e1cc09f7efe38797366cc691f2",
+  "producer_model": "google/gemma-4-e2b",
+  "audited_at": "2026-04-22T00:20:00Z",
+  "auditor": "manual (claude-opus-4-7, line-by-line review of unified diff)",
+  "diff_stats": {
+    "additions": 99,
+    "deletions": 9,
+    "changed_files": 4
+  },
+  "baseline_slop_ratio": 0.67,
+  "baseline_slop_ratio_note": "~65 of ~97 added lines are either non-functional (broken hooks / orphan links) or redundant/regressive. Target for a working critic panel: flag at least the 3 blocker-level findings below. If this ratio is not detectable by the panel, the panel is too lenient.",
+  "expected_findings": [
+    {
+      "id": "F001",
+      "file": ".pre-commit-config.yaml",
+      "lines_range": [1, 23],
+      "severity": "blocker",
+      "category": "broken_configuration",
+      "summary": "pre-commit config is non-functional end-to-end",
+      "symptoms": [
+        "repo URL https://pre-commit.com/hooks/pre-commit-config does not exist as a pre-commit hook source",
+        "the hooks listed (check-yaml, rustfmt, prettier) do not live at that repo",
+        "files: is given as a YAML list but pre-commit expects a single regex string",
+        "entry: prettier --write-file uses a flag that does not exist (correct is --write)",
+        "globs like src/**/*.rs are not glob patterns in pre-commit — they are regex, which breaks matching"
+      ],
+      "expected_personas": ["dev", "contributor"],
+      "ground_truth_evidence": "Copilot PR review comment on the same file confirmed 2 of these issues verbatim",
+      "user_impact": "Any contributor running `pre-commit install && pre-commit run` will fail on their first commit"
+    },
+    {
+      "id": "F002",
+      "file": "docs/guide/index.md",
+      "lines_range": [1, 26],
+      "severity": "blocker",
+      "category": "orphan_cross_references",
+      "summary": "doc index lists links to 7 files that do not exist, no mkdocs.yml in the PR either",
+      "symptoms": [
+        "references ./architecture.md, ./getting-started.md, ./recommended-platforms.md, plus 4 code/*.md files — none of which are created by this PR",
+        "no mkdocs.yml in the repo so even if the files existed, MkDocs would not be configured",
+        "the parent task was 'Improve Documentation Generation' — the PR creates only a table-of-contents, not the docs themselves"
+      ],
+      "expected_personas": ["arch", "contributor"],
+      "user_impact": "Every link in docs/guide/index.md is a 404; the docs entry point is broken on first click"
+    },
+    {
+      "id": "F003",
+      "file": "CONTRIBUTING.md",
+      "lines_range": [66, 80],
+      "severity": "major",
+      "category": "regression_introduced",
+      "summary": "removed the 'Submitting Feedback and Reports' section but other paragraphs still reference it",
+      "symptoms": [
+        "the document still claims contributions include 'bug reports' but the section explaining how to submit them is gone",
+        "no redirect or alternative pathway provided to affected readers"
+      ],
+      "expected_personas": ["contributor"],
+      "ground_truth_evidence": "Copilot PR review comment flagged this same inconsistency",
+      "user_impact": "Contributors looking for the bug-report flow bounce off the CONTRIBUTING doc with no guidance"
+    },
+    {
+      "id": "F004",
+      "file": ".github/pull_request_template.md",
+      "lines_range": [1, 42],
+      "severity": "minor",
+      "category": "scope_confusion",
+      "summary": "PR template contains branches meant for issues (If Bug Report / If Feature Request)",
+      "symptoms": [
+        "a PR template asks the author whether the change is a bug report or a feature request — those are issue-template concerns, not PR-template concerns",
+        "a 'Reviewer Notes' section at the end with 'leave this section for reviewers to add feedback' — reviewers use the GitHub review UI, not inline PR body edits"
+      ],
+      "expected_personas": ["contributor"],
+      "severity_note": "Minor because it's cosmetic — the template works, it's just cluttered. A critic panel in advisory mode may log this as 'nit'. In blocking mode it should NOT block."
+    }
+  ],
+  "negative_controls": {
+    "_doc": "Things the panel should NOT flag on this PR. If it flags these in a future run, the panel has over-reach / false-positive problem.",
+    "do_not_flag": [
+      "Removal of the stray `go` language tag on the git commit code block in CONTRIBUTING.md (this was a genuine bug fix)",
+      "Reformatting the 'Ensure all existing tests pass...' paragraph into a bulleted list (pure readability win)"
+    ]
+  },
+  "tags": ["first-pr", "gemma-4-e2b", "rust-js-repo"]
+}
