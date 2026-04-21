@@ -1068,19 +1068,31 @@ const WS = {
       this._scheduleReconnect();
       return;
     }
-    this.socket.onopen = () => {
+    // Capture the socket reference at handler-attach time. This lets
+    // each handler tell whether it still owns `this.socket` when it
+    // fires — an orphan socket (from a prior failed attempt, closed via
+    // WS.disconnect() right before we opened this one) will otherwise
+    // fire `onclose` AFTER the new one is already live and flip the
+    // Conn pill back to "reconnecting". Root cause of the "live but
+    // UI says reconnecting" bug visible after pasting the token.
+    const sock = this.socket;
+    sock.onopen = () => {
+      if (this.socket !== sock) return;  // orphan
       Conn.set("live");
       this.reconnectDelay = 1500;   // reset on successful connect
     };
-    this.socket.onclose = () => {
+    sock.onclose = () => {
+      if (this.socket !== sock) return;  // orphan — stale close event
       if (this.manualClose) return;
       Conn.set("reconnecting");
       this._scheduleReconnect();
     };
-    this.socket.onerror = () => {
-      try { this.socket.close(); } catch {}
+    sock.onerror = () => {
+      if (this.socket !== sock) return;  // orphan
+      try { sock.close(); } catch {}
     };
-    this.socket.onmessage = (evt) => {
+    sock.onmessage = (evt) => {
+      if (this.socket !== sock) return;  // orphan
       try {
         const parsed = JSON.parse(evt.data);
         if (Array.isArray(parsed)) Store.setStates(parsed);
@@ -1105,6 +1117,16 @@ const WS = {
   disconnect() {
     this.manualClose = true;
     if (this.socket) {
+      // Detach handlers BEFORE close() so any queued onclose from a
+      // still-failing connection attempt (which can fire even after we
+      // clear this.socket) doesn't re-enter _scheduleReconnect and
+      // clobber the pill state. The orphan guard on the handlers
+      // themselves already handles the race; this just makes the
+      // detachment explicit and helps the GC drop the socket cleanly.
+      this.socket.onopen = null;
+      this.socket.onclose = null;
+      this.socket.onerror = null;
+      this.socket.onmessage = null;
       try { this.socket.close(); } catch {}
       this.socket = null;
     }
