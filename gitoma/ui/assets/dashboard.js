@@ -962,9 +962,15 @@ async function refreshJobs() {
         level: "fail",
       });
     } else if (err.status === 503) {
+      // Usually means the server was restarted between two polls (deploy,
+      // launchctl reload, service crash). Offer Retry so the user isn't
+      // stuck on a stale banner — the next poll against a recovered
+      // server hides the banner automatically via the success path above.
       Banner.show({
         title: "Server not configured",
-        msg: "GITOMA_API_TOKEN is missing on the server. Set it in ~/.gitoma/.env (or via `gitoma config set GITOMA_API_TOKEN=…`) and restart.",
+        msg: "GITOMA_API_TOKEN is missing on the server. Set it in ~/.gitoma/.env (or via `gitoma config set GITOMA_API_TOKEN=…`) and restart. If you just redeployed, click Retry once uvicorn is back.",
+        actionLabel: "Retry",
+        actionFn: () => startJobPolling(),
         level: "fail",
       });
     } else if (err.kind === "timeout") {
