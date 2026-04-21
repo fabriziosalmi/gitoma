@@ -118,7 +118,17 @@ Launch the FastAPI REST server + the live web cockpit.
 gitoma serve --port 8000 --host 0.0.0.0
 ```
 
-If `GITOMA_API_TOKEN` is not already configured, the server auto-generates one on first start, persists it to `~/.gitoma/runtime_token` (mode `0600`), and prints it once in the banner. See [API → Authentication](/api/auth).
+| Flag | Description |
+|---|---|
+| `--port INT` | Port to bind. Default `8000`. |
+| `--host TEXT` | Host to bind. Default `0.0.0.0`. |
+| `--show-token` | Print the full API token in the startup banner. Default shows only a masked prefix/suffix. |
+
+If `GITOMA_API_TOKEN` is not already configured, the server auto-generates one on first start, persists it to `~/.gitoma/runtime_token` (mode `0600`), and prints it in full exactly once in the banner.
+
+If you set the token yourself (shell env, `config set`, or a dynamic value like `GITOMA_API_TOKEN=test-$(date +%s)`), the banner masks it by default so an over-the-shoulder screenshot doesn't leak it. Pass `--show-token` when you need to see the value — typical use case is pairing it with `$(date +%s)` where you can't know the exact string without the server printing it.
+
+See [API → Authentication](/api/auth).
 
 ## `gitoma mcp`
 

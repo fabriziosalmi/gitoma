@@ -28,6 +28,16 @@ if TYPE_CHECKING:
 def serve(
     port: Annotated[int, typer.Option(help="Port to run the REST API on")] = 8000,
     host: Annotated[str, typer.Option(help="Host to bind the server to")] = "0.0.0.0",
+    show_token: Annotated[
+        bool,
+        typer.Option(
+            "--show-token",
+            help="Print the full API token in the startup banner (default: masked). "
+            "Useful when you set a dynamic token via env — e.g. "
+            "`GITOMA_API_TOKEN=test-$(date +%s) gitoma serve` — and need to "
+            "copy the value into the cockpit Settings dialog.",
+        ),
+    ] = False,
 ) -> None:
     """
     🌐  Launch the Gitoma FastAPI REST Server.
@@ -47,7 +57,10 @@ def serve(
     os.environ["GITOMA_API_TOKEN"] = token
 
     masked = (token[:6] + "…" + token[-4:]) if len(token) > 12 else "***"
+
     if generated:
+        # Auto-generated tokens are shown once in full on first launch.
+        # The user had no other chance to see them.
         console.print(
             Panel(
                 f"[bold]{token}[/bold]\n\n"
@@ -59,10 +72,25 @@ def serve(
                 padding=(1, 2),
             )
         )
+    elif show_token:
+        # Explicit opt-in: user set their own token and asked to see it.
+        # Typical flow: `GITOMA_API_TOKEN=test-$(date +%s) gitoma serve --show-token`
+        # — the exact value depends on `date` so the user can't know it
+        # without us printing it.
+        console.print(
+            Panel(
+                f"[bold]{token}[/bold]\n\n"
+                "[muted]Token shown because --show-token was passed.[/muted]\n"
+                "[muted]Paste into the cockpit Settings dialog when prompted.[/muted]",
+                title="[primary]◉ API token (configured via env / config)[/primary]",
+                border_style="info",
+                padding=(1, 2),
+            )
+        )
     else:
         console.print(
             f"[success]API secured[/success] "
-            f"[muted](token {masked})[/muted]"
+            f"[muted](token {masked}) · pass [primary]--show-token[/primary] to reveal[/muted]"
         )
 
     console.print(f"Starting server on [primary]http://{host}:{port}[/primary]")
