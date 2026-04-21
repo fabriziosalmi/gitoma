@@ -10,6 +10,7 @@ import traceback
 import warnings
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, Generator, Optional, TYPE_CHECKING, NoReturn
 
 if TYPE_CHECKING:
@@ -220,13 +221,19 @@ def _doctor_push(repo_url: str) -> None:
     except ValueError as exc:
         _abort(f"Invalid repo URL: {exc}")
 
+    from gitoma.core.config import resolve_config_source
     cfg = load_config()
     token = cfg.github.token
     bot_user = cfg.bot.github_user
     kind = _classify_github_token(token)
+    _, source = resolve_config_source("GITHUB_TOKEN", "github", "token")
+    source_display = (
+        source.replace(str(Path.home()), "~") if source not in ("env", "default") else source
+    )
 
     console.print(f"\n[heading]Target[/heading]:            {owner}/{name}")
     console.print(f"[heading]Token kind[/heading]:        {kind}")
+    console.print(f"[heading]Token source[/heading]:      {source_display}")
     console.print(f"[heading]Configured bot user[/heading]: {bot_user}")
 
     # ── 1. Token presence ────────────────────────────────────────────────
@@ -1529,26 +1536,50 @@ def config_cmd(
         return
 
     if action == "show":
+        from gitoma.core.config import resolve_config_source
         cfg = load_config()
         token_display = (
             f"{'*' * 8}{cfg.github.token[-4:]}"
             if len(cfg.github.token) > 8
             else "(not set — run: gitoma config set GITHUB_TOKEN=...)"
         )
+
+        # (env_var_name, toml_section, toml_key, display_row)
+        keys = [
+            ("GITHUB_TOKEN",           "github",   "token",        ("GitHub", "token", token_display)),
+            ("BOT_NAME",               "bot",      "name",         ("Bot Identity", "name", cfg.bot.name)),
+            ("BOT_EMAIL",              "bot",      "email",        ("Bot Identity", "email", cfg.bot.email)),
+            ("BOT_GITHUB_USER",        "bot",      "github_user",  ("Bot Identity", "github_user", cfg.bot.github_user)),
+            ("LM_STUDIO_BASE_URL",     "lmstudio", "base_url",     ("LM Studio", "base_url", cfg.lmstudio.base_url)),
+            ("LM_STUDIO_MODEL",        "lmstudio", "model",        ("LM Studio", "model", cfg.lmstudio.model)),
+            ("LM_STUDIO_TEMPERATURE",  "lmstudio", "temperature",  ("LM Studio", "temperature", str(cfg.lmstudio.temperature))),
+            ("LM_STUDIO_MAX_TOKENS",   "lmstudio", "max_tokens",   ("LM Studio", "max_tokens", str(cfg.lmstudio.max_tokens))),
+            ("GITOMA_API_TOKEN",       "api",      "token",        ("Cockpit API", "token",
+                f"{'*' * 8}{cfg.api_auth_token[-4:]}" if len(cfg.api_auth_token) > 8 else "(auto-generated)")),
+        ]
+
+        def _fmt_source(src: str) -> str:
+            home = str(Path.home())
+            if src == "env":
+                return "[warning]$ENV[/warning]"
+            if src == "default":
+                return "[muted]default[/muted]"
+            # Collapse $HOME for readability.
+            shown = src.replace(home, "~")
+            return f"[code]{shown}[/code]"
+
+        console.print("\n[heading]Gitoma Configuration[/heading]\n")
+        current_section = None
+        for env_key, tsec, tkey, (section, field_name, shown) in keys:
+            if section != current_section:
+                console.print(f"[muted]─ {section} {'─' * (50 - len(section))}[/muted]")
+                current_section = section
+            _, src = resolve_config_source(env_key, tsec, tkey)
+            console.print(
+                f"  {field_name:<14}[code]{shown}[/code]   {_fmt_source(src)}"
+            )
         console.print(
-            f"\n[heading]Gitoma Configuration[/heading]\n\n"
-            f"[muted]─ GitHub ─────────────────────────────────────────[/muted]\n"
-            f"  token:        [code]{token_display}[/code]\n\n"
-            f"[muted]─ LM Studio ──────────────────────────────────────[/muted]\n"
-            f"  base_url:     [code]{cfg.lmstudio.base_url}[/code]\n"
-            f"  model:        [code]{cfg.lmstudio.model}[/code]\n"
-            f"  temperature:  [code]{cfg.lmstudio.temperature}[/code]\n"
-            f"  max_tokens:   [code]{cfg.lmstudio.max_tokens}[/code]\n\n"
-            f"[muted]─ Bot Identity ────────────────────────────────────[/muted]\n"
-            f"  name:         [code]{cfg.bot.name}[/code]\n"
-            f"  email:        [code]{cfg.bot.email}[/code]\n"
-            f"  github_user:  [code]{cfg.bot.github_user}[/code]\n\n"
-            f"[muted]Config file: {CONFIG_FILE}[/muted]"
+            f"\n[muted]Precedence: $ENV > ~/.gitoma/.env > <cwd>/.env > {CONFIG_FILE}[/muted]"
         )
         return
 
@@ -1586,6 +1617,25 @@ def config_cmd(
             _abort(
                 f"Empty value for key '{key}'.",
                 hint=f"Usage: gitoma config set {key}=<your-value>",
+            )
+
+        # Intelligence: warn BEFORE writing when a higher-priority source
+        # would silently override the new value. Root cause of many 'I
+        # updated the token but it didn't take effect' incidents.
+        from gitoma.core.config import find_overriding_sources
+        overriding = find_overriding_sources(key)
+        if overriding:
+            console.print()
+            _warn(
+                f"Your new {key} will be overridden at load time by:",
+            )
+            for src in overriding:
+                shown = src if src == "env" else src.replace(str(Path.home()), "~")
+                label = "[warning]$ENV[/warning]" if src == "env" else f"[code]{shown}[/code]"
+                console.print(f"  → {label}")
+            console.print(
+                "[muted]  Remove/rename that source first, or edit it "
+                "directly. Writing to config.toml anyway.[/muted]\n"
             )
 
         try:

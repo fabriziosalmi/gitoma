@@ -9,11 +9,17 @@ from pathlib import Path
 from typing import Any
 
 import toml
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 GITOMA_DIR = Path.home() / ".gitoma"
 CONFIG_FILE = GITOMA_DIR / "config.toml"
 ENV_FILE = GITOMA_DIR / ".env"
+
+# Snapshot the shell environment BEFORE any `load_dotenv()` can mutate it, so
+# we can later tell "this came from the real shell" vs "this came from a .env
+# file that dotenv dumped into os.environ". Captured at import time, which is
+# before load_config() is ever called.
+_SHELL_ENV_SNAPSHOT: dict[str, str] = dict(os.environ)
 
 # Auto-generated API token is persisted here between runs, so the cockpit's
 # localStorage copy stays valid across restarts. Mode 0o600.
@@ -131,6 +137,74 @@ def save_config_value(key: str, value: str) -> None:
 
     with CONFIG_FILE.open("w") as f:
         toml.dump(raw, f)
+
+
+def resolve_config_source(
+    env_key: str,
+    toml_section: str | None = None,
+    toml_key: str | None = None,
+) -> tuple[str, str]:
+    """Return ``(value, source_label)`` for a config key.
+
+    Source priority (matches ``load_config``'s actual behaviour):
+
+      1. Real shell env var (present in the snapshot taken at import time,
+         before any ``load_dotenv``).
+      2. ``~/.gitoma/.env``  — dotenv tries first inside load_config.
+      3. ``<cwd>/.env``      — dotenv tries second.
+      4. ``~/.gitoma/config.toml`` under ``[toml_section] toml_key``.
+      5. ``default`` — nothing configured.
+
+    The returned label is an absolute path for file sources, or the string
+    ``"env"`` for the shell, or ``"default"``. This is what lets the CLI
+    tell the user "your new GITHUB_TOKEN won't win, ``<cwd>/.env`` already
+    has one".
+    """
+    shell_val = _SHELL_ENV_SNAPSHOT.get(env_key)
+    if shell_val:
+        return shell_val, "env"
+
+    home_env_path = ENV_FILE
+    if home_env_path.exists():
+        v = (dotenv_values(home_env_path) or {}).get(env_key)
+        if v:
+            return v, str(home_env_path)
+
+    cwd_env_path = Path.cwd() / ".env"
+    if cwd_env_path.exists():
+        v = (dotenv_values(cwd_env_path) or {}).get(env_key)
+        if v:
+            return v, str(cwd_env_path)
+
+    if toml_section and toml_key and CONFIG_FILE.exists():
+        try:
+            raw = toml.load(CONFIG_FILE)
+            v = raw.get(toml_section, {}).get(toml_key, "")
+        except Exception:
+            v = ""
+        if v:
+            return str(v), str(CONFIG_FILE)
+
+    return "", "default"
+
+
+def find_overriding_sources(env_key: str) -> list[str]:
+    """Return every source (in winning order) that already sets `env_key`
+    with priority higher than config.toml.
+
+    Used by ``gitoma config set`` to warn users that their change will be
+    silently overridden — the exact foot-gun that caused this helper to
+    exist in the first place.
+    """
+    hits: list[str] = []
+    if _SHELL_ENV_SNAPSHOT.get(env_key):
+        hits.append("env")
+    if ENV_FILE.exists() and (dotenv_values(ENV_FILE) or {}).get(env_key):
+        hits.append(str(ENV_FILE))
+    cwd_env = Path.cwd() / ".env"
+    if cwd_env.exists() and (dotenv_values(cwd_env) or {}).get(env_key):
+        hits.append(str(cwd_env))
+    return hits
 
 
 def ensure_runtime_api_token() -> tuple[str, bool]:
