@@ -72,16 +72,59 @@ _DENY_FILENAMES: frozenset[str] = frozenset({
 _DENY_FILENAME_PREFIXES: tuple[str, ...] = (".env.",)  # .env.prod, .env.local…
 
 
+def denylist_summary() -> str:
+    """Return a compact, human-readable listing of denied paths.
+
+    Consumed by the planner / worker prompts so the LLM knows which
+    paths are off-limits before it generates a patch. Before the b2v
+    live run we learned the hard way: the planner happily suggested
+    three subtasks targeting ``.github/workflows/deploy-docs.yml`` and
+    the patcher had to reject each one — three LLM round-trips burned
+    per run on impossible tasks. Telling the LLM up-front is the
+    obvious fix.
+
+    The shape intentionally mirrors ``_DENY_*`` so it's maintenance-cheap:
+    add an entry there and the prompt updates automatically.
+    """
+    parts_lines = ", ".join(sorted(_DENY_PATH_PARTS))
+    prefix_lines = ", ".join(
+        f"{'/'.join(p)}/…" for p in _DENY_PATH_PREFIXES
+    )
+    filename_lines = ", ".join(sorted(_DENY_FILENAMES))
+    prefix_filename_lines = ", ".join(f"{p}*" for p in _DENY_FILENAME_PREFIXES)
+    return (
+        f"- Any path containing directories named: {parts_lines}\n"
+        f"- Any path starting with: {prefix_lines}\n"
+        f"- Any file named: {filename_lines}\n"
+        f"- Any file whose name starts with: {prefix_filename_lines}"
+    )
+
+
 def _reject_unsafe_relpath(rel_path: str) -> None:
     """Fail fast on obviously-unsafe input before we even touch the FS.
 
-    Catches absolute paths, Windows-drive paths, and embedded NULs. These
-    can't be the product of any legitimate LLM patch, so treat as attack.
+    Catches absolute paths, Windows-drive paths, embedded NULs, and
+    directory-style trailing slashes. None of these can be the product
+    of any legitimate LLM patch: the first two are attacks, the third
+    is an intent mismatch (you cannot write file content to a directory).
     """
     if not rel_path or rel_path.strip() != rel_path:
         raise PatchError(f"Invalid patch path: {rel_path!r}")
     if "\x00" in rel_path:
         raise PatchError("Null byte in patch path")
+    # Reject directory-style paths (``./src/tests/``, ``docs\``). The b2v
+    # live run surfaced this: the LLM generated ``path="./src/tests/"``
+    # intending a directory; the patcher then created the dir via
+    # ``parent.mkdir`` and crashed on ``os.open(abs_path, ...)`` with a
+    # confusing ``[Errno 17] File exists`` — the target resolved to a
+    # directory, not a file. Fail with a clear actionable message so the
+    # LLM's next attempt targets a specific file.
+    if rel_path.endswith(("/", "\\")):
+        raise PatchError(
+            f"Patch paths must target a file, not a directory: {rel_path!r}. "
+            "Specify an actual filename (e.g. 'src/tests/basic.test.ts' "
+            "instead of 'src/tests/')."
+        )
     p = PurePosixPath(rel_path.replace("\\", "/"))
     if p.is_absolute() or (len(rel_path) >= 2 and rel_path[1] == ":"):
         raise PatchError(f"Absolute paths are not allowed: {rel_path!r}")

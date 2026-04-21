@@ -130,6 +130,17 @@ def review(
 
     integrator = ReviewIntegrator(llm=llm, git_repo=git_repo, config=config, state=state)
 
+    # Advance to REVIEWING *before* the LLM loop so the cockpit shows the
+    # correct phase for the entire duration of the work — not for a
+    # <500 ms flash after the fact. The previous order set REVIEWING
+    # only after push, right before DONE, making the phase effectively
+    # invisible to any cockpit that sampled the WS outside that window.
+    state.current_operation = (
+        f"Reviewing PR #{pr_number} — integrating {len(review_status.all_comments)} comment(s)"
+    )
+    state.advance(AgentPhase.REVIEWING)
+    save_state(state)
+
     from gitoma.core.github_client import ReviewComment
 
     def on_comment_start(c: ReviewComment) -> None:
@@ -171,13 +182,6 @@ def review(
                 hint="Check token permissions (contents:write) and that the branch still exists.",
             )
 
-        # Briefly mark REVIEWING for the in-progress flash, then advance
-        # to DONE below — the cockpit Pipeline strip catches both. The
-        # previous code stopped at REVIEWING, which the orphan detector
-        # (REVIEWING ∈ _NON_TERMINAL) read as "still going" forever even
-        # though the integration was finished and the branch pushed.
-        state.advance(AgentPhase.REVIEWING)
-        save_state(state)
         console.print(
             f"\n[muted]PR updated: [url]{pr_url}[/url][/muted]"
         )

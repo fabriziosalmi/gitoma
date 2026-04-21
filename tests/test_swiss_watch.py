@@ -1,7 +1,21 @@
 """Regression tests for the Swiss-watch hardening pass.
 
-Each test maps 1:1 to a confirmed audit finding (B1-B6, H1-H4, H9). When
-any of these fails, a previously-fixed correctness gap has been
+Each test maps 1:1 to a confirmed audit finding:
+
+  * **B1-B6**: blocking correctness issues (resume, early-returns,
+    committer overstaging, patcher denylist, LLM truncation, branch
+    collisions).
+  * **B7**: terminal DONE-advance in ``gitoma run`` and ``gitoma review``
+    (caught live on the first b2v run — cockpit stuck on REVIEWING
+    after merge).
+  * **H1-H4, H9**: high-severity correctness issues (save_state race,
+    worker zero-completion phase, committer silent failure, Reflexion
+    budget, heartbeat tick crashes).
+  * **F1-F4**: follow-ups from the b2v live run post-mortem — trailing-
+    slash patch paths, planner/worker prompt denylist awareness,
+    REVIEWING placement before integration, lockfile denylist coverage.
+
+When any of these fails, a previously-fixed correctness gap has been
 reintroduced — the failure message is intentionally written to be
 self-documenting so the next reader doesn't need to dig through the
 audit to know what's at stake.
@@ -455,6 +469,181 @@ def test_h1_save_state_is_thread_safe(tmp_path, monkeypatch):
     # Final on-disk state must be valid JSON (no torn writes).
     payload = json.loads((tmp_path / "o__r.json").read_text())
     assert payload["owner"] == "o" and payload["name"] == "r"
+
+
+# ── F1 (b2v post-mortem): patcher rejects trailing-slash directory paths ──
+
+
+@pytest.mark.parametrize("bad_path", [
+    "./src/tests/",          # the exact shape T002-S02 hit on b2v
+    "docs/",
+    "nested/path/",
+    "dir\\",                 # Windows-style trailing separator
+    "a/b/c/",
+])
+def test_f1_patcher_rejects_trailing_slash_paths(tmp_path, bad_path):
+    """The patcher used to accept directory-style paths, create the dir
+    via ``parent.mkdir``, and then crash on ``os.open(abs_path, ...)``
+    with a confusing ``[Errno 17] File exists``. The b2v live run hit
+    exactly this (``T002-S02: path='./src/tests/'``). The hardened
+    version rejects up-front with an actionable message so the LLM's
+    next attempt targets a real filename."""
+    from gitoma.worker.patcher import PatchError, apply_patches
+
+    with pytest.raises(PatchError, match="[Ff]ile.*not.*directory"):
+        apply_patches(tmp_path, [{
+            "action": "create",
+            "path": bad_path,
+            "content": "ignored",
+        }])
+    # Nothing should have been created (not even the parent dir). The
+    # rejection must happen before any FS mutation.
+    assert not any(tmp_path.iterdir())
+
+
+def test_f1_patcher_error_message_is_actionable(tmp_path):
+    """A new contributor debugging an LLM-generated patch that hits this
+    branch should see a message that tells them *exactly* what to do
+    instead — not just "file exists"."""
+    from gitoma.worker.patcher import PatchError, apply_patches
+
+    with pytest.raises(PatchError) as ei:
+        apply_patches(tmp_path, [{
+            "action": "create",
+            "path": "src/tests/",
+            "content": "",
+        }])
+    msg = str(ei.value)
+    # Must include the offending path (so the LLM can correlate on retry).
+    assert "src/tests/" in msg
+    # Must hint at the fix (specify a filename).
+    assert "filename" in msg.lower()
+
+
+# ── F2 (b2v post-mortem): LLM prompts know about the patcher denylist ────
+
+
+def test_f2_planner_prompt_lists_forbidden_paths():
+    """Three b2v subtasks (T001-S03, T005-S01, T005-S02) were generated
+    against ``.github/workflows/deploy-docs.yml`` — a forbidden path —
+    and burned three LLM round-trips before the patcher rejected each
+    one. Feeding the denylist into the planner prompt lets the LLM
+    route around the problem up-front (e.g. describe a workflow fix in
+    the task description instead of emitting a doomed subtask)."""
+    from gitoma.analyzers.base import MetricReport, MetricResult
+    from gitoma.planner.prompts import planner_user_prompt
+
+    report = MetricReport(
+        repo_url="https://github.com/a/b",
+        owner="a", name="b",
+        languages=["Rust"],
+        default_branch="main",
+        metrics=[MetricResult.from_score("ci", "CI", 0.5, "broken")],
+        analyzed_at="2026-04-21T10:00:00Z",
+    )
+    prompt = planner_user_prompt(report, ["Cargo.toml"], ["Rust"])
+
+    # The denylist section must be present in every planner prompt.
+    assert "FORBIDDEN PATHS" in prompt, (
+        "planner prompt must tell the LLM which paths the patcher will reject"
+    )
+    # Sample check: a few known-denied entries must be listed.
+    assert ".github/workflows" in prompt
+    assert "Cargo.lock" in prompt or "package-lock.json" in prompt
+    # And a routing hint so the LLM knows what to do *instead* of emitting
+    # a doomed subtask.
+    assert "do NOT" in prompt or "do not" in prompt.lower()
+
+
+def test_f2_worker_prompt_lists_forbidden_paths():
+    """Defence in depth: even if a future planner change drops the hint,
+    the worker prompt still tells the LLM about forbidden paths before
+    it emits a patch."""
+    from gitoma.planner.prompts import worker_user_prompt
+
+    prompt = worker_user_prompt(
+        subtask_title="Add rustfmt.toml",
+        subtask_description="Add formatting config",
+        file_hints=["rustfmt.toml"],
+        languages=["Rust"],
+        repo_name="b2v",
+        current_files={},
+        file_tree=["Cargo.toml", "src/main.rs"],
+    )
+    assert "FORBIDDEN PATHS" in prompt
+    # Also pin the trailing-slash rule from F1 — the worker prompt must
+    # explicitly tell the LLM not to emit directory-style paths.
+    assert "directory ending with '/'" in prompt
+
+
+def test_f2_denylist_summary_shape():
+    """The summary format must stay grep-friendly (one bullet per category)
+    so a future contributor who adds a denied path doesn't have to hunt
+    for where the prompt injection happens."""
+    from gitoma.worker.patcher import denylist_summary
+
+    summary = denylist_summary()
+    # Four bullet categories (parts / prefixes / filenames / filename prefixes).
+    assert summary.count("\n") >= 3
+    # Every category starts with a dash for readability.
+    for line in summary.splitlines():
+        assert line.startswith("- "), f"non-bullet line in summary: {line!r}"
+
+
+# ── F3 (b2v post-mortem): REVIEWING phase set before integration ─────────
+
+
+def test_f3_review_command_advances_to_reviewing_before_integrate_call():
+    """Before this fix, the REVIEWING phase was set AFTER push — a
+    <500ms flash right before DONE, essentially invisible in the
+    cockpit. Moving it BEFORE the ``integrator.integrate(...)`` call
+    means the cockpit shows REVIEWING for the entire LLM-driven
+    integration, which is the useful window."""
+    src = Path(__file__).resolve().parents[1] / "gitoma/cli/commands/review.py"
+    text = src.read_text(encoding="utf-8")
+    # The ``advance(REVIEWING)`` call must precede the ``integrator.integrate``
+    # call textually in the source — that guarantees the runtime ordering.
+    reviewing_idx = text.find("AgentPhase.REVIEWING")
+    integrate_idx = text.find("integrator.integrate(")
+    assert reviewing_idx != -1, "review command must advance to REVIEWING"
+    assert integrate_idx != -1
+    assert reviewing_idx < integrate_idx, (
+        "state.advance(REVIEWING) must come BEFORE integrator.integrate() — "
+        "the prior ordering made REVIEWING a <500ms flash right before DONE"
+    )
+    # The DONE advance stays the terminal one (pinned by test_b7 above).
+
+
+# ── F4 (b2v post-mortem): lockfiles / npmrc blocked as expected ──────────
+
+
+@pytest.mark.parametrize("lockfile", [
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Pipfile.lock",
+    "poetry.lock",
+    "uv.lock",
+    "Cargo.lock",
+    "Gemfile.lock",
+    "composer.lock",
+    "go.sum",
+    ".npmrc",
+])
+def test_f4_lockfile_denylist_coverage(tmp_path, lockfile):
+    """The b2v analyzer spotted package-lock.json alongside Cargo.toml.
+    Pin the fact that every lockfile + publish-token file rejects a
+    create patch — a future refactor that drops one of these from the
+    denylist fails here instead of in the next live run."""
+    from gitoma.worker.patcher import PatchError, apply_patches
+
+    with pytest.raises(PatchError, match="[Rr]efusing"):
+        apply_patches(tmp_path, [{
+            "action": "create",
+            "path": lockfile,
+            "content": "poisoned",
+        }])
+    assert not (tmp_path / lockfile).exists()
 
 
 # ── H9: heartbeat tick survives transient crashes ─────────────────────────

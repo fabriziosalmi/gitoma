@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from gitoma.analyzers.base import MetricReport
+from gitoma.worker.patcher import denylist_summary
 
 
 def planner_system_prompt() -> str:
@@ -68,9 +69,17 @@ Respond with ONLY this JSON schema (no extra text):
 Rules:
 - action must be one of: create, modify, delete, verify
 - file_hints must be real paths relative to repo root
+- file_hints MUST target a file (e.g. 'src/tests/basic.test.ts'), NEVER a bare directory ending with '/'
 - Be specific in descriptions — include exact file names, content to add, etc.
 - Maximum 8 tasks total, 4 subtasks per task
 - Only address metrics with status fail or warn
+
+== FORBIDDEN PATHS (patcher will reject — do not propose subtasks that touch these) ==
+{denylist_summary()}
+
+If a metric can only be fixed by editing a forbidden path (e.g. a broken CI
+workflow), describe the fix in the task description so the maintainer can
+apply it by hand — do NOT emit a subtask that targets the forbidden file.
 """
 
 
@@ -136,10 +145,14 @@ Respond with ONLY this JSON (no extra text, no markdown):
 
 Rules:
 - action must be: create, modify, or delete
+- path MUST target a file (e.g. 'src/foo.py'), NEVER a bare directory ending with '/'
 - For delete actions, content can be empty string
 - Use proper file content for the repo's language(s)
 - commit_message must follow Conventional Commits: type(scope): description [gitoma]
 - Maximum 5 patches per subtask
+
+== FORBIDDEN PATHS (the patcher will reject these — do not emit patches for them) ==
+{denylist_summary()}
 """
 
 
