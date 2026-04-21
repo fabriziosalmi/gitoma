@@ -77,11 +77,20 @@ def _enrich_liveness(state: dict[str, Any]) -> dict[str, Any]:
 
     # Orphan definition: phase says "still running" but nobody's actually
     # running it. A dead PID is conclusive; a very stale heartbeat is
-    # sufficient even if the PID recycled to something else.
+    # sufficient even if the PID recycled to something else. HOWEVER, if
+    # the CLI flagged a clean exit (`exit_clean=True`), the process ended
+    # on purpose — not an orphan. This is the common case for phase
+    # PR_OPEN after a successful `gitoma run`, where the pipeline pauses
+    # waiting for the user to invoke `gitoma review`.
     stale_heartbeat = (
         heartbeat_age is not None and heartbeat_age > ORPHAN_HEARTBEAT_GRACE_S
     )
-    orphaned = phase in _NON_TERMINAL and (not alive or stale_heartbeat)
+    exit_clean = bool(state.get("exit_clean"))
+    orphaned = (
+        phase in _NON_TERMINAL
+        and not exit_clean
+        and (not alive or stale_heartbeat)
+    )
 
     state["is_alive"] = alive
     state["is_orphaned"] = orphaned

@@ -561,11 +561,28 @@ def _heartbeat(state: "AgentState") -> Generator[None, None, None]:
         target=_tick, daemon=True, name="gitoma-heartbeat"
     )
     thread.start()
+    caught: BaseException | None = None
     try:
         yield
+    except typer.Exit as e:
+        # typer.Exit(0) is a normal completion path; higher codes are failures.
+        if getattr(e, "exit_code", 0) != 0:
+            caught = e
+        raise
+    except BaseException as e:  # KeyboardInterrupt, SystemExit, errors
+        caught = e
+        raise
     finally:
         stop.set()
         thread.join(timeout=2.0)
+        if caught is None:
+            # Clean exit — mark so the orphan detector doesn't flag a
+            # successfully-ended run (e.g. phase=PR_OPEN after `run`).
+            state.exit_clean = True
+            try:
+                save_state(state)
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

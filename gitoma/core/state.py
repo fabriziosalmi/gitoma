@@ -54,6 +54,14 @@ class AgentState:
     # stale timestamp + dead PID means the process crashed / was killed.
     pid: int | None = None
     last_heartbeat: str = ""
+    # `exit_clean` is set to True by the CLI's heartbeat context on normal
+    # completion (including successful typer.Exit(0)). Without it, a run
+    # that finished at PR_OPEN — perfectly valid, the user will continue
+    # with `gitoma review` later — would be flagged as orphaned the
+    # moment the CLI exited, because phase PR_OPEN is non-terminal and
+    # the heartbeat stops. With it, orphan detection can differentiate
+    # "CLI died unexpectedly" from "CLI finished its scope cleanly".
+    exit_clean: bool = False
 
     @property
     def slug(self) -> str:

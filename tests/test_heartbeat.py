@@ -137,3 +137,35 @@ def test_enrich_idle_phase_without_heartbeat_is_orphaned():
     snapshot = {"phase": "IDLE", "pid": 999_999_999, "last_heartbeat": ""}
     enriched = web_module._enrich_liveness(snapshot)
     assert enriched["is_orphaned"] is True
+
+
+def test_enrich_pr_open_with_exit_clean_is_not_orphaned():
+    """A `gitoma run` that reaches PR_OPEN exits cleanly by design — the
+    user will continue manually with `gitoma review`. The heartbeat thread
+    dies with the process. Without the `exit_clean` flag, the cockpit
+    would falsely flag this as orphaned.
+
+    Regression guard for the screenshot scenario: PR #5 opened, phase
+    PR_OPEN, heartbeat 32s stale, pid dead → must NOT be orphan.
+    """
+    snapshot = {
+        "phase": "PR_OPEN",
+        "pid": 999_999_999,
+        "last_heartbeat": "2026-04-21T04:00:00+00:00",  # very stale
+        "exit_clean": True,
+    }
+    enriched = web_module._enrich_liveness(snapshot)
+    assert enriched["is_orphaned"] is False
+
+
+def test_enrich_exit_clean_false_still_flags_real_orphans():
+    """Defense in depth: a crashed run that somehow has exit_clean absent
+    or False must still be flagged."""
+    snapshot = {
+        "phase": "WORKING",
+        "pid": 999_999_999,
+        "last_heartbeat": "2026-04-21T04:00:00+00:00",
+        "exit_clean": False,
+    }
+    enriched = web_module._enrich_liveness(snapshot)
+    assert enriched["is_orphaned"] is True
