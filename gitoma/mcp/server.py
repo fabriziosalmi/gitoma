@@ -23,6 +23,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from gitoma.core.config import load_config
+from gitoma.core.github_client import GitHubClient
 from gitoma.mcp.cache import GitHubContextCache, get_cache
 
 logger = logging.getLogger(__name__)
@@ -63,8 +65,6 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         if cached is not None:
             return str(cached)
 
-        from gitoma.core.config import load_config
-        from gitoma.core.github_client import GitHubClient
         cfg = load_config()
         gh = GitHubClient(cfg)
         r = gh.get_repo(owner, repo)
@@ -96,8 +96,6 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         if cached is not None:
             return str(cached)
 
-        from gitoma.core.config import load_config
-        from gitoma.core.github_client import GitHubClient
         cfg = load_config()
         gh = GitHubClient(cfg)
         r = gh.get_repo(owner, repo)
@@ -139,8 +137,6 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
                 to_fetch.append(path)
 
         if to_fetch:
-            from gitoma.core.config import load_config
-            from gitoma.core.github_client import GitHubClient
             cfg = load_config()
             gh = GitHubClient(cfg)
             r = gh.get_repo(owner, repo)
@@ -178,8 +174,6 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         if cached is not None:
             return str(cached)
 
-        from gitoma.core.config import load_config
-        from gitoma.core.github_client import GitHubClient
         cfg = load_config()
         gh = GitHubClient(cfg)
         failures = gh.get_failed_jobs(owner, repo, branch)
@@ -200,8 +194,6 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         if cached is not None:
             return str(cached)
 
-        from gitoma.core.config import load_config
-        from gitoma.core.github_client import GitHubClient
         cfg = load_config()
         gh = GitHubClient(cfg)
         r = gh.get_repo(owner, repo)
@@ -235,8 +227,6 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         if cached is not None:
             return str(cached)
 
-        from gitoma.core.config import load_config
-        from gitoma.core.github_client import GitHubClient
         from dataclasses import asdict
         cfg = load_config()
         gh = GitHubClient(cfg)
@@ -245,22 +235,229 @@ def build_mcp_server(cache: GitHubContextCache | None = None) -> FastMCP:
         _cache.set(cache_key, result, ttl=_TTL_PR)
         return result
 
-    # ── Tool: invalidate_repo_cache ───────────────────────────────────────────
+    # ── Cache invalidation helpers (shared by write tools) ───────────────────
+
+    def _bust_repo(owner: str, repo: str) -> int:
+        """Invalidate every cache entry scoped to this repo."""
+        n = 0
+        for prefix in (
+            f"file:{owner}/{repo}",
+            f"tree:{owner}/{repo}",
+            f"ci:{owner}/{repo}",
+            f"issues:{owner}/{repo}",
+            f"pr_comments:{owner}/{repo}",
+            f"prs:{owner}/{repo}",
+        ):
+            n += _cache.invalidate_prefix(prefix)
+        return n
+
+    def _error(exc: BaseException, **context: object) -> str:
+        """Uniform JSON error shape for every write tool.
+
+        LLMs calling the MCP cope much better with structured errors than
+        with exceptions raised back through the transport — so we shape
+        every failure into {error, type, ...context} and let the model
+        decide whether to retry, back off, or ask the user.
+        """
+        payload: dict[str, object] = {
+            "error": str(exc),
+            "type": type(exc).__name__,
+        }
+        payload.update(context)
+        return json.dumps(payload)
+
+    def _gh_client() -> "GitHubClient":
+        return GitHubClient(load_config())
+
+    # ── Tool: list_prs (read, symmetric to the existing getters) ────────────
+
+    @mcp.tool()
+    def list_prs(owner: str, repo: str, state: str = "open", limit: int = 20) -> str:
+        """List pull requests for a repo, cached (TTL 2 min).
+
+        `state` ∈ {"open", "closed", "all"}. Returns JSON array of
+        {number, title, state, author, url, base, head, draft, created_at}.
+        """
+        cache_key = f"prs:{owner}/{repo}:{state}:{limit}"
+        cached = _cache.get(cache_key)
+        if cached is not None:
+            return str(cached)
+
+        try:
+            r = _gh_client().get_repo(owner, repo)
+            prs: list[dict[str, Any]] = []
+            for pr in list(r.get_pulls(state=state))[:limit]:
+                prs.append({
+                    "number": pr.number,
+                    "title": pr.title,
+                    "state": pr.state,
+                    "author": pr.user.login if pr.user else None,
+                    "url": pr.html_url,
+                    "base": pr.base.ref,
+                    "head": pr.head.ref,
+                    "draft": pr.draft,
+                    "created_at": pr.created_at.isoformat() if pr.created_at else None,
+                })
+        except Exception as e:
+            return _error(e, owner=owner, repo=repo)
+
+        result = json.dumps(prs)
+        _cache.set(cache_key, result, ttl=_TTL_PR)
+        return result
+
+    # ── Tool: create_branch ──────────────────────────────────────────────────
+
+    @mcp.tool()
+    def create_branch(owner: str, repo: str, branch: str, from_ref: str = "") -> str:
+        """Create a new branch pointing at `from_ref` (default-branch HEAD if empty).
+
+        Returns JSON {ref, sha} on success, {error, type} on failure. Busts
+        the tree cache so subsequent reads reflect the new branch.
+        """
+        try:
+            r = _gh_client().get_repo(owner, repo)
+            base_ref = from_ref or r.default_branch
+            head = r.get_branch(base_ref)
+            created = r.create_git_ref(ref=f"refs/heads/{branch}", sha=head.commit.sha)
+        except Exception as e:
+            return _error(e, owner=owner, repo=repo, branch=branch)
+
+        _bust_repo(owner, repo)
+        return json.dumps({"ref": created.ref, "sha": head.commit.sha, "branch": branch})
+
+    # ── Tool: commit_file (via Contents API — no workdir required) ───────────
+
+    @mcp.tool()
+    def commit_file(
+        owner: str,
+        repo: str,
+        path: str,
+        content: str,
+        message: str,
+        branch: str,
+    ) -> str:
+        """Create or update a single file via the Contents API.
+
+        Writes through the GitHub API directly — no local clone needed, no
+        git binary involved. Returns JSON {commit_sha, content_sha, url}.
+        """
+        try:
+            r = _gh_client().get_repo(owner, repo)
+            encoded = content  # PyGithub encodes for us
+            # PyGithub update_file requires the existing blob SHA; we try
+            # create_file first and fall back to update_file on 422.
+            try:
+                resp = r.create_file(path=path, message=message, content=encoded, branch=branch)
+                commit_sha = resp["commit"].sha
+                content_sha = resp["content"].sha
+                html = resp["content"].html_url
+            except Exception as create_exc:
+                if "sha" not in str(create_exc).lower() and "422" not in str(create_exc):
+                    raise
+                existing = r.get_contents(path, ref=branch)
+                if isinstance(existing, list):
+                    existing = existing[0]
+                resp = r.update_file(
+                    path=path, message=message, content=encoded,
+                    sha=existing.sha, branch=branch,
+                )
+                commit_sha = resp["commit"].sha
+                content_sha = resp["content"].sha
+                html = resp["content"].html_url
+        except Exception as e:
+            return _error(e, owner=owner, repo=repo, path=path, branch=branch)
+
+        _cache.invalidate_prefix(f"file:{owner}/{repo}")
+        _cache.invalidate_prefix(f"tree:{owner}/{repo}")
+        return json.dumps({"commit_sha": commit_sha, "content_sha": content_sha, "url": html})
+
+    # ── Tool: open_pr ────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def open_pr(
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+        draft: bool = False,
+    ) -> str:
+        """Open a pull request. Returns JSON {number, url, state} or error."""
+        try:
+            r = _gh_client().get_repo(owner, repo)
+            pr = r.create_pull(title=title, body=body, head=head, base=base, draft=draft)
+        except Exception as e:
+            return _error(e, owner=owner, repo=repo, head=head, base=base)
+
+        _cache.invalidate_prefix(f"prs:{owner}/{repo}")
+        return json.dumps({
+            "number": pr.number,
+            "url": pr.html_url,
+            "state": pr.state,
+            "draft": pr.draft,
+        })
+
+    # ── Tool: close_pr ───────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def close_pr(owner: str, repo: str, pr_number: int) -> str:
+        """Close a PR without merging. Returns JSON {ok, number}."""
+        try:
+            r = _gh_client().get_repo(owner, repo)
+            pr = r.get_pull(pr_number)
+            pr.edit(state="closed")
+        except Exception as e:
+            return _error(e, owner=owner, repo=repo, pr_number=pr_number)
+
+        _cache.invalidate_prefix(f"prs:{owner}/{repo}")
+        return json.dumps({"ok": True, "number": pr_number})
+
+    # ── Tool: add_pr_comment (issue-style) ───────────────────────────────────
+
+    @mcp.tool()
+    def add_pr_comment(owner: str, repo: str, pr_number: int, body: str) -> str:
+        """Add a conversation comment to a PR (not a line-level review comment).
+
+        Returns JSON {id, url}. Busts the pr_comments cache so the next
+        get_pr_comments call sees it.
+        """
+        try:
+            r = _gh_client().get_repo(owner, repo)
+            issue = r.get_issue(pr_number)  # PRs are issues under the hood
+            c = issue.create_comment(body)
+        except Exception as e:
+            return _error(e, owner=owner, repo=repo, pr_number=pr_number)
+
+        _cache.invalidate_prefix(f"pr_comments:{owner}/{repo}")
+        return json.dumps({"id": c.id, "url": c.html_url})
+
+    # ── Tool: add_pr_labels ──────────────────────────────────────────────────
+
+    @mcp.tool()
+    def add_pr_labels(owner: str, repo: str, pr_number: int, labels: list[str]) -> str:
+        """Add one or more labels to a PR. Returns JSON {labels, number}."""
+        try:
+            r = _gh_client().get_repo(owner, repo)
+            issue = r.get_issue(pr_number)
+            for label in labels:
+                issue.add_to_labels(label)
+            final = [lbl.name for lbl in issue.labels]
+        except Exception as e:
+            return _error(e, owner=owner, repo=repo, pr_number=pr_number)
+
+        _cache.invalidate_prefix(f"prs:{owner}/{repo}")
+        return json.dumps({"number": pr_number, "labels": final})
+
+    # ── Tool: invalidate_repo_cache ──────────────────────────────────────────
 
     @mcp.tool()
     def invalidate_repo_cache(owner: str, repo: str) -> str:
         """
-        Bust all cache entries for a given repo (call after push/commit).
-        Returns JSON with count of invalidated entries.
+        Bust all cache entries for a given repo (call after external pushes
+        that gitoma wasn't aware of). Returns JSON {invalidated, repo}.
         """
-        prefix = f"file:{owner}/{repo}"
-        n1 = _cache.invalidate_prefix(prefix)
-        prefix2 = f"tree:{owner}/{repo}"
-        n2 = _cache.invalidate_prefix(prefix2)
-        prefix3 = f"ci:{owner}/{repo}"
-        n3 = _cache.invalidate_prefix(prefix3)
-        total = n1 + n2 + n3
-        return json.dumps({"invalidated": total, "repo": f"{owner}/{repo}"})
+        return json.dumps({"invalidated": _bust_repo(owner, repo), "repo": f"{owner}/{repo}"})
 
     return mcp
 
