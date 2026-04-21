@@ -43,6 +43,25 @@ import pytest
 pytestmark = pytest.mark.e2e_cockpit
 
 
+# ── Suite-wide proxy bypass for non-browser HTTP/WS clients ──────────────
+# Rationale mirrors the browser's --proxy-server=direct:// trick below:
+# macOS dev boxes often have Proxymate/mitmproxy MITMing all outbound
+# traffic. ``requests`` inherits ``HTTP(S)_PROXY`` + system proxy settings
+# and silently drops / rewrites headers (observed: ``If-None-Match``
+# stripped, turning an expected 304 into 200). ``NO_PROXY=*`` is the
+# portable "don't proxy anything" escape hatch honoured by requests,
+# urllib3, httpx, and the websockets lib. Setting it at session start
+# covers every test that uses any of those without per-call noise.
+os.environ["NO_PROXY"] = "*"
+os.environ["no_proxy"] = "*"
+os.environ.pop("HTTP_PROXY", None)
+os.environ.pop("HTTPS_PROXY", None)
+os.environ.pop("http_proxy", None)
+os.environ.pop("https_proxy", None)
+os.environ.pop("ALL_PROXY", None)
+os.environ.pop("all_proxy", None)
+
+
 # ── Browser launch: bypass system proxy ───────────────────────────────────
 # On macOS dev boxes, chromium inherits the system SOCKS/HTTP proxy. Many
 # devs here run Proxymate/mitmproxy which MITMs localhost and tailnet
