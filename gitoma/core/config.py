@@ -49,10 +49,41 @@ class BotConfig:
 
 
 @dataclass
+class CriticPanelConfig:
+    """Multi-persona critic panel that runs after each WORK patch is applied
+    but before it's committed. See gitoma/critic/ for the implementation.
+
+    ``mode`` is the kill-switch:
+      * ``off``      — panel does not run; zero overhead, zero observation
+      * ``advisory`` — panel runs, logs findings + slop_ratio in trace and
+                       state, but never blocks or alters the commit
+      * ``blocking`` — panel can request ONE refinement turn from the actor;
+                       a meta-eval then keeps the refinement only if it's
+                       genuinely better than the original (default conservative
+                       on tie). At most ONE refinement; no recursion.
+
+    Default ``advisory`` so we get baseline numbers without behavioural change.
+    Toggle via env (``CRITIC_PANEL_MODE``), TOML, or future cockpit setting.
+    """
+    mode: str = "advisory"  # off | advisory | blocking
+    # Comma-separated personas to instantiate; first iteration ships only
+    # ``dev``. Add ``arch,contributor`` once the walking skeleton is proven.
+    personas: str = "dev"
+    # Whether the broad-scope "devil's advocate" critic runs once per
+    # subtask after the panel; gated separately because it's the most
+    # expensive call (sees full diff). Disabled by default until the
+    # 3-persona panel is live.
+    devil_advocate: bool = False
+    # Override LMStudio temperature for critic calls (deterministic-ish).
+    temperature: float = 0.3
+
+
+@dataclass
 class Config:
     github: GitHubConfig = field(default_factory=GitHubConfig)
     bot: BotConfig = field(default_factory=BotConfig)
     lmstudio: LMStudioConfig = field(default_factory=LMStudioConfig)
+    critic_panel: CriticPanelConfig = field(default_factory=CriticPanelConfig)
     api_auth_token: str = ""
 
     def validate(self) -> list[str]:
@@ -99,12 +130,30 @@ def load_config() -> Config:
         max_tokens=int(os.getenv("LM_STUDIO_MAX_TOKENS", lm_raw.get("max_tokens", 4096))),
     )
 
+    cp_raw = raw.get("critic_panel", {})
+    critic_panel = CriticPanelConfig(
+        mode=os.getenv("CRITIC_PANEL_MODE", cp_raw.get("mode", "advisory")),
+        personas=os.getenv("CRITIC_PANEL_PERSONAS", cp_raw.get("personas", "dev")),
+        devil_advocate=_truthy(os.getenv("CRITIC_PANEL_DEVIL", str(cp_raw.get("devil_advocate", False)))),
+        temperature=float(os.getenv("CRITIC_PANEL_TEMPERATURE", cp_raw.get("temperature", 0.3))),
+    )
+
     return Config(
-        github=github, 
-        bot=bot, 
+        github=github,
+        bot=bot,
         lmstudio=lmstudio,
+        critic_panel=critic_panel,
         api_auth_token=os.getenv("GITOMA_API_TOKEN", raw.get("api_auth_token", ""))
     )
+
+
+def _truthy(v: str | bool) -> bool:
+    """Convert a TOML bool / env string to a real bool. Env vars are always
+    strings — ``"true"``/``"1"``/``"yes"`` (any case) become True; everything
+    else is False. Mirrors what callers expect of a feature flag."""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("true", "1", "yes", "on")
 
 
 def save_config_value(key: str, value: str) -> None:
@@ -126,6 +175,10 @@ def save_config_value(key: str, value: str) -> None:
         "LM_STUDIO_API_KEY": ("lmstudio", "api_key"),
         "LM_STUDIO_TEMPERATURE": ("lmstudio", "temperature"),
         "LM_STUDIO_MAX_TOKENS": ("lmstudio", "max_tokens"),
+        "CRITIC_PANEL_MODE": ("critic_panel", "mode"),
+        "CRITIC_PANEL_PERSONAS": ("critic_panel", "personas"),
+        "CRITIC_PANEL_DEVIL": ("critic_panel", "devil_advocate"),
+        "CRITIC_PANEL_TEMPERATURE": ("critic_panel", "temperature"),
         "GITOMA_API_TOKEN": ("api", "token"),
     }
 

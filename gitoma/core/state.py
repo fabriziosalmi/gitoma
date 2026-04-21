@@ -75,6 +75,23 @@ class AgentState:
     # "CLI died unexpectedly" from "CLI finished its scope cleanly".
     exit_clean: bool = False
 
+    # Critic panel observability (M7). Populated only when
+    # ``Config.critic_panel.mode != "off"``. Each entry in
+    # ``critic_panel_findings_log`` is one panel run for one subtask:
+    #   {
+    #     "subtask_id": "T001-S02",
+    #     "ts": "2026-04-22T12:34:56Z",
+    #     "personas_called": ["dev"],
+    #     "findings": [{"persona": "dev", "severity": "...", "category":"...", "summary":"..."}],
+    #     "verdict": "advisory_logged" | "refined_accepted" | "refined_rejected" | "no_op",
+    #     "tokens_extra": {"prompt": int, "completion": int},
+    #   }
+    # Kept in state so the cockpit can render a "critic activity" panel
+    # without having to re-parse trace files. Capped to last 200 entries
+    # per run so a long run doesn't grow state.json unboundedly.
+    critic_panel_runs: int = 0
+    critic_panel_findings_log: list[dict[str, Any]] = field(default_factory=list)
+
     @property
     def slug(self) -> str:
         return f"{self.owner}__{self.name}"
