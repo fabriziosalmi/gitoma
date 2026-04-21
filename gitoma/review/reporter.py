@@ -56,8 +56,8 @@ def _display_reviews_table(reviews: list[dict[str, Any]]) -> None:
         box=box.ROUNDED,
         border_style="secondary",
         show_header=True,
-        header_style="bold secondary",
-        title_style="bold heading",
+        header_style="secondary",
+        title_style="heading",
     )
     table.add_column("Reviewer", style="primary")
     table.add_column("State", justify="center")
@@ -85,8 +85,8 @@ def _display_comments_table(comments: list[Any]) -> None:
         box=box.ROUNDED,
         border_style="primary",
         show_header=True,
-        header_style="bold primary",
-        title_style="bold heading",
+        header_style="primary",
+        title_style="heading",
     )
     table.add_column("#", style="muted", width=4)
     table.add_column("Author", style="accent", width=18)

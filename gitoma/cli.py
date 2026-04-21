@@ -42,6 +42,7 @@ from gitoma.core.state import (
     release_run_lock,
     save_state,
 )
+from gitoma.core.trace import open_trace
 from gitoma.ui.console import console
 from gitoma.ui.panels import (
     make_analyzer_progress,
@@ -533,56 +534,69 @@ def _doctor_runs() -> None:
 
 
 @contextmanager
-def _heartbeat(state: "AgentState") -> Generator[None, None, None]:
-    """Keep `state.last_heartbeat` fresh while the run is active.
+def _heartbeat(state: "AgentState", *, trace_label: str = "run") -> Generator[None, None, None]:
+    """Keep ``state.last_heartbeat`` fresh AND open a structured trace file.
 
-    A daemon thread touches `last_heartbeat` + saves the state every
-    ``_HEARTBEAT_INTERVAL_S`` seconds. When the CLI process dies (SIGKILL,
-    OOM, power loss, terminal closed with Ctrl-Z + kill), the thread dies
-    with it and the timestamp stops advancing — observers can then tell
-    the run is orphaned rather than just slow.
+    Two concerns collapsed into one context manager because every use-site
+    wants both: a run that's producing progress needs a live heartbeat AND
+    a jsonl log of what it's doing. The trace is scoped to the same slug
+    and closes on exit. Use ``gitoma.core.trace.current()`` from anywhere
+    in the pipeline to append events to this trace.
     """
-    state.pid = os.getpid()
-    state.last_heartbeat = datetime.now(timezone.utc).isoformat()
-    save_state(state)
+    slug = f"{state.owner}__{state.name}"
+    with open_trace(slug, label=trace_label) as tr:
+        tr.emit(
+            "run.begin",
+            repo_url=state.repo_url,
+            branch=state.branch,
+            phase=state.phase,
+            pid=os.getpid(),
+        )
 
-    stop = threading.Event()
+        state.pid = os.getpid()
+        state.last_heartbeat = datetime.now(timezone.utc).isoformat()
+        save_state(state)
 
-    def _tick() -> None:
-        while not stop.wait(_HEARTBEAT_INTERVAL_S):
-            state.last_heartbeat = datetime.now(timezone.utc).isoformat()
-            try:
-                save_state(state)
-            except Exception:
-                # File locked / removed mid-write — retry on the next tick.
-                pass
+        stop = threading.Event()
 
-    thread = threading.Thread(
-        target=_tick, daemon=True, name="gitoma-heartbeat"
-    )
-    thread.start()
-    caught: BaseException | None = None
-    try:
-        yield
-    except typer.Exit as e:
-        # typer.Exit(0) is a normal completion path; higher codes are failures.
-        if getattr(e, "exit_code", 0) != 0:
+        def _tick() -> None:
+            while not stop.wait(_HEARTBEAT_INTERVAL_S):
+                state.last_heartbeat = datetime.now(timezone.utc).isoformat()
+                try:
+                    save_state(state)
+                except Exception:
+                    # File locked / removed mid-write — retry on the next tick.
+                    pass
+
+        thread = threading.Thread(
+            target=_tick, daemon=True, name="gitoma-heartbeat"
+        )
+        thread.start()
+        caught: BaseException | None = None
+        try:
+            yield
+        except typer.Exit as e:
+            code = getattr(e, "exit_code", 0) or 0
+            if code != 0:
+                caught = e
+                tr.emit("run.aborted", level="warn", exit_code=code)
+            raise
+        except BaseException as e:  # KeyboardInterrupt, SystemExit, errors
             caught = e
-        raise
-    except BaseException as e:  # KeyboardInterrupt, SystemExit, errors
-        caught = e
-        raise
-    finally:
-        stop.set()
-        thread.join(timeout=2.0)
-        if caught is None:
-            # Clean exit — mark so the orphan detector doesn't flag a
-            # successfully-ended run (e.g. phase=PR_OPEN after `run`).
-            state.exit_clean = True
-            try:
-                save_state(state)
-            except Exception:
-                pass
+            tr.exception("run.crashed", e)
+            raise
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+            if caught is None:
+                # Clean exit — mark so the orphan detector doesn't flag a
+                # successfully-ended run (e.g. phase=PR_OPEN after `run`).
+                state.exit_clean = True
+                try:
+                    save_state(state)
+                except Exception:
+                    pass
+                tr.emit("run.exit_clean", phase=state.phase)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1686,6 +1700,91 @@ def list_cmd() -> None:
     for s in states:
         print_status_panel(s)
         console.print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gitoma logs
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command(name="logs")
+def logs_cmd(
+    repo_url: Annotated[str, typer.Argument(help="GitHub repo URL")],
+    follow: Annotated[bool, typer.Option("--follow", "-f", help="Stream new events as they arrive")] = False,
+    raw: Annotated[bool, typer.Option("--raw", help="Print raw JSONL instead of the pretty summary")] = False,
+    filter_event: Annotated[Optional[str], typer.Option("--filter", help="Only show events whose 'event' field starts with this prefix (e.g. 'run.', 'phase.')")] = None,
+) -> None:
+    """
+    📜 Tail the structured trace for a repo's latest run.
+
+    Every ``gitoma run`` / ``review`` / ``fix-ci`` writes one JSONL file
+    per invocation under ``~/.gitoma/logs/<slug>/``. This command finds
+    the most recent one and prints it — live with ``--follow``, grepped
+    with ``--filter=phase.``, or verbatim with ``--raw``.
+    """
+    from gitoma.core.trace import latest_log_path
+
+    try:
+        owner, name = parse_repo_url(repo_url)
+    except ValueError as exc:
+        _abort(f"Invalid repo URL: {exc}")
+
+    slug = f"{owner}__{name}"
+    path = latest_log_path(slug)
+    if path is None:
+        _abort(
+            f"No trace logs for {slug}.",
+            hint="The trace is written on first `gitoma run`. Start one and re-try.",
+        )
+
+    console.print(f"[muted]Tailing {path}[/muted]\n")
+
+    _stream_log_file(path, follow=follow, raw=raw, filter_prefix=filter_event)
+
+
+def _stream_log_file(
+    path: "Path",
+    *,
+    follow: bool,
+    raw: bool,
+    filter_prefix: Optional[str],
+) -> None:
+    """Print every record, optionally streaming new ones as they're appended."""
+    import json as _json
+    import time as _time
+
+    with path.open("r", encoding="utf-8") as f:
+        while True:
+            line = f.readline()
+            if not line:
+                if not follow:
+                    return
+                _time.sleep(0.25)
+                continue
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if raw:
+                console.print(stripped)
+                continue
+            try:
+                rec = _json.loads(stripped)
+            except _json.JSONDecodeError:
+                console.print(f"[dim]{stripped}[/dim]")
+                continue
+            event = rec.get("event", "")
+            if filter_prefix and not event.startswith(filter_prefix):
+                continue
+            ts = rec.get("ts", "")[11:19]  # HH:MM:SS
+            level = rec.get("level", "info")
+            phase = rec.get("phase", "")
+            data = rec.get("data", {})
+            level_style = {"warn": "warning", "error": "danger", "debug": "dim"}.get(level, "info")
+            phase_chip = f"[muted]{phase}[/muted] " if phase else ""
+            detail = " ".join(f"{k}={v}" for k, v in data.items() if v not in ("", None))
+            console.print(
+                f"[dim]{ts}[/dim] {phase_chip}[{level_style}]{event}[/{level_style}] "
+                f"[muted]{detail}[/muted]"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
