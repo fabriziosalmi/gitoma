@@ -136,7 +136,10 @@ def test_concurrent_reader_never_sees_invalid_json(state_dir):
 def test_heartbeat_context_keeps_ticking_despite_save_failures(state_dir, mocker):
     """If save_state throws intermittently (disk pressure, NFS hiccup), the
     daemon must keep trying on the next tick instead of dying silently."""
-    from gitoma import cli as cli_module
+    # The helpers module is where save_state is actually looked up by
+    # _heartbeat — patching gitoma.cli would be a no-op since the function
+    # resolves the symbol in its own module's namespace.
+    from gitoma.cli import _helpers as helpers_module
 
     state = AgentState(repo_url="u", owner="flaky", name="disk", branch="b")
 
@@ -149,10 +152,10 @@ def test_heartbeat_context_keeps_ticking_despite_save_failures(state_dir, mocker
             raise OSError("simulated transient failure")
         original_save(s)
 
-    mocker.patch.object(cli_module, "save_state", side_effect=flaky_save)
-    mocker.patch.object(cli_module, "_HEARTBEAT_INTERVAL_S", 0.05)
+    mocker.patch.object(helpers_module, "save_state", side_effect=flaky_save)
+    mocker.patch.object(helpers_module, "_HEARTBEAT_INTERVAL_S", 0.05)
 
-    with cli_module._heartbeat(state):
+    with helpers_module._heartbeat(state):
         time.sleep(0.35)  # ~7 ticks expected; ~half will fail
 
     assert call_count["n"] >= 5, f"heartbeat stopped after {call_count['n']} ticks"
@@ -250,30 +253,71 @@ def test_from_dict_ignores_unknown_keys_and_keeps_known_ones():
 # ── Concurrent-run lock ─────────────────────────────────────────────────────
 
 
-def test_lock_rejects_second_acquire_from_different_pid(state_dir):
-    """First acquire wins; a simulated second process with a different live
-    PID must be refused with the holder's pid surfaced."""
-    # First acquire by the test process itself.
-    ok, _ = acquire_run_lock("lockowner", "repo")
-    assert ok
+@pytest.mark.skipif(sys.platform == "win32", reason="advisory flock is POSIX")
+def test_lock_rejects_second_acquire_from_different_process(state_dir):
+    """A peer CLI running concurrently must be refused, with the holder's
+    pid surfaced for UX. Since the lock is now a kernel-held flock, we
+    can't simulate "another process" by writing bytes into the file — a
+    foreign PID in the lockfile does NOT mean foreign ownership. So we
+    spawn a real subprocess that acquires and sleeps, then try to acquire
+    from this process while the peer is alive.
+    """
+    helper = r"""
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+os.environ["HOME"] = sys.argv[2]
+from gitoma.core import state as st
+st.STATE_DIR = __import__("pathlib").Path(sys.argv[3])
+ok, _ = st.acquire_run_lock("lockowner", "repo")
+print("PID", os.getpid(), "OK" if ok else "FAIL", flush=True)
+time.sleep(30)
+"""
+    repo_root = str(__import__("pathlib").Path(__file__).resolve().parents[2])
+    proc = subprocess.Popen(
+        [sys.executable, "-c", helper, repo_root, str(state_dir), str(state_dir)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        # Wait until the peer has acquired.
+        line = proc.stdout.readline().strip() if proc.stdout else ""
+        assert "OK" in line, f"peer didn't acquire: {line!r}"
+        peer_pid = int(line.split()[1])
 
-    # Manually stamp the lock with a live PID that isn't us — mimics a peer
-    # CLI running concurrently. We pick the parent PID because it's
-    # guaranteed alive during a test run.
-    other_pid = os.getppid()
-    (state_dir / "lockowner__repo.lock").write_text(str(other_pid))
-
-    ok2, holder = acquire_run_lock("lockowner", "repo")
-    assert ok2 is False
-    assert holder == other_pid
-
-    release_run_lock("lockowner", "repo")
+        ok2, holder = acquire_run_lock("lockowner", "repo")
+        assert ok2 is False
+        assert holder == peer_pid
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
-def test_lock_takes_over_stale_lock(state_dir):
-    """A lock owned by a dead PID must be taken over — otherwise a crash
-    would permanently lock out the repo."""
-    (state_dir / "ghost__repo.lock").write_text("999999999")  # bogus dead pid
+@pytest.mark.skipif(sys.platform == "win32", reason="advisory flock is POSIX")
+def test_lock_taken_over_when_previous_holder_died(state_dir):
+    """When the prior holder dies (SIGKILL / crash / power loss), the
+    kernel drops the flock. The next acquire must succeed — otherwise a
+    crash would permanently lock out the repo."""
+    helper = r"""
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from gitoma.core import state as st
+st.STATE_DIR = __import__("pathlib").Path(sys.argv[2])
+ok, _ = st.acquire_run_lock("ghost", "repo")
+print("OK" if ok else "FAIL", flush=True)
+time.sleep(300)
+"""
+    repo_root = str(__import__("pathlib").Path(__file__).resolve().parents[2])
+    proc = subprocess.Popen(
+        [sys.executable, "-c", helper, repo_root, str(state_dir)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    assert proc.stdout is not None
+    assert "OK" in proc.stdout.readline().strip()
+
+    # SIGKILL — no chance to release_run_lock. Kernel must drop the flock.
+    proc.kill()
+    proc.wait(timeout=5)
 
     ok, _ = acquire_run_lock("ghost", "repo")
     assert ok is True
@@ -281,20 +325,29 @@ def test_lock_takes_over_stale_lock(state_dir):
     release_run_lock("ghost", "repo")
 
 
-def test_lock_release_only_when_owned_by_us(state_dir):
-    """If the lock got stolen by someone else, we must NOT delete it
-    (would let a third party sneak in behind the current holder)."""
-    acquire_run_lock("owned", "repo")
+def test_lock_is_reentrant_within_same_process(state_dir):
+    """Back-to-back acquires from the same process must both succeed —
+    a legitimate caller that forgot to release once shouldn't deadlock
+    itself forever on retry."""
+    ok1, _ = acquire_run_lock("reentrant", "repo")
+    ok2, _ = acquire_run_lock("reentrant", "repo")
+    assert ok1 is True
+    assert ok2 is True
+    release_run_lock("reentrant", "repo")
 
-    # Simulate a peer overwriting the lock.
-    (state_dir / "owned__repo.lock").write_text("12345")
 
-    release_run_lock("owned", "repo")
-    assert (state_dir / "owned__repo.lock").exists()
-    assert (state_dir / "owned__repo.lock").read_text() == "12345"
-
-    # Cleanup so no stale file trips other tests.
-    (state_dir / "owned__repo.lock").unlink()
+def test_lock_ignores_foreign_pid_in_file(state_dir):
+    """PID written to the lockfile is UX-only (so a blocked user knows
+    who's holding the lock). It is NOT ownership data — writing a random
+    PID into the file must not grant or block ownership."""
+    # Pre-stamp a random live PID into the lockfile. Without a real flock
+    # holder, we must still be able to acquire.
+    (state_dir / "foreign__repo.lock").write_text(str(os.getppid()))
+    ok, _ = acquire_run_lock("foreign", "repo")
+    assert ok is True
+    # And after acquiring, the file must reflect *our* PID.
+    assert (state_dir / "foreign__repo.lock").read_text() == str(os.getpid())
+    release_run_lock("foreign", "repo")
 
 
 # ── End-to-end: real subprocess + SIGKILL → orphan detected ─────────────────

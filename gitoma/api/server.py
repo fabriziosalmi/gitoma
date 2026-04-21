@@ -1,5 +1,6 @@
 """FastAPI application initialization."""
 
+import secrets
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -38,7 +39,9 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(auth_schem
             detail="GITOMA_API_TOKEN is not configured on the server.",
         )
 
-    if credentials.credentials != expected_token:
+    # Constant-time compare: `!=` leaks the token byte-by-byte via response
+    # timing. Irrelevant on localhost, critical on LAN / VPN deploys.
+    if not secrets.compare_digest(credentials.credentials, expected_token):
         raise HTTPException(
             status_code=403,
             detail="Invalid authentication token.",

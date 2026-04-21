@@ -152,6 +152,28 @@ def list_all_states() -> list[AgentState]:
 
 
 # ── Concurrent-run lock ─────────────────────────────────────────────────────
+#
+# Prior implementation used ``O_EXCL`` + a stale-PID takeover branch that
+# read the PID, checked liveness, and blind-rewrote the file. Two processes
+# hitting the same stale lock could both pass the check and both write their
+# PID — ending up convinced they each owned the lock.
+#
+# The kernel-held advisory lock below (``fcntl.flock``) makes that
+# impossible: only one process can hold ``LOCK_EX`` at a time, and the
+# kernel releases it automatically when the holding fd is closed (including
+# when the process dies by any signal, OOM, or power loss). No "stale file"
+# concept to race over. The PID written to the file is for UX only — it
+# tells the blocked user *which PID is holding it* — not for correctness.
+
+try:
+    import fcntl  # POSIX only
+    _HAS_FLOCK = True
+except ImportError:  # pragma: no cover — Windows fallback
+    _HAS_FLOCK = False
+
+# Keep the lock fds alive for the lifetime of the process. Closing the fd
+# releases the flock; we need it held until release_run_lock() runs.
+_HELD_LOCKS: dict[tuple[str, str], int] = {}
 
 
 def _lock_path(owner: str, name: str) -> Path:
@@ -174,50 +196,105 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _read_pid(path: Path) -> int | None:
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
 def acquire_run_lock(owner: str, name: str) -> tuple[bool, int | None]:
     """Try to grab the lock for (owner, name).
 
     Returns ``(True, None)`` on success. On failure, returns
     ``(False, existing_pid)`` so callers can tell the user who's holding
-    it. A stale lock (whose PID is no longer alive) is silently taken
-    over — otherwise a crash would leave you locked out forever.
+    it. Kernel-held advisory lock: no stale-takeover race — when a holding
+    process dies, the kernel drops the lock.
     """
     path = _lock_path(owner, name)
+    key = (owner, name)
     my_pid = os.getpid()
 
-    # O_EXCL → atomic create. If it exists, we race-check the stale case.
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        try:
-            existing_raw = path.read_text().strip()
-            existing = int(existing_raw) if existing_raw else -1
-        except (OSError, ValueError):
-            existing = -1
-        if existing > 0 and _pid_alive(existing) and existing != my_pid:
-            return False, existing
-        # Stale — take it over by rewriting.
-        try:
-            path.write_text(str(my_pid))
-        except OSError:
-            return False, existing if existing > 0 else None
+    # Re-entrant: the same process asking again already owns it.
+    if key in _HELD_LOCKS:
         return True, None
 
-    with os.fdopen(fd, "w") as f:
-        f.write(str(my_pid))
+    if not _HAS_FLOCK:
+        # Windows fallback — best-effort, not race-free. Callers should
+        # serialize at a higher level on Windows if they need strict mutex.
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            existing = _read_pid(path)
+            if existing and _pid_alive(existing) and existing != my_pid:
+                return False, existing
+            # Stale — unlink then retry once. If racing, loser fails.
+            try:
+                path.unlink()
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except (OSError, FileExistsError):
+                return False, existing
+        os.write(fd, str(my_pid).encode())
+        _HELD_LOCKS[key] = fd
+        return True, None
+
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Someone else holds it. Read their PID for UX (best-effort; the
+        # holder writes PID *after* taking the lock so we may see an empty
+        # or stale value — caller just uses None in that case).
+        existing = _read_pid(path)
+        os.close(fd)
+        return False, existing
+    except OSError:
+        os.close(fd)
+        return False, None
+
+    # We hold the lock. Publish our PID for the UX of the next would-be
+    # acquirer. Truncate first so we don't leave a stale tail from the
+    # previous holder's PID when PIDs differ in digit count.
+    try:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, str(my_pid).encode())
+    except OSError:
+        # Couldn't write PID — lock is still ours per the kernel, but UX
+        # will degrade. Not a correctness issue, so proceed.
+        pass
+
+    _HELD_LOCKS[key] = fd
     return True, None
 
 
 def release_run_lock(owner: str, name: str) -> None:
-    """Release the lock if we own it. Never raises."""
-    path = _lock_path(owner, name)
-    my_pid = os.getpid()
-    try:
-        existing = int(path.read_text().strip())
-    except (OSError, ValueError):
+    """Release the lock if we own it. Never raises.
+
+    Closing the fd implicitly drops the flock. We also unlink the file so
+    ``gitoma doctor --runs`` doesn't show a stale-looking lockfile after a
+    clean exit; if the unlink races another acquirer, it'll just recreate.
+    """
+    key = (owner, name)
+    fd = _HELD_LOCKS.pop(key, None)
+    if fd is None:
         return
-    if existing == my_pid:
+    if _HAS_FLOCK:
         try:
-            path.unlink()
+            fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:
             pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    path = _lock_path(owner, name)
+    try:
+        path.unlink()
+    except OSError:
+        pass

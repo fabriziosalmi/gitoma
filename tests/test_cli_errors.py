@@ -20,14 +20,14 @@ def _fresh_state() -> AgentState:
 
 
 def test_abort_without_state_still_exits(mocker):
-    mocker.patch("gitoma.cli.save_state")
+    mocker.patch("gitoma.cli._helpers.save_state")
     with pytest.raises(typer.Exit) as exc:
         _abort("boom")
     assert exc.value.exit_code == 1
 
 
 def test_abort_persists_error_to_state(mocker):
-    save = mocker.patch("gitoma.cli.save_state")
+    save = mocker.patch("gitoma.cli._helpers.save_state")
     state = _fresh_state()
 
     with pytest.raises(typer.Exit):
@@ -39,7 +39,7 @@ def test_abort_persists_error_to_state(mocker):
 
 
 def test_abort_does_not_lose_prior_errors(mocker):
-    mocker.patch("gitoma.cli.save_state")
+    mocker.patch("gitoma.cli._helpers.save_state")
     state = _fresh_state()
     state.errors.append("already present")
 
@@ -51,8 +51,8 @@ def test_abort_does_not_lose_prior_errors(mocker):
 
 
 def test_phase_persists_unhandled_exception(mocker):
-    save = mocker.patch("gitoma.cli.save_state")
-    mocker.patch("gitoma.cli._safe_cleanup")
+    save = mocker.patch("gitoma.cli._helpers.save_state")
+    mocker.patch("gitoma.cli._helpers._safe_cleanup")
     state = _fresh_state()
 
     with pytest.raises(typer.Exit):
@@ -67,8 +67,8 @@ def test_phase_persists_unhandled_exception(mocker):
 def test_phase_does_not_swallow_typer_exit(mocker):
     """`_abort` raises typer.Exit inside a phase — the phase must let it
     propagate verbatim (without wrapping or double-logging)."""
-    mocker.patch("gitoma.cli.save_state")
-    mocker.patch("gitoma.cli._safe_cleanup")
+    mocker.patch("gitoma.cli._helpers.save_state")
+    mocker.patch("gitoma.cli._helpers._safe_cleanup")
     state = _fresh_state()
 
     with pytest.raises(typer.Exit) as exc:

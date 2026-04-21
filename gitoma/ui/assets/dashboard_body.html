@@ -1,0 +1,360 @@
+<div class="app">
+  <header>
+    <div class="brand">
+      <svg class="brand-logo"><use href="#icon-logo"/></svg>
+      <span class="brand-name">Gitoma</span>
+      <span class="brand-badge">Cockpit</span>
+    </div>
+    <div class="header-spacer"></div>
+    <div class="header-actions">
+      <button id="palette-btn" class="btn btn--ghost btn--sm" title="Command palette (⌘K)"
+              aria-label="Open command palette" style="gap:8px;">
+        <span>Quick command</span>
+        <kbd id="palette-kbd">⌘K</kbd>
+      </button>
+      <span id="jobs-badge" class="jobs-badge" role="button" tabindex="0" title="Refresh jobs">
+        <svg class="icon"><use href="#icon-zap"/></svg>
+        <span id="jobs-count">—</span>
+      </span>
+      <button id="settings-btn" class="btn btn--ghost btn--icon btn--sm" aria-label="Settings" title="API token">
+        <svg class="icon"><use href="#icon-settings"/></svg>
+      </button>
+      <span class="status">
+        <span id="conn-dot" class="status-dot down"></span>
+        <span id="conn-label">connecting</span>
+      </span>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden>
+    <svg class="icon"><use href="#icon-alert"/></svg>
+    <div class="body">
+      <div class="title" id="banner-title"></div>
+      <div class="msg" id="banner-msg"></div>
+    </div>
+    <button id="banner-action" class="btn btn--sm" type="button" hidden></button>
+  </div>
+
+  <div id="errors-banner" class="errors-banner" role="alert" hidden>
+    <div class="head">
+      <svg class="icon"><use href="#icon-alert"/></svg>
+      <span id="errors-title">Run failed</span>
+    </div>
+    <ul id="errors-list"></ul>
+    <div class="hint" id="errors-hint"></div>
+  </div>
+
+  <div id="orphan-banner" class="orphan-banner" role="alert" hidden>
+    <svg class="icon"><use href="#icon-alert"/></svg>
+    <div class="body">
+      <div class="title" id="orphan-title">Run appears orphaned</div>
+      <div class="msg" id="orphan-msg"></div>
+    </div>
+  </div>
+
+  <main>
+    <aside class="aside">
+      <section class="card">
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-zap"/></svg>
+          <span class="title">Commands</span>
+        </div>
+        <div class="card-body">
+          <div class="cmd-grid">
+            <button class="cmd-tile" data-cmd="run" type="button" aria-keyshortcuts="r">
+              <svg class="icon"><use href="#icon-play"/></svg>
+              <span class="cmd-name">Run</span>
+              <span class="cmd-hint">Full autonomous pipeline</span>
+              <span class="cmd-kbd">R</span>
+            </button>
+            <button class="cmd-tile" data-cmd="analyze" type="button" aria-keyshortcuts="a">
+              <svg class="icon"><use href="#icon-phase-analyzing"/></svg>
+              <span class="cmd-name">Analyze</span>
+              <span class="cmd-hint">Read-only metric scan</span>
+              <span class="cmd-kbd">A</span>
+            </button>
+            <button class="cmd-tile" data-cmd="review" type="button" aria-keyshortcuts="v">
+              <svg class="icon"><use href="#icon-eye"/></svg>
+              <span class="cmd-name">Review</span>
+              <span class="cmd-hint">Copilot comments + integrate</span>
+              <span class="cmd-kbd">V</span>
+            </button>
+            <button class="cmd-tile" data-cmd="fix-ci" type="button" aria-keyshortcuts="f">
+              <svg class="icon"><use href="#icon-tool"/></svg>
+              <span class="cmd-name">Fix CI</span>
+              <span class="cmd-hint">Reflexion agent on a branch</span>
+              <span class="cmd-kbd">F</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-folder"/></svg>
+          <span class="title">Repositories</span>
+          <span id="repo-count" class="count">0</span>
+        </div>
+        <div class="card-body dense">
+          <div id="repo-list"><div class="empty">No tracked runs yet.</div></div>
+        </div>
+      </section>
+    </aside>
+
+    <div class="stack">
+      <section id="log-card" class="card log-card" aria-live="polite">
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-terminal"/></svg>
+          <span class="title" id="log-title">Live Output</span>
+          <span id="log-status" class="status-pill"><span class="dot"></span><span id="log-status-label">running</span></span>
+          <button id="log-stop" class="btn btn--sm close-log" aria-label="Stop running job" title="Stop" hidden>
+            <svg class="icon"><use href="#icon-x"/></svg>
+            Stop
+          </button>
+          <button id="log-close" class="btn btn--ghost btn--icon btn--sm close-log" aria-label="Close live output" title="Close">
+            <svg class="icon"><use href="#icon-x"/></svg>
+          </button>
+        </div>
+        <pre id="log-stream" class="log-stream" role="log" aria-label="Live subprocess output"></pre>
+      </section>
+
+      <section id="agents-card" class="card" hidden>
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-logo"/></svg>
+          <span class="title">Agents</span>
+        </div>
+        <div class="card-body">
+          <div id="agents-row" class="agents-row"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-activity"/></svg>
+          <span class="title">Pipeline</span>
+          <span id="phase-chip-top" class="phase-chip IDLE" style="margin-left:auto">
+            <span class="dot"></span><span id="phase-chip-label">IDLE</span>
+          </span>
+        </div>
+        <div class="card-body">
+          <div id="pipeline" class="pipeline"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-repo"/></svg>
+          <span class="title">Run Details</span>
+        </div>
+        <div class="card-body flush">
+          <div class="kpi-grid">
+            <div class="kpi"><div class="k">Repository</div><div class="v mono" id="info-repo">—</div></div>
+            <div class="kpi"><div class="k">Branch</div><div class="v mono" id="info-branch">—</div></div>
+            <div class="kpi"><div class="k">Tasks</div><div class="v xl" id="info-tasks">—</div></div>
+            <div class="kpi"><div class="k">Subtasks</div><div class="v xl" id="info-subtasks">—</div></div>
+            <div class="kpi"><div class="k">Pull Request</div><div class="v" id="info-pr">—</div></div>
+            <div class="kpi"><div class="k">Updated</div><div class="v mono" id="info-updated">—</div></div>
+          </div>
+        </div>
+        <div id="current-op-row" class="current-op-row" style="margin:0 14px 12px;" hidden>
+          <svg class="icon spin" id="current-op-icon"><use href="#icon-phase-working"/></svg>
+          <span class="op-text" id="current-op-text">—</span>
+          <span class="age" id="current-op-age">—</span>
+        </div>
+        <div class="card-actions">
+          <button id="reset-btn" class="btn btn--sm" disabled>
+            <svg class="icon"><use href="#icon-trash"/></svg>
+            Reset state
+          </button>
+        </div>
+      </section>
+
+      <section id="task-plan-card" class="card" hidden>
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-phase-planning"/></svg>
+          <span class="title">Task Plan</span>
+          <span id="task-plan-count" class="count">0</span>
+        </div>
+        <div class="card-body">
+          <div id="task-list" class="task-list"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <svg class="icon"><use href="#icon-chart"/></svg>
+          <span class="title">Health Metrics</span>
+        </div>
+        <div class="card-body">
+          <div class="score-lead">
+            <span class="score-value" id="score">—</span>
+            <span class="score-label">Overall</span>
+          </div>
+          <div id="metrics" class="metrics"><div class="empty">No metric report yet.</div></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <span>WebSocket</span>
+    <span class="mono" id="ws-url">—</span>
+    <span class="sep">·</span>
+    <span>Poll 500 ms</span>
+    <span class="sep">·</span>
+    <span>Read-only stream · Bearer-auth commands</span>
+  </footer>
+</div>
+
+<!-- Toasts ────────────────────────────────────────────────────────────── -->
+<div id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<!-- ── Dialogs ──────────────────────────────────────────────────────────── -->
+
+<dialog id="token-dialog" class="modal" aria-labelledby="token-title">
+  <form id="token-form" method="dialog">
+    <div class="modal-head">
+      <svg class="icon"><use href="#icon-settings"/></svg>
+      <span id="token-title" class="title">API Token</span>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="token-input">Bearer token</label>
+        <input id="token-input" type="password" autocomplete="off" spellcheck="false"
+               placeholder="Paste GITOMA_API_TOKEN value" required/>
+        <div class="hint">
+          Stored in your browser only (localStorage). Matches the
+          <code>GITOMA_API_TOKEN</code> configured on the server.
+        </div>
+      </div>
+      <input type="hidden" id="token-next"/>
+    </div>
+    <div class="modal-foot">
+      <button type="button" id="token-clear" class="btn btn--sm">Clear</button>
+      <button type="button" class="btn btn--sm" data-close-dialog="token-dialog">Cancel</button>
+      <button type="submit" class="btn btn--primary btn--sm">Save token</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="run-dialog" class="modal" aria-labelledby="run-title">
+  <form id="run-form" method="dialog">
+    <div class="modal-head">
+      <svg class="icon"><use href="#icon-play"/></svg>
+      <span id="run-title" class="title">Launch full run</span>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="run-url">Repository URL</label>
+        <input id="run-url" type="url" required placeholder="https://github.com/owner/repo"/>
+      </div>
+      <div class="field">
+        <label for="run-branch">Branch (optional)</label>
+        <input id="run-branch" type="text" placeholder="gitoma/improve-2026…"/>
+      </div>
+      <label class="check">
+        <input id="run-dry" type="checkbox"/>
+        <span>Dry run — analyze &amp; plan only, no commits</span>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn--sm" data-close-dialog="run-dialog">Cancel</button>
+      <button type="submit" class="btn btn--primary btn--sm">Launch</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="analyze-dialog" class="modal" aria-labelledby="analyze-title">
+  <form id="analyze-form" method="dialog">
+    <div class="modal-head">
+      <svg class="icon"><use href="#icon-phase-analyzing"/></svg>
+      <span id="analyze-title" class="title">Analyze repository</span>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="analyze-url">Repository URL</label>
+        <input id="analyze-url" type="url" required placeholder="https://github.com/owner/repo"/>
+        <div class="hint">Runs all metric analyzers. Nothing is committed.</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn--sm" data-close-dialog="analyze-dialog">Cancel</button>
+      <button type="submit" class="btn btn--primary btn--sm">Analyze</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="review-dialog" class="modal" aria-labelledby="review-title">
+  <form id="review-form" method="dialog">
+    <div class="modal-head">
+      <svg class="icon"><use href="#icon-eye"/></svg>
+      <span id="review-title" class="title">Review comments</span>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="review-url">Repository URL</label>
+        <input id="review-url" type="url" required placeholder="https://github.com/owner/repo"/>
+      </div>
+      <label class="check">
+        <input id="review-integrate" type="checkbox"/>
+        <span>Auto-integrate — LLM applies fixes and pushes new commits</span>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn--sm" data-close-dialog="review-dialog">Cancel</button>
+      <button type="submit" class="btn btn--primary btn--sm">Review</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="fixci-dialog" class="modal" aria-labelledby="fixci-title">
+  <form id="fixci-form" method="dialog">
+    <div class="modal-head">
+      <svg class="icon"><use href="#icon-tool"/></svg>
+      <span id="fixci-title" class="title">Fix broken CI</span>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="fixci-url">Repository URL</label>
+        <input id="fixci-url" type="url" required placeholder="https://github.com/owner/repo"/>
+      </div>
+      <div class="field">
+        <label for="fixci-branch">Target branch</label>
+        <input id="fixci-branch" type="text" required placeholder="gitoma/improve-2026…"/>
+        <div class="hint">The Reflexion agent streams CI logs to the LLM, then proposes + pushes fixes.</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn--sm" data-close-dialog="fixci-dialog">Cancel</button>
+      <button type="submit" class="btn btn--primary btn--sm">Run Fix-CI</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="palette-dialog" class="palette" aria-labelledby="palette-title">
+  <div class="palette-search">
+    <svg class="icon"><use href="#icon-zap"/></svg>
+    <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="Type a command…" aria-labelledby="palette-title"/>
+  </div>
+  <div id="palette-list" class="palette-list" role="listbox"></div>
+  <div class="palette-foot">
+    <span class="kbd-hint"><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+    <span class="kbd-hint"><kbd>↵</kbd> run</span>
+    <span class="kbd-hint"><kbd>esc</kbd> close</span>
+  </div>
+</dialog>
+
+<dialog id="confirm-dialog" class="modal" aria-labelledby="confirm-title">
+  <div class="modal-head">
+    <svg class="icon"><use href="#icon-alert"/></svg>
+    <span id="confirm-title" class="title">Are you sure?</span>
+  </div>
+  <div class="modal-body">
+    <p id="confirm-body" style="margin:0;color:var(--fg-mid);font-size:12.5px;"></p>
+  </div>
+  <div class="modal-foot">
+    <button type="button" class="btn btn--sm" data-close-dialog="confirm-dialog">Cancel</button>
+    <button type="button" id="confirm-ok" class="btn btn--danger btn--sm">Confirm</button>
+  </div>
+</dialog>

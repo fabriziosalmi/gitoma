@@ -232,11 +232,39 @@ def ensure_runtime_api_token() -> tuple[str, bool]:
             return persisted, False
 
     token = secrets.token_urlsafe(32)
-    RUNTIME_TOKEN_FILE.write_text(token)
+    # Create with 0o600 at the syscall boundary — never let the token exist
+    # on disk world-readable, not even for the microsecond between write()
+    # and chmod(). On filesystems that can't honor POSIX perms (FAT, some
+    # network mounts), fail closed: delete the file and raise, so we don't
+    # silently leave a valid API token readable by every local user.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     try:
-        os.chmod(RUNTIME_TOKEN_FILE, 0o600)
-    except OSError:
-        # chmod may fail on exotic filesystems (FAT, network mounts); the
-        # token is still usable, just slightly less protected.
-        pass
+        fd = os.open(RUNTIME_TOKEN_FILE, flags, 0o600)
+    except OSError as e:
+        raise RuntimeError(f"Cannot create runtime token file: {e}") from e
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            # fchmod not supported on this FS — we'll still verify st_mode
+            # below and fail closed if the mode didn't stick.
+            pass
+        os.write(fd, token.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+    try:
+        mode = RUNTIME_TOKEN_FILE.stat().st_mode & 0o777
+    except OSError as e:  # pragma: no cover — stat() almost never fails here
+        raise RuntimeError(f"Cannot stat runtime token file: {e}") from e
+    if mode & 0o077:
+        try:
+            RUNTIME_TOKEN_FILE.unlink()
+        except OSError:
+            pass
+        raise RuntimeError(
+            "Cannot restrict runtime-token file permissions on this "
+            f"filesystem (mode=0o{mode:o}). Set GITOMA_API_TOKEN explicitly "
+            "instead so the token isn't persisted world-readable."
+        )
     return token, True

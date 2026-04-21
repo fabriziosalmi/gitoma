@@ -45,6 +45,12 @@ dev = [
 where = ["."]
 include = ["gitoma*"]
 
+[tool.setuptools.package-data]
+# Ship the cockpit UI assets (CSS/JS/HTML) alongside the Python code.
+# Without this, `pip install gitoma` would succeed but `gitoma serve` would
+# crash at import time trying to read dashboard.css from site-packages.
+"gitoma.ui" = ["assets/*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 
@@ -53,9 +59,9 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint.per-file-ignores]
-# cli.py silences urllib3 warnings before the stdlib/third-party imports — the
-# order is intentional so E402 must not be enforced here.
-"gitoma/cli.py" = ["E402"]
+# cli/__init__.py silences urllib3 warnings before the stdlib/third-party
+# imports — the order is intentional so E402 must not be enforced here.
+"gitoma/cli/__init__.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.12"
