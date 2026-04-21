@@ -14,15 +14,23 @@ finding describing the failure, so we still get the audit trail.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
+from gitoma.core.trace import current as current_trace
 from gitoma.critic.personas import system_prompt_for
 from gitoma.critic.types import Finding, PanelResult
 
 if TYPE_CHECKING:
     from gitoma.core.config import CriticPanelConfig
     from gitoma.planner.llm_client import LLMClient
+
+# When ``CRITIC_PANEL_DEBUG_RAW=1`` (env), the orchestrator emits a
+# ``critic_panel.persona_raw`` trace event carrying the first 1.5 KB of
+# the LLM's raw response, so we can see WHY the parser is finding nothing
+# (prosa-only output? schema drift? empty findings list?). Off in prod.
+_DEBUG_RAW = os.getenv("CRITIC_PANEL_DEBUG_RAW", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 # Best-effort JSON extractor — small models often wrap output in
@@ -142,6 +150,19 @@ class CriticPanel:
             # Older signature without temperature kwarg — safe fallback.
             raw = self._llm.chat(messages)
         usage = getattr(self._llm, "_last_usage", None)
+        # Optional debug emission — gives us a window into WHY the parser
+        # might be returning nothing on real model output. Truncated so
+        # the JSONL line stays readable.
+        if _DEBUG_RAW:
+            try:
+                current_trace().emit(
+                    "critic_panel.persona_raw",
+                    persona=persona,
+                    raw_head=str(raw or "")[:1500],
+                    raw_len=len(raw or ""),
+                )
+            except Exception:
+                pass  # debug emission must never break the panel
         # Parse with the best-effort JSON extractor.
         findings = _parse_findings(raw, persona=persona)
         return findings, usage
