@@ -48,6 +48,13 @@ dev = [
     "types-toml>=0.10",
     "types-requests>=2.31",
 ]
+# Browser-driven cockpit e2e suite — opt-in only; drives a live cockpit
+# (typically the Mac Mini deploy) via chromium. Run with:
+#   pytest tests/e2e_cockpit -m e2e_cockpit
+# See tests/e2e_cockpit/README.md for env vars.
+e2e_cockpit = [
+    "pytest-playwright>=0.5",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -61,6 +68,13 @@ include = ["gitoma*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+# ``e2e_cockpit`` hits a real running cockpit over Tailscale — excluded
+# from the default run so ``pytest -q`` in dev stays hermetic. Opt in
+# with ``pytest -m e2e_cockpit`` (and set GITOMA_COCKPIT_URL + _TOKEN).
+markers = [
+    "e2e_cockpit: browser-driven e2e against a live cockpit deploy (opt-in)",
+]
+addopts = "-m 'not e2e_cockpit'"
 
 [tool.ruff]
 line-length = 100
