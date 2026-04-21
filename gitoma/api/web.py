@@ -1,10 +1,29 @@
 """Public web UI for Gitoma — static dashboard + live state WebSocket.
 
-Unlike the `/api/v1/*` router which requires a Bearer token, the web UI is
-intended to run on a trusted network (localhost / VPN). The dashboard itself
-is read-only (observes `~/.gitoma/state/*.json`); any write actions issued
-from the cockpit go through `/api/v1/*` with the Bearer token the user
-enters once via the settings modal (stored in browser `localStorage`).
+Unlike the ``/api/v1/*`` router which requires a Bearer token, the web UI
+is intended to run on a **trusted network** (localhost / VPN). The
+dashboard itself is read-only (observes ``~/.gitoma/state/*.json``); any
+write actions issued from the cockpit go through ``/api/v1/*`` with the
+Bearer token the user enters once via the settings modal (stored in
+browser ``localStorage``).
+
+Hardening additions (industrial-grade pass):
+
+* ``/ws/state`` now **validates the Origin header** before accepting the
+  upgrade. Without this, a drive-by page served from ``http://attacker.local``
+  could silently subscribe to live agent state (branch names, errors,
+  current operation) even though the user only intended the cockpit to
+  be reachable from the same host. WebSockets are not subject to CORS
+  preflights, so Origin rejection is the only layer that applies.
+* The dashboard HTML is **rendered once at import** instead of being
+  string-joined per request. At ~90 KB of markup + inline assets this
+  saves a measurable amount of allocation on every GET /.
+* Every ``/`` response includes a tight **Content-Security-Policy** header
+  so even if a state value ever leaks into the HTML (future risk, the
+  current template is static), ``unsafe-eval`` and cross-origin fetches
+  are blocked.
+* ``_snapshot_states`` runs on a worker thread so the event loop doesn't
+  block on disk I/O for every tick of every connected cockpit.
 """
 
 from __future__ import annotations
@@ -17,8 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import HTMLResponse, Response
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +52,19 @@ POLL_INTERVAL_S = 0.5
 ORPHAN_HEARTBEAT_GRACE_S = 90.0
 # Phases considered non-terminal (still expected to be producing progress).
 _NON_TERMINAL = {"IDLE", "ANALYZING", "PLANNING", "WORKING", "PR_OPEN", "REVIEWING"}
+
+# WebSockets skip CORS preflights, so an explicit Origin allow-list is the
+# only layer that stops a drive-by page from subscribing to live state.
+# Default: localhost-only, matching the rest of the cockpit's threat model.
+# Operators can widen this via env for a trusted LAN frontend.
+_ALLOWED_WS_ORIGINS: set[str] = {
+    o.strip()
+    for o in os.getenv(
+        "GITOMA_WS_ALLOWED_ORIGINS",
+        "http://localhost:8000,http://127.0.0.1:8000,http://0.0.0.0:8000",
+    ).split(",")
+    if o.strip()
+}
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -117,18 +149,53 @@ def _snapshot_states() -> list[dict[str, Any]]:
     return states
 
 
+async def _async_snapshot_states() -> list[dict[str, Any]]:
+    """Run the sync snapshot on a worker thread so the event loop isn't blocked.
+
+    With N connected cockpits polling every ``POLL_INTERVAL_S`` seconds,
+    doing the glob + per-file stat + read_text + json.loads in the event
+    loop itself piles up measurable stalls under load. ``asyncio.to_thread``
+    offloads it to the default ThreadPoolExecutor at effectively zero cost.
+    """
+    return await asyncio.to_thread(_snapshot_states)
+
+
+def _is_origin_allowed(origin: str | None) -> bool:
+    """Accept: same-origin WebSocket clients and the allow-listed set.
+
+    Browsers always send an ``Origin`` header on WebSocket handshakes. A
+    non-browser client (e.g. ``websockets``, ``wscat``) may omit it; we
+    accept an absent origin because our ``/api/v1/*`` endpoints already
+    enforce the serious security boundary via Bearer auth — ``/ws/state``
+    is read-only derived data and exists primarily for the browser
+    cockpit anyway.
+    """
+    if origin is None:
+        # Non-browser client (CLI test, curl, etc.) — allow.
+        return True
+    return origin in _ALLOWED_WS_ORIGINS
+
+
 @web_router.websocket("/ws/state")
 async def ws_state(ws: WebSocket) -> None:
-    """Push full `list[state]` snapshots whenever anything changes on disk.
+    """Push full ``list[state]`` snapshots whenever anything changes on disk.
 
-    Clients reconnect on drop; the first frame is always a full snapshot so
-    late joiners don't need history.
+    The handshake rejects browser origins outside the allow-list with
+    WebSocket close code ``1008`` (policy violation) before completing
+    ``accept()``. Clients reconnect on drop; the first frame is always a
+    full snapshot so late joiners don't need history.
     """
+    origin = ws.headers.get("origin")
+    if not _is_origin_allowed(origin):
+        logger.warning("ws_origin_rejected", extra={"origin": origin})
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await ws.accept()
     last_serialized: str | None = None
     try:
         while True:
-            states = _snapshot_states()
+            states = await _async_snapshot_states()
             serialized = json.dumps(states, default=str)
             if serialized != last_serialized:
                 await ws.send_text(serialized)
@@ -146,7 +213,8 @@ async def ws_state(ws: WebSocket) -> None:
 # triple-quoted string constants in this file. They are now on disk under
 # ``gitoma/ui/assets/`` so you can edit them with a real editor (syntax
 # highlight, linters, devtools mapping) instead of scrolling through 2400
-# lines of Python. Loaded once at import, cached in module-level strings.
+# lines of Python. Loaded once at import, and the whole HTML shell is
+# assembled once too -- dashboard() just hands back a pre-built bytes blob.
 # =============================================================================
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "ui" / "assets"
@@ -165,11 +233,7 @@ _DASHBOARD_BODY = _load_asset("dashboard_body.html")
 
 
 def _render_dashboard_html() -> str:
-    """Compose the self-contained cockpit HTML from the on-disk assets.
-
-    Called on every dashboard request, but this is a plain string join --
-    the four assets are already in memory from import time.
-    """
+    """Compose the self-contained cockpit HTML from the on-disk assets."""
     return (
         "<!doctype html>\n"
         '<html lang="en">\n<head>\n'
@@ -186,7 +250,35 @@ def _render_dashboard_html() -> str:
     )
 
 
+# Pre-rendered once at module load; served as-is on every GET /.
+_DASHBOARD_BYTES: bytes = _render_dashboard_html().encode("utf-8")
+
+# Tight CSP header for the dashboard: the assets are fully self-contained
+# (no CDNs, no external scripts), so we allow only inline style/script from
+# the page itself and restrict connections to the same origin + our local
+# WebSocket. If a future contributor adds external resources, the browser
+# console will blast them with CSP violations — that's the point.
+_DASHBOARD_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self' ws: wss: http://localhost:* https://localhost:*; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'"
+)
+
+
 @web_router.get("/", response_class=HTMLResponse)
-async def dashboard() -> HTMLResponse:
+async def dashboard() -> Response:
     """Serve the self-contained live cockpit."""
-    return HTMLResponse(_render_dashboard_html())
+    return Response(
+        content=_DASHBOARD_BYTES,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Security-Policy": _DASHBOARD_CSP,
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cache-Control": "no-cache",
+        },
+    )

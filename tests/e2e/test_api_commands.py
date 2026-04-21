@@ -42,7 +42,7 @@ def test_analyze_dispatches_job(mocker):
         json={"repo_url": "https://github.com/mock/repo"},
         headers=HEADERS,
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     data = resp.json()
     assert data["status"] == "started"
     assert "job_id" in data
@@ -65,7 +65,7 @@ def test_review_dispatches_job_without_integrate(mocker):
         json={"repo_url": "https://github.com/mock/repo"},
         headers=HEADERS,
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     assert "Review fetch" in resp.json()["message"]
 
 
@@ -77,7 +77,7 @@ def test_review_with_integrate_flag(mocker):
         json={"repo_url": "https://github.com/mock/repo", "integrate": True},
         headers=HEADERS,
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     assert "integration" in resp.json()["message"]
 
 

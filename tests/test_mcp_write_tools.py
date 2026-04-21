@@ -2,9 +2,15 @@
 
 Each tool is exercised against a mock PyGithub Repo object: we're not
 testing GitHub — we're testing the contract between the tool surface
-and the MCP's cache/error model (structured {error, type, ...context}
-shape, cache invalidation after writes, symmetric read cache on
-list_prs).
+and the MCP's cache/error model (structured ``{ok, error, code, type,
+...context}`` shape, cache invalidation after writes, symmetric read
+cache on ``list_prs``).
+
+After the industrial-grade pass, successful tool responses uniformly
+include ``ok: True``, and errors uniformly include ``ok: False`` with a
+short classified ``code`` and sanitised ``error`` message — the raw
+``str(exc)`` is no longer echoed back since it routinely leaks paths,
+URLs with credentials, or token prefixes.
 """
 
 from __future__ import annotations
@@ -21,6 +27,13 @@ from gitoma.mcp.server import build_mcp_server
 @pytest.fixture
 def mcp_with_isolated_cache(monkeypatch):
     """Spin up a fresh MCP server with its own cache so tests don't leak."""
+    # The server caches GitHubClient via functools.lru_cache; clear it so
+    # each test's monkey-patched `GitHubClient` actually takes effect
+    # instead of returning a stale client from a previous test.
+    from gitoma.mcp import server as server_module
+
+    server_module._gh_client_cached.cache_clear()
+
     cache = GitHubContextCache(max_entries=32, default_ttl=60.0)
     server = build_mcp_server(cache=cache)
     # FastMCP stashes registered tool callables on its registry — pluck them
@@ -44,6 +57,10 @@ def _mock_github_client(mocker, repo_stub):
     client_stub.get_repo.return_value = repo_stub
     mocker.patch("gitoma.mcp.server.load_config", return_value=MagicMock())
     mocker.patch("gitoma.mcp.server.GitHubClient", return_value=client_stub)
+    # The server caches _gh_client_cached — ensure the patched client is
+    # picked up by the very next call, not a stale one from another test.
+    from gitoma.mcp import server as server_module
+    server_module._gh_client_cached.cache_clear()
     return client_stub
 
 
@@ -52,7 +69,13 @@ def _mock_github_client(mocker, repo_stub):
 
 def test_every_write_tool_returns_structured_error_envelope(mcp_with_isolated_cache, mocker):
     """When PyGithub raises, the tool must not propagate — it returns JSON
-    with {error, type, ...context}. LLMs can parse and retry intelligently."""
+    with {ok: False, error, code, type, ...context}. LLMs can parse and
+    retry intelligently.
+
+    Note: ``error`` is now the *classified* message (`"tool failed"`,
+    `"GitHub resource not found"`, etc.) — NOT the raw ``str(exc)``.
+    Leaking ``str(exc)`` is how paths and tokens escape.
+    """
     _, tools = mcp_with_isolated_cache
     repo = MagicMock()
     repo.get_branch.side_effect = RuntimeError("boom")
@@ -60,9 +83,12 @@ def test_every_write_tool_returns_structured_error_envelope(mcp_with_isolated_ca
 
     raw = _call(tools, "create_branch", owner="o", repo="r", branch="feat")
     payload = json.loads(raw)
-    assert payload["error"] == "boom"
+    assert payload["ok"] is False
+    assert payload["code"] == "internal"
     assert payload["type"] == "RuntimeError"
     assert payload["branch"] == "feat"
+    # The sanitised message is stable across exception details.
+    assert "boom" not in payload["error"]
 
 
 # ── list_prs: read path + cache symmetry ─────────────────────────────────────
@@ -99,7 +125,6 @@ def test_list_prs_caches_and_serves_from_cache(mcp_with_isolated_cache, mocker):
 
 def test_create_branch_invokes_github_and_invalidates_tree_cache(mcp_with_isolated_cache, mocker):
     cache, tools = mcp_with_isolated_cache
-    # Pre-populate tree cache so we can assert it gets busted.
     cache.set("tree:o/r:300", "[\"old\"]", ttl=60.0)
 
     head = MagicMock()
@@ -113,9 +138,11 @@ def test_create_branch_invokes_github_and_invalidates_tree_cache(mcp_with_isolat
     _mock_github_client(mocker, repo)
 
     out = json.loads(_call(tools, "create_branch", owner="o", repo="r", branch="feat"))
-    assert out == {"ref": "refs/heads/feat", "sha": "abc123def", "branch": "feat"}
+    assert out["ok"] is True
+    assert out["ref"] == "refs/heads/feat"
+    assert out["sha"] == "abc123def"
+    assert out["branch"] == "feat"
     repo.create_git_ref.assert_called_once_with(ref="refs/heads/feat", sha="abc123def")
-    # Tree cache was invalidated.
     assert cache.get("tree:o/r:300") is None
 
 
@@ -131,7 +158,7 @@ def test_create_branch_defaults_to_default_branch_when_from_ref_empty(mcp_with_i
     repo.get_branch.assert_called_once_with("develop")
 
 
-# ── commit_file: busts file + tree caches ───────────────────────────────────
+# ── commit_file: busts file + tree caches + enforces size cap ───────────────
 
 
 def test_commit_file_creates_new_file_and_busts_caches(mcp_with_isolated_cache, mocker):
@@ -153,9 +180,31 @@ def test_commit_file_creates_new_file_and_busts_caches(mcp_with_isolated_cache, 
         owner="o", repo="r", path="x.py",
         content="print('hi')", message="initial x.py", branch="feat",
     ))
+    assert out["ok"] is True
     assert out["commit_sha"] == "commit_sha_xyz"
     assert cache.get("file:o/r:HEAD:x.py") is None
     assert cache.get("tree:o/r:300") is None
+
+
+def test_commit_file_refuses_oversized_content(mcp_with_isolated_cache, mocker):
+    """A prompt-injected LLM cannot push 10 MB files via the MCP surface."""
+    from gitoma.mcp.server import MAX_FILE_CONTENT_BYTES
+
+    _, tools = mcp_with_isolated_cache
+    repo = MagicMock()
+    _mock_github_client(mocker, repo)
+
+    huge = "x" * (MAX_FILE_CONTENT_BYTES + 1)
+    out = json.loads(_call(
+        tools, "commit_file",
+        owner="o", repo="r", path="x.py",
+        content=huge, message="m", branch="b",
+    ))
+    assert out["ok"] is False
+    assert out["code"] == "invalid_input"
+    # The Contents API must never be called when the size check fails.
+    repo.create_file.assert_not_called()
+    repo.update_file.assert_not_called()
 
 
 def test_commit_file_falls_back_to_update_when_file_already_exists(mcp_with_isolated_cache, mocker):
@@ -180,11 +229,12 @@ def test_commit_file_falls_back_to_update_when_file_already_exists(mcp_with_isol
         owner="o", repo="r", path="x.py",
         content="new", message="update", branch="feat",
     ))
+    assert out["ok"] is True
     assert out["commit_sha"] == "new_commit"
     repo.update_file.assert_called_once()
 
 
-# ── open_pr / close_pr: bust the prs: cache ─────────────────────────────────
+# ── open_pr: idempotency + bust prs cache ───────────────────────────────────
 
 
 def test_open_pr_returns_number_and_busts_prs_cache(mcp_with_isolated_cache, mocker):
@@ -192,6 +242,8 @@ def test_open_pr_returns_number_and_busts_prs_cache(mcp_with_isolated_cache, moc
     cache.set("prs:o/r:open:20", "stale", ttl=60.0)
 
     repo = MagicMock()
+    # No existing PR for this head.
+    repo.get_pulls.return_value = []
     pr = MagicMock()
     pr.number = 42
     pr.html_url = "https://github.com/o/r/pull/42"
@@ -204,9 +256,64 @@ def test_open_pr_returns_number_and_busts_prs_cache(mcp_with_isolated_cache, moc
         tools, "open_pr",
         owner="o", repo="r", title="t", body="b", head="feat", base="main",
     ))
+    assert out["ok"] is True
     assert out["number"] == 42
+    assert out["already_existed"] is False
     assert out["url"].endswith("/42")
     assert cache.get("prs:o/r:open:20") is None
+
+
+def test_open_pr_returns_existing_pr_instead_of_creating_duplicate(mcp_with_isolated_cache, mocker):
+    """Idempotency: if an open PR for this head already exists, return it.
+
+    Without this, a flaky MCP client retrying a call produces N PRs for
+    the same branch (or more commonly a 422 from GitHub on the retry).
+    Industrial-grade API => one logical intent == one logical side effect.
+    """
+    _, tools = mcp_with_isolated_cache
+
+    existing_pr = MagicMock()
+    existing_pr.number = 9
+    existing_pr.html_url = "https://github.com/o/r/pull/9"
+    existing_pr.state = "open"
+    existing_pr.draft = False
+
+    repo = MagicMock()
+    repo.get_pulls.return_value = [existing_pr]
+    _mock_github_client(mocker, repo)
+
+    out = json.loads(_call(
+        tools, "open_pr",
+        owner="o", repo="r", title="t", body="b", head="feat", base="main",
+    ))
+    assert out["ok"] is True
+    assert out["number"] == 9
+    assert out["already_existed"] is True
+    # Critical: no duplicate PR was created.
+    repo.create_pull.assert_not_called()
+
+
+def test_open_pr_refuses_overlong_title_or_body(mcp_with_isolated_cache, mocker):
+    from gitoma.mcp.server import MAX_PR_TITLE_CHARS, MAX_PR_BODY_CHARS
+
+    _, tools = mcp_with_isolated_cache
+    repo = MagicMock()
+    _mock_github_client(mocker, repo)
+
+    out = json.loads(_call(
+        tools, "open_pr",
+        owner="o", repo="r",
+        title="x" * (MAX_PR_TITLE_CHARS + 1), body="b", head="h", base="m",
+    ))
+    assert out["ok"] is False and out["code"] == "invalid_input"
+
+    out = json.loads(_call(
+        tools, "open_pr",
+        owner="o", repo="r", title="t",
+        body="y" * (MAX_PR_BODY_CHARS + 1), head="h", base="m",
+    ))
+    assert out["ok"] is False and out["code"] == "invalid_input"
+    repo.create_pull.assert_not_called()
 
 
 def test_close_pr_edits_state_and_busts_prs_cache(mcp_with_isolated_cache, mocker):
@@ -241,6 +348,7 @@ def test_add_pr_comment_busts_comments_cache(mcp_with_isolated_cache, mocker):
     _mock_github_client(mocker, repo)
 
     out = json.loads(_call(tools, "add_pr_comment", owner="o", repo="r", pr_number=42, body="hi"))
+    assert out["ok"] is True
     assert out["id"] == 123
     assert cache.get("pr_comments:o/r:42") is None
 
@@ -262,8 +370,50 @@ def test_add_pr_labels_collects_final_label_set(mcp_with_isolated_cache, mocker)
         tools, "add_pr_labels",
         owner="o", repo="r", pr_number=42, labels=["bug", "good-first-issue"],
     ))
+    assert out["ok"] is True
     assert out["labels"] == ["bug", "good-first-issue"]
     assert issue.add_to_labels.call_count == 2
+
+
+def test_add_pr_labels_refuses_too_many_labels(mcp_with_isolated_cache, mocker):
+    """Cap on label count prevents a prompt-injected LLM from spamming 500
+    labels on a single PR and degrading repo UX."""
+    from gitoma.mcp.server import MAX_LABELS_PER_CALL
+
+    _, tools = mcp_with_isolated_cache
+    repo = MagicMock()
+    _mock_github_client(mocker, repo)
+
+    out = json.loads(_call(
+        tools, "add_pr_labels",
+        owner="o", repo="r", pr_number=1,
+        labels=[f"label-{i}" for i in range(MAX_LABELS_PER_CALL + 1)],
+    ))
+    assert out["ok"] is False and out["code"] == "invalid_input"
+    repo.get_issue.assert_not_called()
+
+
+# ── Repo allow-list (operator-controlled kill-switch) ───────────────────────
+
+
+def test_repo_allowlist_rejects_unlisted_repo(mcp_with_isolated_cache, mocker, monkeypatch):
+    """When GITOMA_MCP_REPO_ALLOWLIST is set, every tool must refuse repos
+    outside the list — regardless of what the token's scope would allow.
+    """
+    from gitoma.mcp import server as server_module
+
+    # Patch the module-level frozenset; re-running parse_allowlist avoids
+    # process-wide os.environ changes leaking into other tests.
+    monkeypatch.setattr(server_module, "_REPO_ALLOWLIST", frozenset({"allowed/repo"}))
+
+    _, tools = mcp_with_isolated_cache
+    repo = MagicMock()
+    _mock_github_client(mocker, repo)
+
+    out = json.loads(_call(tools, "create_branch", owner="blocked", repo="repo", branch="b"))
+    assert out["ok"] is False
+    assert out["code"] == "invalid_input"
+    repo.create_git_ref.assert_not_called()
 
 
 # ── invalidate_repo_cache: new prefixes are covered ─────────────────────────
@@ -278,8 +428,8 @@ def test_invalidate_repo_cache_clears_every_prefix(mcp_with_isolated_cache, mock
         cache.set(key, "x", ttl=60.0)
 
     out = json.loads(_call(tools, "invalidate_repo_cache", owner="o", repo="r"))
+    assert out["ok"] is True
     assert out["invalidated"] == 6
-    # Confirm every one is gone.
     for key in [
         "file:o/r:HEAD:x", "tree:o/r:300", "ci:o/r:main",
         "issues:o/r:20", "pr_comments:o/r:1", "prs:o/r:open:20",

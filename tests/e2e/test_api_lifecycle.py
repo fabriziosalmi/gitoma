@@ -13,10 +13,17 @@ from gitoma.api.routers import (
     JOB_TTL_SECONDS,
     MAX_JOBS,
     JobRecord,
-    _evict_stale,
+    _evict_stale_locked,
     _JOBS,
     cancel_all_jobs,
 )
+
+
+def _evict_stale() -> None:
+    """Synchronous wrapper for tests. The real path holds ``_JOBS_LOCK``
+    for its mutation window, but the tests drive the function directly
+    and don't care — just run the locked body on a fresh loop."""
+    asyncio.new_event_loop().run_until_complete(_evict_stale_locked())
 
 client = TestClient(app)
 HEADERS = {"Authorization": "Bearer TOKEN"}
@@ -127,7 +134,7 @@ async def test_cancel_endpoint_signals_running_task():
     _JOBS[job.id] = job
 
     result = await cancel_job(job.id)
-    assert result["status"] == "cancelling"
+    assert result.status == "cancelling"
 
     # Give the loop one tick to propagate the cancellation.
     await asyncio.sleep(0)

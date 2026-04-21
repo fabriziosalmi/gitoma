@@ -15,7 +15,9 @@ def test_api_auth_missing_token(mocker):
 
     response = client.get("/api/v1/health")
     assert response.status_code == 401
-    assert response.json()["detail"] == "Not authenticated"
+    # RFC 7235: a 401 response must hint the accepted auth scheme. The
+    # detail text can evolve; what matters is the status + header.
+    assert "bearer" in response.headers.get("www-authenticate", "").lower()
 
 
 def test_api_auth_invalid_token(mocker):
@@ -88,7 +90,7 @@ def test_api_run_job_dispatch(mocker):
     headers = {"Authorization": "Bearer TOKEN"}
 
     response = client.post("/api/v1/run", json=payload, headers=headers)
-    assert response.status_code == 200
+    assert response.status_code == 202
 
     data = response.json()
     assert "job_id" in data
@@ -118,5 +120,5 @@ def test_api_fix_ci_dispatch(mocker):
     # Good payload with mocked pipeline
     payload_good = {"repo_url": "https://github.com/mock/repo", "branch": "gitoma/test"}
     resp_good = client.post("/api/v1/fix-ci", json=payload_good, headers=headers)
-    assert resp_good.status_code == 200
+    assert resp_good.status_code == 202
     assert "job_id" in resp_good.json()
