@@ -13,7 +13,9 @@ authors = [{ name = "FabGPT", email = "fabgpt.inbox@gmail.com" }]
 keywords = ["github", "ai", "agent", "cli", "automation", "bot"]
 
 dependencies = [
-    "typer[all]>=0.12",
+    # typer 0.12+ bundles rich by default; the ``[all]`` extra was dropped
+    # in 0.24 and emits "does not provide the extra 'all'" as a pip warning.
+    "typer>=0.12",
     "rich>=13.7",
     "GitPython>=3.1",
     "PyGithub>=2.3",

@@ -1,0 +1,677 @@
+#!/usr/bin/env bash
+#
+# minimac — remote ops for the gitoma Mac Mini deployment.
+#
+# All remote state lives on a single Mac Mini reachable over Tailscale;
+# this script is the one command-line surface for everything you'd
+# otherwise SSH in to do by hand: deploy, status, restart, tail logs,
+# rotate the token, clean up.
+#
+# Usage:
+#   deploy/minimac <command> [args]
+#
+# Commands:
+#   deploy            rsync the local working tree + install + (re)load service
+#   status            end-to-end probe (Tailscale → SSH → service → HTTP → versions)
+#   start             load the launchd service
+#   stop              unload the launchd service
+#   restart           stop + start (returns when HTTP is green again)
+#   logs [-f|-n N]    last N lines (default 60); -f tails in real time
+#   token             print the current cockpit bearer token
+#   rotate-token      mint a fresh token (drops the old one + reloads service)
+#   env               list keys in the remote ~/.gitoma/.env (values masked)
+#   config set K=V    safely upsert a single key in the remote .env (prompts restart)
+#   health            end-to-end probe (HTTP + LM Studio + GitHub token) via /api/v1/health
+#   open              open the cockpit URL in the local browser
+#   ssh [args]        open an interactive shell (or run a command)
+#   uninstall         remove plist + venv + token + logs (prompts; keeps .env)
+#   help              this screen
+#
+# Env overrides (all optional):
+#   MINIMAC_IP=100.98.112.23           # default
+#   MINIMAC_USER=$USER                 # default
+#   MINIMAC_HOST=user@host             # bypasses USER/IP if set
+#   INSTALL_DIR=gitoma                 # remote $HOME-relative
+#   SERVICE_PORT=8000                  # default
+
+set -euo pipefail
+
+# ── Config ───────────────────────────────────────────────────────────────
+MINIMAC_USER="${MINIMAC_USER:-$USER}"
+MINIMAC_IP="${MINIMAC_IP:-100.98.112.23}"
+MINIMAC_HOST="${MINIMAC_HOST:-${MINIMAC_USER}@${MINIMAC_IP}}"
+INSTALL_DIR="${INSTALL_DIR:-gitoma}"
+SERVICE_PORT="${SERVICE_PORT:-8000}"
+LAUNCH_LABEL="dev.gitoma.serve"
+URL="http://${MINIMAC_IP}:${SERVICE_PORT}"
+
+LOCAL_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# ── Output helpers ───────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    B=$'\e[34m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'
+    BOLD=$'\e[1m'; DIM=$'\e[2m'; RESET=$'\e[0m'
+else
+    B="" G="" Y="" R="" C="" BOLD="" DIM="" RESET=""
+fi
+step() { printf "\n%s>%s %s%s%s\n" "$B" "$RESET" "$BOLD" "$*" "$RESET"; }
+ok()   { printf "  %sOK%s   %s\n"       "$G" "$RESET" "$*"; }
+info() { printf "  %sINFO%s %s\n"       "$C" "$RESET" "$*"; }
+warn() { printf "  %sWARN%s %s\n"       "$Y" "$RESET" "$*"; }
+die()  { printf "%sFAIL%s %s\n"         "$R" "$RESET" "$*" >&2; exit 1; }
+
+# ── Tiny utilities ───────────────────────────────────────────────────────
+
+# Probe: fast ping (200ms timeout) → fail fast if Tailscale is down.
+_check_tailscale() {
+    if ping -c 1 -t 2 "$MINIMAC_IP" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# Probe: SSH with BatchMode so a missing key fails instead of hanging.
+_check_ssh() {
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "$MINIMAC_HOST" true 2>/dev/null
+}
+
+# Probe: curl /docs with a short timeout — cockpit serves Swagger there,
+# which is a cheap way to confirm uvicorn is up without needing the token.
+_check_http() {
+    curl -sS --max-time 3 "${URL}/docs" >/dev/null 2>&1
+}
+
+# Wait up to $1 seconds for HTTP to come green.
+_wait_for_http() {
+    local secs="${1:-15}" i
+    for i in $(seq 1 "$secs"); do
+        if _check_http; then return 0; fi
+        sleep 1
+    done
+    return 1
+}
+
+# Fetch the runtime token. Empty string if absent.
+_remote_token() {
+    ssh -T "$MINIMAC_HOST" 'cat ~/.gitoma/runtime_token 2>/dev/null || true' | tr -d '\r\n'
+}
+
+# ── Subcommand: deploy ───────────────────────────────────────────────────
+cmd_deploy() {
+    step "Pre-flight local"
+    [[ -d "$LOCAL_REPO/gitoma" ]] || die "Local repo not found at $LOCAL_REPO"
+    command -v rsync >/dev/null 2>&1 || die "rsync missing"
+    command -v ssh   >/dev/null 2>&1 || die "ssh missing"
+    ok "target: $MINIMAC_HOST → ~/$INSTALL_DIR (port $SERVICE_PORT)"
+
+    if ! _check_tailscale; then
+        die "Tailscale: $MINIMAC_IP not reachable (is Tailscale up?)"
+    fi
+    ok "Tailscale: $MINIMAC_IP reachable"
+
+    if ! _check_ssh; then
+        die "SSH: cannot reach $MINIMAC_HOST (authorized_keys?)"
+    fi
+    ok "SSH: key authorised"
+
+    if [[ -n "$(git -C "$LOCAL_REPO" status --porcelain 2>/dev/null || true)" ]]; then
+        warn "Local tree has uncommitted changes — they WILL ship to minimac"
+    fi
+
+    step "Rsync to $MINIMAC_HOST:~/$INSTALL_DIR/"
+    rsync -az --delete \
+        --exclude '.git/' \
+        --exclude '.venv/' \
+        --exclude '__pycache__/' \
+        --exclude '*.pyc' \
+        --exclude '.pytest_cache/' \
+        --exclude '.mypy_cache/' \
+        --exclude '.ruff_cache/' \
+        --exclude 'gitoma.egg-info/' \
+        --exclude '.DS_Store' \
+        --exclude '.claude/' \
+        --exclude '.idea/' \
+        --exclude '.vscode/' \
+        --exclude '*.mp3' \
+        --exclude 'gitoma-sandbox/' \
+        --exclude '.env' \
+        --exclude '.env.*' \
+        --stats \
+        "$LOCAL_REPO/" \
+        "$MINIMAC_HOST:$INSTALL_DIR/" | sed -n 's/^/  /p' | grep -E "Number of|Total sent|speedup" || true
+    ok "Code shipped"
+
+    step "Remote bootstrap"
+    local payload
+    payload="$(mktemp -t gitoma-deploy.XXXXXX.sh)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$payload'" EXIT
+
+    cat > "$payload" <<'REMOTE'
+set -euo pipefail
+
+# Non-interactive SSH on macOS does NOT source ~/.zprofile, so Homebrew's
+# /opt/homebrew/bin isn't on PATH by default. Prepend the standard
+# Homebrew bin dirs so python3.12 (from `brew install python@3.12`) is
+# discoverable. No-op on a plain macOS without Homebrew.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
+
+INSTALL_PATH="$HOME/$INSTALL_DIR"
+VENV="$INSTALL_PATH/.venv"
+PLIST="$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"
+ENV_FILE="$HOME/.gitoma/.env"
+
+command -v git >/dev/null 2>&1 || { echo "FAIL: git missing (xcode-select --install)"; exit 1; }
+
+# Pick a Python >= 3.12. Versioned binaries first, fall back to `python3`
+# with a version check. Also probes absolute Homebrew paths for paranoia.
+PYTHON_BIN=""
+for candidate in python3.13 python3.12 python3 /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12; do
+    if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
+        minor="$("$candidate" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo 0)"
+        major="$("$candidate" -c 'import sys; print(sys.version_info.major)' 2>/dev/null || echo 0)"
+        if [ "$major" -eq 3 ] && [ "$minor" -ge 12 ]; then
+            PYTHON_BIN="$(command -v "$candidate" 2>/dev/null || echo "$candidate")"
+            break
+        fi
+    fi
+done
+if [ -z "$PYTHON_BIN" ]; then
+    echo "FAIL: no Python >= 3.12 found. Install with: brew install python@3.12"
+    echo "      PATH was: $PATH"
+    exit 1
+fi
+echo "  python: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
+
+[ -d "$VENV" ] || { echo "  venv: creating"; "$PYTHON_BIN" -m venv "$VENV"; }
+# shellcheck source=/dev/null
+source "$VENV/bin/activate"
+pip install --upgrade pip --quiet
+# Suppress the cosmetic "typer 0.24 does not provide the extra 'all'" line
+# (pyproject pins typer[all]>=0.12; typer 0.24 dropped the extra).
+pip install -e "$INSTALL_PATH" --quiet 2>&1 | grep -v "does not provide the extra 'all'" || true
+
+# Version via Python import from a dir that is NOT the package root, so
+# Python doesn't get confused by the ``./gitoma`` subdir masquerading as
+# the package.
+GITOMA_VERSION="$(cd /tmp && "$VENV/bin/python" -c 'import gitoma;print(gitoma.__version__)' 2>/dev/null || echo 'unknown')"
+echo "  gitoma: v$GITOMA_VERSION (editable install)"
+
+# .env: seed defaults; NEVER clobber existing values.
+mkdir -p "$HOME/.gitoma"
+touch "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+upsert() { grep -q "^$1=" "$ENV_FILE" || echo "$1=$2" >> "$ENV_FILE"; }
+upsert LM_STUDIO_BASE_URL   "http://localhost:1234/v1"
+upsert LM_STUDIO_MODEL      "google/gemma-4-e2b"
+upsert BOT_NAME             "FabGPT"
+upsert BOT_EMAIL            "fabgpt.inbox@gmail.com"
+upsert BOT_GITHUB_USER      "fabgpt-coder"
+upsert GITOMA_ALLOWED_HOSTS "localhost,127.0.0.1,0.0.0.0,$MINIMAC_IP"
+
+if ! grep -q '^GITHUB_TOKEN=..' "$ENV_FILE"; then
+    echo "  WARN: GITHUB_TOKEN missing in $ENV_FILE — add manually:"
+    echo "        echo 'GITHUB_TOKEN=ghp_...' >> $ENV_FILE"
+    echo "        then: launchctl unload $PLIST && launchctl load $PLIST"
+fi
+echo "  env: $ENV_FILE"
+
+# Launchd: (re)write plist + reload every deploy so arg/env changes stick.
+mkdir -p "$HOME/Library/LaunchAgents"
+if launchctl list 2>/dev/null | grep -q "$LAUNCH_LABEL"; then
+    launchctl unload "$PLIST" 2>/dev/null || true
+fi
+
+cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>${LAUNCH_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${VENV}/bin/gitoma</string>
+        <string>serve</string>
+        <string>--host</string><string>0.0.0.0</string>
+        <string>--port</string><string>${SERVICE_PORT}</string>
+    </array>
+    <key>WorkingDirectory</key><string>${INSTALL_PATH}</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>${HOME}/gitoma.log</string>
+    <key>StandardErrorPath</key><string>${HOME}/gitoma.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>${VENV}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key><string>${HOME}</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+
+launchctl load "$PLIST"
+echo "  service: (re)loaded as $LAUNCH_LABEL"
+REMOTE
+
+    ssh -T "$MINIMAC_HOST" \
+        "MINIMAC_IP='$MINIMAC_IP' INSTALL_DIR='$INSTALL_DIR' SERVICE_PORT='$SERVICE_PORT' LAUNCH_LABEL='$LAUNCH_LABEL' bash -s" \
+        < "$payload"
+
+    rm -f "$payload"
+    trap - EXIT
+
+    step "Readiness probe ($URL)"
+    if _wait_for_http 15; then
+        ok "Cockpit reachable at $URL"
+    else
+        warn "Cockpit did NOT respond within 15s — run: deploy/minimac logs"
+        return 1
+    fi
+
+    local tok
+    tok="$(_remote_token)"
+
+    step "Done"
+    printf "  URL:    %s%s%s\n" "$BOLD" "$URL" "$RESET"
+    if [[ -n "$tok" ]]; then
+        printf "  Token:  %s%s%s\n" "$BOLD" "$tok" "$RESET"
+        printf "          %sPaste into the cockpit Settings dialog once%s\n" "$Y" "$RESET"
+    else
+        warn "No runtime token found on remote — deploy/minimac logs"
+    fi
+    echo
+    printf "  %sNext:%s  deploy/minimac status | logs -f | restart | rotate-token\n" "$DIM" "$RESET"
+}
+
+# ── Subcommand: status ───────────────────────────────────────────────────
+cmd_status() {
+    step "Status snapshot — $MINIMAC_HOST"
+
+    # L1 Tailscale
+    if _check_tailscale; then ok "Tailscale reachable ($MINIMAC_IP)"
+    else die "Tailscale NOT reachable ($MINIMAC_IP)"; fi
+
+    # L2 SSH
+    if _check_ssh; then ok "SSH key authorised"
+    else die "SSH cannot reach $MINIMAC_HOST"; fi
+
+    # L3 single remote snapshot — one SSH round-trip covers everything.
+    local snapshot
+    snapshot="$(ssh -T "$MINIMAC_HOST" \
+        "INSTALL_DIR='$INSTALL_DIR' LAUNCH_LABEL='$LAUNCH_LABEL' bash -s" <<'REMOTE'
+set -u
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"
+INSTALL_PATH="$HOME/$INSTALL_DIR"
+VENV="$INSTALL_PATH/.venv"
+PLIST="$HOME/Library/LaunchAgents/$LAUNCH_LABEL.plist"
+ENV_FILE="$HOME/.gitoma/.env"
+
+# Service state via launchctl list (col 1 = PID-or-"-", col 3 = label)
+SVC_LINE="$(launchctl list 2>/dev/null | awk -v L="$LAUNCH_LABEL" '$3==L {print}')"
+if [ -n "$SVC_LINE" ]; then
+    SVC_PID="$(echo "$SVC_LINE" | awk '{print $1}')"
+    SVC_EXIT="$(echo "$SVC_LINE" | awk '{print $2}')"
+    echo "SERVICE=loaded"
+    echo "PID=$SVC_PID"
+    echo "LAST_EXIT=$SVC_EXIT"
+    if [ "$SVC_PID" != "-" ] && [ -n "$SVC_PID" ]; then
+        UPTIME="$(ps -o etime= -p "$SVC_PID" 2>/dev/null | xargs || true)"
+        echo "UPTIME=${UPTIME:-unknown}"
+    fi
+else
+    echo "SERVICE=not_loaded"
+fi
+
+# Python + gitoma version
+if [ -x "$VENV/bin/python" ]; then
+    PY_VER="$("$VENV/bin/python" --version 2>&1 | awk '{print $2}')"
+    echo "PYTHON=$PY_VER"
+    GITOMA_VER="$(cd /tmp && "$VENV/bin/python" -c 'import gitoma;print(gitoma.__version__)' 2>/dev/null || echo unknown)"
+    echo "GITOMA=$GITOMA_VER"
+else
+    echo "VENV=missing"
+fi
+
+# Credentials / env surface
+[ -f "$HOME/.gitoma/runtime_token" ] && echo "RUNTIME_TOKEN=present" || echo "RUNTIME_TOKEN=missing"
+if grep -q '^GITHUB_TOKEN=..' "$ENV_FILE" 2>/dev/null; then
+    echo "GITHUB_TOKEN=set"
+else
+    echo "GITHUB_TOKEN=missing"
+fi
+
+# Source tree + logs
+if [ -d "$INSTALL_PATH" ]; then
+    SRC_HEAD="$(cd "$INSTALL_PATH" && cat gitoma/__init__.py 2>/dev/null | head -20 | grep -i '__version__' | head -1 | sed 's/.*= *//')"
+    echo "SRC_INIT_VERSION=${SRC_HEAD:-unknown}"
+fi
+[ -f "$HOME/gitoma.log" ] && echo "LOG_BYTES=$(wc -c < "$HOME/gitoma.log" | tr -d ' ')"
+[ -f "$HOME/gitoma.err.log" ] && echo "ERR_BYTES=$(wc -c < "$HOME/gitoma.err.log" | tr -d ' ')"
+[ -f "$PLIST" ] && echo "PLIST_MTIME=$(stat -f '%Sm' "$PLIST" 2>/dev/null || echo unknown)"
+REMOTE
+)"
+
+    # Parse + pretty-print the KEY=VALUE snapshot
+    local service pid last_exit uptime python gitoma rt_token gh_token log_bytes err_bytes plist_mtime
+    service="$(echo "$snapshot" | awk -F= '/^SERVICE=/{print $2}')"
+    pid="$(echo "$snapshot" | awk -F= '/^PID=/{print $2}')"
+    last_exit="$(echo "$snapshot" | awk -F= '/^LAST_EXIT=/{print $2}')"
+    uptime="$(echo "$snapshot" | awk -F= '/^UPTIME=/{print $2}')"
+    python="$(echo "$snapshot" | awk -F= '/^PYTHON=/{print $2}')"
+    gitoma="$(echo "$snapshot" | awk -F= '/^GITOMA=/{print $2}')"
+    rt_token="$(echo "$snapshot" | awk -F= '/^RUNTIME_TOKEN=/{print $2}')"
+    gh_token="$(echo "$snapshot" | awk -F= '/^GITHUB_TOKEN=/{print $2}')"
+    log_bytes="$(echo "$snapshot" | awk -F= '/^LOG_BYTES=/{print $2}')"
+    err_bytes="$(echo "$snapshot" | awk -F= '/^ERR_BYTES=/{print $2}')"
+    plist_mtime="$(echo "$snapshot" | awk -F= '/^PLIST_MTIME=/{print $2}')"
+
+    # Service block
+    if [[ "$service" == "loaded" ]]; then
+        local exit_flag=""
+        [[ "$last_exit" != "0" && "$last_exit" != "-" ]] && exit_flag=" ${Y}(last exit: $last_exit)${RESET}"
+        if [[ "$pid" == "-" ]] || [[ -z "$pid" ]]; then
+            warn "launchd: loaded but process NOT running${exit_flag} — KeepAlive will retry"
+        else
+            ok "launchd: loaded, pid $pid, uptime ${uptime:-?}${exit_flag}"
+        fi
+    else
+        warn "launchd: NOT loaded"
+    fi
+
+    # Versions
+    [[ -n "$python" ]] && ok "python: $python" || warn "python: venv missing"
+    [[ -n "$gitoma" ]] && ok "gitoma: v$gitoma (installed)" || warn "gitoma: import failed"
+
+    # HTTP probe
+    if _check_http; then
+        ok "http: $URL/docs answers"
+    else
+        warn "http: $URL/docs unreachable (service port blocked?)"
+    fi
+
+    # Credentials
+    [[ "$rt_token" == "present" ]] && ok "runtime_token: present" || warn "runtime_token: missing"
+    [[ "$gh_token" == "set" ]]    && ok "GITHUB_TOKEN: set in .env" || warn "GITHUB_TOKEN: missing in .env"
+
+    # Housekeeping
+    info "plist mtime: ${plist_mtime:-?}"
+    info "log sizes:   out=${log_bytes:-0}B, err=${err_bytes:-0}B"
+    info "URL:         $URL"
+}
+
+# ── Subcommand: start / stop / restart ───────────────────────────────────
+cmd_start() {
+    step "Starting service"
+    ssh -T "$MINIMAC_HOST" "launchctl load ~/Library/LaunchAgents/${LAUNCH_LABEL}.plist 2>&1" | sed 's/^/  /'
+    if _wait_for_http 15; then ok "Cockpit reachable at $URL"
+    else warn "Service loaded but HTTP not green yet — run: deploy/minimac status"; fi
+}
+cmd_stop() {
+    step "Stopping service"
+    ssh -T "$MINIMAC_HOST" "launchctl unload ~/Library/LaunchAgents/${LAUNCH_LABEL}.plist 2>&1" | sed 's/^/  /' || true
+    ok "Service unloaded"
+}
+cmd_restart() {
+    cmd_stop
+    sleep 1
+    cmd_start
+}
+
+# ── Subcommand: logs ─────────────────────────────────────────────────────
+cmd_logs() {
+    local follow=0 lines=60
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--follow) follow=1; shift ;;
+            -n) lines="$2"; shift 2 ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+    if [[ $follow -eq 1 ]]; then
+        info "Following logs (Ctrl-C to stop)"
+        ssh -t "$MINIMAC_HOST" \
+            "tail -n ${lines} -f \$HOME/gitoma.log \$HOME/gitoma.err.log 2>/dev/null"
+    else
+        ssh -T "$MINIMAC_HOST" \
+            "echo '── stdout ──'; tail -n ${lines} \$HOME/gitoma.log 2>/dev/null; echo; echo '── stderr ──'; tail -n ${lines} \$HOME/gitoma.err.log 2>/dev/null"
+    fi
+}
+
+# ── Subcommand: token ────────────────────────────────────────────────────
+cmd_token() {
+    local tok
+    tok="$(_remote_token)"
+    if [[ -n "$tok" ]]; then
+        printf "%s\n" "$tok"
+    else
+        die "No runtime_token on $MINIMAC_HOST — is the service running? deploy/minimac status"
+    fi
+}
+
+# ── Subcommand: rotate-token ─────────────────────────────────────────────
+cmd_rotate_token() {
+    step "Rotating runtime token"
+    ssh -T "$MINIMAC_HOST" "
+        rm -f \$HOME/.gitoma/runtime_token
+        launchctl unload \$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist 2>/dev/null || true
+        launchctl load \$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist
+    "
+    ok "Service reloaded, waiting for new token…"
+    _wait_for_http 15 || warn "HTTP not green yet — status shortly"
+    sleep 1
+    local tok
+    tok="$(_remote_token)"
+    if [[ -n "$tok" ]]; then
+        printf "  new token: %s%s%s\n" "$BOLD" "$tok" "$RESET"
+        printf "  %sRe-paste into the cockpit Settings dialog%s\n" "$Y" "$RESET"
+    else
+        die "New token not produced — check logs"
+    fi
+}
+
+# ── Subcommand: health ───────────────────────────────────────────────────
+# Hits /api/v1/health with the bearer. Goes beyond the plain "HTTP
+# answers" check in `status` — confirms the agent itself can reach LM
+# Studio and sees GITHUB_TOKEN in its config.
+cmd_health() {
+    local tok
+    tok="$(_remote_token)"
+    if [[ -z "$tok" ]]; then
+        die "No runtime token available (service running? deploy/minimac status)"
+    fi
+    step "Health probe"
+    local body status
+    body="$(curl -sS --max-time 5 \
+        -H "Authorization: Bearer $tok" \
+        -w "\n__HTTP_STATUS=%{http_code}" \
+        "${URL}/api/v1/health" 2>&1)" || true
+    status="$(echo "$body" | awk -F= '/^__HTTP_STATUS=/{print $2}')"
+    body="$(echo "$body" | grep -v '^__HTTP_STATUS=')"
+
+    case "$status" in
+        200)
+            # Pretty-print a subset; full payload dumped below for ops.
+            local lm_level lm_msg gh_set
+            lm_level="$(echo "$body" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('lm_studio',{}).get('level','?'))" 2>/dev/null || echo "?")"
+            lm_msg="$(echo "$body" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('lm_studio',{}).get('message','?'))" 2>/dev/null || echo "?")"
+            gh_set="$(echo "$body" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('github_token_set',False))" 2>/dev/null || echo "?")"
+            case "$lm_level" in
+                ok)    ok "LM Studio: $lm_msg" ;;
+                warn)  warn "LM Studio: $lm_msg" ;;
+                *)     warn "LM Studio: [$lm_level] $lm_msg" ;;
+            esac
+            if [[ "$gh_set" == "True" ]]; then
+                ok "GITHUB_TOKEN: visible to the agent"
+            else
+                warn "GITHUB_TOKEN: NOT visible to the agent — add it to ~/.gitoma/.env"
+            fi
+            info "Full payload: $body"
+            ;;
+        503)
+            die "Server 503 — GITOMA_API_TOKEN missing server-side (shouldn't happen after deploy)"
+            ;;
+        401|403)
+            die "Auth rejected — runtime_token on disk may not match the server's cached value. Try: deploy/minimac restart"
+            ;;
+        000|"")
+            die "HTTP unreachable (is the service up? deploy/minimac status)"
+            ;;
+        *)
+            die "HTTP $status — body: $body"
+            ;;
+    esac
+}
+
+# ── Subcommand: config set KEY=VALUE ─────────────────────────────────────
+# Safe upsert of a single key in the remote ~/.gitoma/.env. Replaces the
+# line if the key already exists (unlike the `upsert` helper inside the
+# deploy payload, which only appends); re-runs the service so the new
+# value takes effect on the next request.
+cmd_config() {
+    local sub="${1:-}"
+    shift || true
+    case "$sub" in
+        set) ;;
+        *)   die "usage: deploy/minimac config set KEY=VALUE" ;;
+    esac
+    local kv="${1:-}"
+    [[ -z "$kv" ]] && die "usage: deploy/minimac config set KEY=VALUE"
+    [[ "$kv" == *=* ]] || die "must be KEY=VALUE (got: $kv)"
+    local key="${kv%%=*}"
+    local val="${kv#*=}"
+    [[ -n "$key" ]] || die "empty KEY in $kv"
+
+    step "Setting $key on remote ~/.gitoma/.env"
+    # Atomic upsert: drop any existing line for the key, append the new
+    # KEY=VALUE. ``< /dev/null`` keeps ssh from consuming OUR stdin — the
+    # read-y/N prompt below needs stdin to be intact, so a piped invocation
+    # like ``echo y | deploy/minimac config set K=V`` actually reaches the
+    # read, not ssh's stdin-inheritance swallowing the answer.
+    ssh -T "$MINIMAC_HOST" "
+        F=\$HOME/.gitoma/.env
+        touch \$F && chmod 600 \$F
+        if grep -q '^${key}=' \$F; then
+            tmp=\$(mktemp) && grep -v '^${key}=' \$F > \$tmp && mv \$tmp \$F
+            echo '${key}=${val}' >> \$F
+            echo '  updated'
+        else
+            echo '${key}=${val}' >> \$F
+            echo '  appended'
+        fi
+    " < /dev/null
+    ok "Key '$key' set"
+    warn "Runtime-relevant keys require a service restart to take effect"
+    printf "  Run now? [y/N] "
+    local reply
+    read -r reply
+    if [[ "${reply:-}" =~ ^[Yy]$ ]]; then
+        cmd_restart
+    else
+        info "Remember: deploy/minimac restart"
+    fi
+}
+
+# ── Subcommand: open ─────────────────────────────────────────────────────
+# Pop the cockpit URL in the default browser. macOS-only (uses `open`).
+cmd_open() {
+    if ! command -v open >/dev/null 2>&1; then
+        die "'open' command not available — run manually: $URL"
+    fi
+    info "Opening $URL"
+    exec open "$URL"
+}
+
+# ── Subcommand: env ──────────────────────────────────────────────────────
+# Prints the keys in the remote ~/.gitoma/.env with their values masked
+# (first 3 chars + length indicator). Safe to paste into a screenshot.
+cmd_env() {
+    step "Remote ~/.gitoma/.env"
+    local content
+    content="$(ssh -T "$MINIMAC_HOST" '
+        F="$HOME/.gitoma/.env"
+        [ -f "$F" ] || { echo "ABSENT"; exit 0; }
+        # shellcheck disable=SC2016
+        awk -F= "
+            /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+            /^[[:alnum:]_]+=/ {
+                k = \$1
+                v = substr(\$0, index(\$0, \"=\") + 1)
+                len = length(v)
+                head = substr(v, 1, 3)
+                printf \"%s = %s… (%d chars)\n\", k, head, len
+            }
+            !/^[[:alnum:]_]+=/ && !/^[[:space:]]*#/ && !/^[[:space:]]*$/ {
+                printf \"%s MALFORMED LINE (no KEY=): %d chars\n\", \"!!\", length(\$0)
+            }
+        " "$F"
+    ')"
+    if [[ "$content" == "ABSENT" ]]; then
+        warn "~/.gitoma/.env not found on remote"
+        return 1
+    fi
+    echo "$content" | while IFS= read -r line; do
+        printf "  %s\n" "$line"
+    done
+    echo
+    info "Edit via: deploy/minimac ssh 'echo KEY=VALUE >> ~/.gitoma/.env'"
+    info "Then:     deploy/minimac restart   (if it's a runtime-relevant key)"
+}
+
+# ── Subcommand: ssh ──────────────────────────────────────────────────────
+cmd_ssh() {
+    # Use -t only when we actually have a terminal — otherwise SSH prints
+    # "Pseudo-terminal will not be allocated because stdin is not a terminal"
+    # which clutters scripted / piped use.
+    if [[ -t 0 && -t 1 ]]; then
+        exec ssh -t "$MINIMAC_HOST" "$@"
+    else
+        exec ssh "$MINIMAC_HOST" "$@"
+    fi
+}
+
+# ── Subcommand: uninstall ────────────────────────────────────────────────
+cmd_uninstall() {
+    warn "This removes:  launchd plist · venv · runtime_token · source tree · logs"
+    warn "It KEEPS:      ~/.gitoma/.env (contains your GITHUB_TOKEN — delete by hand if wanted)"
+    printf "  Proceed? [y/N] "
+    local reply
+    read -r reply
+    [[ "${reply:-}" =~ ^[Yy]$ ]] || die "Aborted"
+
+    ssh -T "$MINIMAC_HOST" "
+        launchctl unload \$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist 2>/dev/null || true
+        rm -f \$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist
+        rm -rf \$HOME/$INSTALL_DIR
+        rm -f \$HOME/.gitoma/runtime_token
+        rm -f \$HOME/gitoma.log \$HOME/gitoma.err.log
+        echo '  Removed: plist, source tree, venv, runtime_token, logs'
+    "
+    ok "Uninstalled"
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────
+usage() {
+    sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift || true
+
+case "$cmd" in
+    deploy)         cmd_deploy "$@" ;;
+    status)         cmd_status "$@" ;;
+    start)          cmd_start ;;
+    stop)           cmd_stop ;;
+    restart)        cmd_restart ;;
+    logs)           cmd_logs "$@" ;;
+    token)          cmd_token ;;
+    rotate-token)   cmd_rotate_token ;;
+    env)            cmd_env ;;
+    config)         cmd_config "$@" ;;
+    health)         cmd_health ;;
+    open)           cmd_open ;;
+    ssh)            cmd_ssh "$@" ;;
+    uninstall)      cmd_uninstall ;;
+    ""|help|-h|--help) usage ;;
+    *)              printf "%sFAIL%s unknown command: %s\n\n" "$R" "$RESET" "$cmd" >&2; usage; exit 1 ;;
+esac
