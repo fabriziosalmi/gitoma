@@ -227,6 +227,13 @@ class LLMClient:
         self._config = config
         # Build the client lazily to avoid import-time failures
         self._client = self._build_client()
+        # Last call's token usage, populated by chat() on success.
+        # First step of M2 cost telemetry — callers (critic panel for
+        # now, eventually trace events for every call) read this
+        # immediately after chat() returns. Tuple of
+        # (prompt_tokens, completion_tokens), or None when the
+        # backend did not report usage on the last call.
+        self._last_usage: tuple[int, int] | None = None
 
     def _build_client(self) -> "OpenAI":
         try:
@@ -254,12 +261,24 @@ class LLMClient:
         messages: list[dict[str, str]],
         retries: int = 3,
         retry_delay: float = 2.0,
+        *,
+        temperature: float | None = None,
     ) -> str:
         """
         Send a chat completion request. Returns the raw text response.
 
+        ``temperature`` is keyword-only — when provided overrides the
+        config default for this single call (e.g. critic panel wants
+        deterministic-ish reviews without changing global config).
+
         Retries on transient connection/timeout errors with exponential backoff.
         Raises LLMError on unrecoverable failures.
+
+        After every successful call, ``self._last_usage`` is set to a
+        ``(prompt_tokens, completion_tokens)`` tuple if the backend
+        reported usage, else ``None``. The tuple is the first step
+        toward project-wide cost telemetry (M2) — the critic panel
+        already reads it; the rest of the codebase will follow.
         """
         from openai import (
             APIConnectionError,
@@ -275,11 +294,28 @@ class LLMClient:
                 response = self._client.chat.completions.create(
                     model=self.model,
                     messages=messages,  # type: ignore[arg-type]
-                    temperature=self._config.lmstudio.temperature,
+                    temperature=(
+                        temperature
+                        if temperature is not None
+                        else self._config.lmstudio.temperature
+                    ),
                     max_tokens=self._config.lmstudio.max_tokens,
                 )
                 choice = response.choices[0]
                 content = choice.message.content
+                # Capture token usage for the caller (cost telemetry).
+                # Some self-hosted OpenAI-compat backends omit ``.usage``;
+                # we tolerate that with None.
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    pt = getattr(usage, "prompt_tokens", None)
+                    ct = getattr(usage, "completion_tokens", None)
+                    if pt is not None and ct is not None:
+                        self._last_usage = (int(pt), int(ct))
+                    else:
+                        self._last_usage = None
+                else:
+                    self._last_usage = None
                 if content is None:
                     raise LLMError("LLM returned an empty response (content=None)")
                 # OpenAI-compatible APIs (LM Studio included) report why the
