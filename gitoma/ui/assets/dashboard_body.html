@@ -182,7 +182,25 @@
           <span class="age" id="current-op-age">—</span>
         </div>
         <div class="card-actions">
-          <button id="reset-btn" class="btn btn--sm" disabled>
+          <!-- Resume: primary action for a non-terminal or orphaned
+               run. Hidden when the current repo is missing / DONE /
+               pre-run state. Wired by renderActions() + the listener
+               in wireRepoActions() (dashboard.js). -->
+          <button id="resume-btn" class="btn btn--primary btn--sm" hidden
+                  aria-label="Resume this run from the last checkpoint"
+                  title="Continue from where the prior run left off">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-play"/></svg>
+            Resume
+          </button>
+          <button id="rerun-btn" class="btn btn--sm" hidden
+                  aria-label="Delete state and run again"
+                  title="Clear the saved state and start a fresh run">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-play"/></svg>
+            Run again
+          </button>
+          <button id="reset-btn" class="btn btn--sm" disabled
+                  aria-label="Delete this repo's saved state"
+                  title="Remove ~/.gitoma/state/<slug>.json (no run)">
             <svg class="icon" aria-hidden="true" focusable="false"><use href="#icon-trash"/></svg>
             Reset state
           </button>

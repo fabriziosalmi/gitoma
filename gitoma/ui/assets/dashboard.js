@@ -148,8 +148,17 @@ const API = {
     }
     return data;
   },
-  run(repoUrl, { branch = "", dryRun = false } = {}) {
-    return this._fetch("POST", "/run", { repo_url: repoUrl, branch: branch || null, dry_run: !!dryRun });
+  run(repoUrl, { branch = "", dryRun = false, resume = false, reset = false } = {}) {
+    // resume and reset are mutually exclusive (server validates too).
+    // Leaving branch null on resume lets the CLI reuse the saved branch
+    // name from state instead of creating a new one — the whole point.
+    return this._fetch("POST", "/run", {
+      repo_url: repoUrl,
+      branch: branch || null,
+      dry_run: !!dryRun,
+      resume: !!resume,
+      reset: !!reset,
+    });
   },
   analyze(repoUrl) { return this._fetch("POST", "/analyze", { repo_url: repoUrl }); },
   review(repoUrl, integrate) { return this._fetch("POST", "/review", { repo_url: repoUrl, integrate: !!integrate }); },
@@ -655,6 +664,8 @@ function renderDetail(state) {
     keys.forEach((k) => ($("info-" + k).textContent = "—"));
     renderPipeline("IDLE");
     $("reset-btn").disabled = true;
+    $("resume-btn").hidden = true;
+    $("rerun-btn").hidden = true;
     $("current-op-row").hidden = true;
     $("task-plan-card").hidden = true;
     return;
@@ -696,6 +707,25 @@ function renderDetail(state) {
   }
 
   renderPipeline(state.phase);
+  // Action buttons: Resume / Run again / Reset state.
+  //
+  // Resume is the primary recovery path for a non-terminal phase or an
+  // orphaned run. We hide it when the run is DONE (nothing to pick up)
+  // or when there is no state at all (handled by the early return above).
+  //
+  // Run again is for DONE runs — user wants to re-plan on the same
+  // repo. It wipes state first (server-side --reset) and runs fresh.
+  //
+  // Reset state is always available when a state exists: a pure delete,
+  // no dispatch. Useful for "I don't want gitoma touching this repo
+  // anymore", or to clear a half-broken state before a fresh Run.
+  const phase = state.phase || "IDLE";
+  const nonTerminal = phase !== "DONE";
+  const orphaned = !!state.is_orphaned;
+  $("resume-btn").hidden = !(nonTerminal || orphaned);
+  $("resume-btn").disabled = false;
+  $("rerun-btn").hidden = !(phase === "DONE" && !orphaned);
+  $("rerun-btn").disabled = false;
   $("reset-btn").disabled = false;
   renderCurrentOp(state);
   renderTaskPlan(state);
@@ -1457,6 +1487,46 @@ function wireRepoList() {
   });
 }
 
+// Dispatch a resumed run for the currently-selected repo. Uses the
+// persisted ``repo_url`` so the server-side CLI finds the existing
+// state file and reuses its phase/plan/branch. No dialog — Resume is
+// the obvious recovery action for an orphaned run, so we don't ask
+// "are you sure" for it (mirrors how the Run tile dispatches directly
+// after the URL/branch dialog closes).
+function dispatchResumeRun() {
+  const s = Store.current;
+  if (!s || !s.repo_url) return;
+  requireToken(() => {
+    submitCommand(
+      `Resume ${s.owner}/${s.name}`,
+      () => API.run(s.repo_url, { resume: true }),
+    );
+  });
+}
+
+// "Run again" is destructive because it deletes the existing state
+// file. Worth a confirm dialog — same UX as the Reset-state dialog
+// (it's essentially reset + dispatch).
+function confirmAndRunAgain() {
+  const s = Store.current;
+  if (!s || !s.repo_url) return;
+  $("confirm-title").textContent = "Run again (fresh)?";
+  $("confirm-body").textContent =
+    `Delete the persisted state for ${s.owner}/${s.name} and run the full pipeline again from scratch? ` +
+    `The existing PR/branch (if any) is NOT touched — only the local state file.`;
+  $("confirm-ok").textContent = "Reset state + Run";
+  $("confirm-ok").className = "btn btn--primary btn--sm";
+  window.__confirmAction = () => {
+    requireToken(() => {
+      submitCommand(
+        `Run-again ${s.owner}/${s.name}`,
+        () => API.run(s.repo_url, { reset: true }),
+      );
+    });
+  };
+  openDialog("confirm-dialog");
+}
+
 function confirmAndReset() {
   const s = Store.current;
   if (!s) return;
@@ -1500,6 +1570,8 @@ function init() {
   });
   $("jobs-badge").addEventListener("click", refreshJobs);
   $("reset-btn").addEventListener("click", confirmAndReset);
+  $("resume-btn").addEventListener("click", dispatchResumeRun);
+  $("rerun-btn").addEventListener("click", confirmAndRunAgain);
   $("log-close").addEventListener("click", () => LogStream.hide());
   $("log-stop").addEventListener("click", () => LogStream.stop());
 

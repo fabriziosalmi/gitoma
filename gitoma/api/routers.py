@@ -91,6 +91,16 @@ class RunRequest(BaseModel):
         description="Feature branch name; validated against git ref-format rules.",
     )
     dry_run: bool = False
+    # Resume picks up where a previous run left off (state file must
+    # exist on disk). The CLI's --resume re-uses the saved branch and
+    # skips analyze / plan / already-completed subtasks. No-op if no
+    # state is present, so safe to pass defensively from the cockpit.
+    resume: bool = False
+    # Reset deletes the persisted state file before starting, giving a
+    # clean slate. Useful when an orphaned run is unrecoverable or the
+    # user wants to re-plan from scratch on a repo that already has a
+    # state snapshot. Mutually exclusive with ``resume``.
+    reset: bool = False
 
     @field_validator("repo_url")
     @classmethod
@@ -109,6 +119,16 @@ class RunRequest(BaseModel):
             return None
         if not _BRANCH_RE.match(v):
             raise ValueError("branch does not look like a valid git ref")
+        return v
+
+    @field_validator("reset")
+    @classmethod
+    def _mutually_exclusive(cls, v: bool, info) -> bool:  # type: ignore[no-untyped-def]
+        # Pydantic v2 passes ``info`` with already-validated fields in
+        # ``info.data``. ``resume`` is declared above, so it's populated
+        # here regardless of field order in the JSON body.
+        if v and info.data.get("resume"):
+            raise ValueError("resume and reset are mutually exclusive")
         return v
 
 
@@ -751,15 +771,36 @@ async def health_check() -> HealthResponse:
     responses={422: {"description": "Invalid repo_url or branch"}},
 )
 async def trigger_agent_run(req: RunRequest, request: Request) -> JobResponse:
-    """Trigger a full autonomous run pipeline (Analyzer → Planner → Worker → PR)."""
+    """Trigger a full autonomous run pipeline (Analyzer → Planner → Worker → PR).
+
+    Supports ``resume`` and ``reset`` to let the cockpit recover from an
+    orphaned state file without the user having to drop to the CLI. The
+    two flags are mutually exclusive (validated in :class:`RunRequest`):
+
+    * ``resume``: pass ``--resume`` to the CLI — picks up from the saved
+      phase (analysis/plan are re-used, worker skips completed subtasks,
+      PR reuses ``state.pr_number`` if already open).
+    * ``reset``: pass ``--reset`` — deletes ``~/.gitoma/state/<slug>.json``
+      before starting. Fresh plan on a repo that already had one.
+    """
     await _enforce_dispatch_rate_limit(request)
     argv = [*_gitoma_cli_argv(), "run", req.repo_url, "--yes"]
     if req.branch:
         argv += ["--branch", req.branch]
     if req.dry_run:
         argv.append("--dry-run")
-    job = await _dispatch("run", argv)
-    return JobResponse(job_id=job.id, status="started", message="Autonomous run dispatched in background.")
+    if req.resume:
+        argv.append("--resume")
+    if req.reset:
+        argv.append("--reset")
+    label = "run-resume" if req.resume else "run-reset" if req.reset else "run"
+    job = await _dispatch(label, argv)
+    msg = (
+        "Resuming autonomous run from last checkpoint." if req.resume else
+        "Fresh autonomous run — existing state will be deleted." if req.reset else
+        "Autonomous run dispatched in background."
+    )
+    return JobResponse(job_id=job.id, status="started", message=msg)
 
 
 @router.post(
