@@ -408,10 +408,16 @@ def run(
                 state.current_operation = f"Planning with {config.lmstudio.model}"
                 save_state(state)
                 file_tree = git_repo.file_tree(max_files=100)
+                # Deterministic repo-wide brief (title, stack, build/test
+                # commands, CI tools) — computed once, injected into the
+                # planner prompt as shared ground truth. Silent on empty
+                # repos (every field tolerated as None / []).
+                from gitoma.context import extract_brief
+                repo_brief = extract_brief(git_repo.root)
                 planner = PlannerAgent(llm)
 
                 try:
-                    plan = planner.plan(report, file_tree)
+                    plan = planner.plan(report, file_tree, repo_brief=repo_brief)
                 except LLMError as e:
                     # LLM-specific error — give actionable hint
                     console.print(

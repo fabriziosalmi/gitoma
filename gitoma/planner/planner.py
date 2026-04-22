@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from gitoma.analyzers.base import MetricReport
+from gitoma.context import RepoBrief
 from gitoma.planner.llm_client import LLMClient
 from gitoma.planner.prompts import planner_system_prompt, planner_user_prompt
 from gitoma.planner.task import SubTask, Task, TaskPlan
@@ -16,13 +17,22 @@ class PlannerAgent:
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
 
-    def plan(self, report: MetricReport, file_tree: list[str]) -> TaskPlan:
+    def plan(
+        self,
+        report: MetricReport,
+        file_tree: list[str],
+        repo_brief: RepoBrief | None = None,
+    ) -> TaskPlan:
         """
         Generate a TaskPlan from a MetricReport.
 
         Args:
             report: the full metric analysis report
             file_tree: list of relative file paths in the repo
+            repo_brief: optional deterministic repo-wide brief
+                (title, stack, build/test commands, CI tools, …) — when
+                provided, it is injected at the top of the planner prompt
+                so every LLM call has shared ground truth about the project
 
         Returns:
             TaskPlan with prioritized tasks and subtasks
@@ -31,7 +41,9 @@ class PlannerAgent:
             {"role": "system", "content": planner_system_prompt()},
             {
                 "role": "user",
-                "content": planner_user_prompt(report, file_tree, report.languages),
+                "content": planner_user_prompt(
+                    report, file_tree, report.languages, repo_brief=repo_brief
+                ),
             },
         ]
 

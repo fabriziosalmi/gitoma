@@ -3,7 +3,26 @@
 from __future__ import annotations
 
 from gitoma.analyzers.base import MetricReport
+from gitoma.context import RepoBrief, render_brief
 from gitoma.worker.patcher import denylist_summary
+
+
+# Build-system manifests: files whose bytes are parsed deterministically
+# by a build toolchain. Any malformed edit here breaks the ENTIRE project
+# before any unit test can fire (caught live on rung-1 v2: worker
+# inserted Python-style ``#`` comments into go.mod and corrupted the
+# build). The planner must never propose these when the intent is
+# "fix a compile error elsewhere". Intersect-with-on-error-path logic
+# stays with the worker / patcher, not the planner.
+_BUILD_MANIFESTS = (
+    "go.mod", "go.sum",
+    "Cargo.toml", "Cargo.lock",
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "requirements-dev.txt",
+    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "Gemfile", "Gemfile.lock",
+    "composer.json", "composer.lock",
+    "build.gradle", "build.gradle.kts", "pom.xml",
+)
 
 
 def planner_system_prompt() -> str:
@@ -15,7 +34,12 @@ def planner_system_prompt() -> str:
     )
 
 
-def planner_user_prompt(report: MetricReport, file_tree: list[str], languages: list[str]) -> str:
+def planner_user_prompt(
+    report: MetricReport,
+    file_tree: list[str],
+    languages: list[str],
+    repo_brief: RepoBrief | None = None,
+) -> str:
     metrics_summary = "\n".join(
         f"- {m.display_name}: score={m.score:.2f} status={m.status} | {m.details}"
         + (
@@ -29,10 +53,38 @@ def planner_user_prompt(report: MetricReport, file_tree: list[str], languages: l
     tree_sample = "\n".join(file_tree[:60])
     langs = ", ".join(languages) if languages else "Unknown"
 
+    brief_block = ""
+    if repo_brief is not None:
+        brief_block = f"\n{render_brief(repo_brief)}\n"
+
+    # Build Integrity status drives the compile-fix mode — an extra
+    # constraint block we inject when the project does not compile.
+    build_integrity_fail = any(
+        m.name == "build" and m.status == "fail" for m in report.metrics
+    )
+    compile_fix_block = ""
+    if build_integrity_fail:
+        manifests = ", ".join(f"`{m}`" for m in _BUILD_MANIFESTS)
+        compile_fix_block = f"""
+COMPILE-FIX MODE ACTIVE (Build Integrity = fail). Until the build is green:
+  * FORBIDDEN file_hints (do NOT emit subtasks that edit these):
+    {manifests}
+    These are build-system manifests — any malformed edit breaks the
+    whole project silently. The only exception is when the build error
+    itself points AT one of these files (e.g., "missing module in go.mod"
+    — even then, prefer a surgical "add missing line" subtask, not a
+    full rewrite).
+  * Your plan should be at most 2 tasks: T001 = fix the compile errors,
+    optionally T002 = one follow-up if there's a closely-related issue.
+    All cosmetic / scaffolding work (LICENSE, CONTRIBUTING, lint config,
+    docs structure, CI workflows, dep audits) is DEFERRED until T001
+    passes and the build is green.
+"""
+
     return f"""Repository: {report.repo_url}
 Languages: {langs}
 Overall score: {report.overall_score:.2f}/1.0
-
+{brief_block}
 == METRIC REPORT ==
 {metrics_summary}
 
@@ -53,6 +105,7 @@ cosmetic / scaffolding tasks (LICENSE, CONTRIBUTING, lint config, docs
 structure, CI workflows) while the build is failing — a project that
 does not compile cannot benefit from any of those. Emit them only once
 the build is green.
+{compile_fix_block}
 
 Respond with ONLY this JSON schema (no extra text):
 {{
