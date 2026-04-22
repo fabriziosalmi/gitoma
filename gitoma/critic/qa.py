@@ -139,9 +139,17 @@ unified-diff string and Pydantic rejected it):
       {
         "action": "modify",
         "path": "src/db.py",
-        "content": "# full file content here, every line, including untouched ones\\nimport sqlite3\\n\\n... rest of the file with your fix merged in ..."
+        "content": "import sqlite3\\n\\ndef get_conn():\\n    return sqlite3.connect(':memory:')\\n\\n... every other function fully written out, no placeholders ..."
       }
     ]
+
+  ALSO WRONG (the placeholder trap — caught live rung-3 v5):
+    "content": "import sqlite3\\n\\n# ... (rest of file content)\\n\\ndef find_user_by_name(...):\\n    ..."
+
+  When the LLM writes ``# ... (rest of file content)`` or any
+  ``# omitted`` / ``...`` placeholder, that LITERAL TEXT replaces the
+  file. Every untouched function disappears. Tests import-fail.
+  ALWAYS write every function, every line, no shortcuts.
 
 Schema:
 {

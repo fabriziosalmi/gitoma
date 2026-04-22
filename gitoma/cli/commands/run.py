@@ -44,7 +44,11 @@ def _qa_run_tests(root: "_Path") -> tuple[bool, str]:
     if has_gomod:
         return _run(["go", "test", "./..."])
     if has_py:
-        return _run(["python", "-m", "pytest", "-q", "--no-header"])
+        # Use sys.executable so the test runner uses the SAME interpreter
+        # that's running gitoma — avoids the silent ``python not in PATH``
+        # soft-pass that masked a broken Q&A revision on rung-3 v5.
+        import sys as _sys
+        return _run([_sys.executable, "-m", "pytest", "-q", "--no-header"])
     if has_npm:
         return _run(["npm", "test", "--silent"])
     return True, "skipped (no recognised test framework)"
