@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from typing import Callable
 
+import os
+
 from gitoma.core.config import Config
 from gitoma.core.repo import GitRepo
 from gitoma.core.state import AgentState, save_state
 from gitoma.core.trace import current as current_trace
 from gitoma.critic import CriticPanel, PanelResult
+from gitoma.critic.antislop import (
+    Rule as AntislopRule,
+    classify_for_subtask as antislop_classify,
+    format_for_injection as antislop_format,
+    load_rules as antislop_load_rules,
+)
 from gitoma.planner.llm_client import LLMClient
 from gitoma.planner.prompts import worker_system_prompt, worker_user_prompt
 from gitoma.planner.task import SubTask, Task, TaskPlan
@@ -40,6 +48,11 @@ class WorkerAgent:
         # fresh-clone test that never touches the panel doesn't pay for an
         # unused object. None until first subtask in a non-off mode.
         self._critic_panel: CriticPanel | None = None
+        # ANTISLOP rules — loaded lazily on first subtask. Cached here so
+        # we don't re-parse the markdown for every subtask. Empty list
+        # means "no ANTISLOP file found / feature off" — injection becomes
+        # a no-op without erroring out.
+        self._antislop_rules: list[AntislopRule] | None = None
 
     def execute(
         self,
@@ -114,8 +127,20 @@ class WorkerAgent:
             if content:
                 current_files[hint] = content
 
+        # ── ANTISLOP injection (iter 5) ──────────────────────────────────
+        # Auto-select 5-15 anti-pattern rules relevant to THIS subtask
+        # and append them to the worker's system prompt as "do not"
+        # rules. Goal: shrink the search space at the source so the
+        # model is less likely to emit slop in the first place.
+        # Off when ANTISLOP_INJECTION=off; auto-on when the file exists
+        # at $PWD/ANTISLOP.md or ~/.gitoma/antislop.md.
+        antislop_block = self._antislop_block_for_subtask(subtask, languages)
+        system_prompt = worker_system_prompt()
+        if antislop_block:
+            system_prompt = system_prompt + "\n\n" + antislop_block
+
         messages = [
-            {"role": "system", "content": worker_system_prompt()},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": worker_user_prompt(
@@ -165,6 +190,63 @@ class WorkerAgent:
         # Commit
         sha = self._committer.commit_patches(touched, commit_msg)
         return sha
+
+    def _antislop_block_for_subtask(
+        self,
+        subtask: SubTask,
+        languages: list[str],
+    ) -> str:
+        """Return the formatted ANTISLOP injection block for this subtask,
+        or empty string when the feature is off / no file present.
+
+        Lazy-loads ``ANTISLOP.md`` on first call. Subsequent subtasks reuse
+        the cached rule list.
+
+        Env vars:
+          * ``ANTISLOP_INJECTION`` — ``off`` disables; any other value
+            (including unset) enables the auto path that loads the file
+            when present and no-ops when absent.
+          * ``ANTISLOP_TOP_N`` — max rules per subtask (default 10).
+        """
+        if os.getenv("ANTISLOP_INJECTION", "auto").strip().lower() == "off":
+            return ""
+        if self._antislop_rules is None:
+            self._antislop_rules = antislop_load_rules()
+        if not self._antislop_rules:
+            return ""
+
+        try:
+            top_n = int(os.getenv("ANTISLOP_TOP_N", "10"))
+        except ValueError:
+            top_n = 10
+
+        # action_hint helps the classifier tighten on what's about to happen
+        action_hint = (subtask.action or "").strip()
+        selected = antislop_classify(
+            rules=self._antislop_rules,
+            file_hints=subtask.file_hints,
+            languages=languages,
+            action_hint=action_hint,
+            top_n=top_n,
+        )
+        if not selected:
+            return ""
+
+        # Trace event for A/B + observability — what was injected, in
+        # what categories, for which subtask.
+        try:
+            current_trace().emit(
+                "antislop.injected",
+                subtask_id=subtask.id,
+                rule_ids=[r.id for r in selected],
+                rule_count=len(selected),
+                top_n=top_n,
+                tags_active=sorted({t for r in selected for t in r.tags}),
+            )
+        except Exception:
+            pass  # trace must never break the worker
+
+        return antislop_format(selected)
 
     def _run_critic_panel(self, subtask: SubTask, touched: list[str]) -> None:
         """Build the diff for the touched files, run the panel, log the result.
