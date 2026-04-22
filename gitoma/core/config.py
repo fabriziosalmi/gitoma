@@ -72,12 +72,29 @@ class CriticPanelConfig:
     # set ``CRITIC_PANEL_PERSONAS=dev`` (env) or override in TOML.
     personas: str = "dev,arch,contributor"
     # Whether the broad-scope "devil's advocate" critic runs once per
-    # subtask after the panel; gated separately because it's the most
-    # expensive call (sees full diff). Disabled by default until the
-    # 3-persona panel is live.
+    # RUN (not per subtask) right before the PR open. Gated separately
+    # because it's the most expensive call by design (sees the FULL
+    # branch diff and is meant to use a bigger model). Iteration 3+.
     devil_advocate: bool = False
     # Override LMStudio temperature for critic calls (deterministic-ish).
     temperature: float = 0.3
+    # ── Multi-model routing (iter 3) ────────────────────────────────────
+    # When set, the panel personas use this model instead of the worker's
+    # default — useful to keep the worker on a fast model and the panel
+    # on a slightly bigger one (or vice versa). Empty means "same as
+    # worker model".
+    panel_model: str = ""
+    # The devil's advocate is meant to be the deepest critic and benefits
+    # most from a larger model (e.g. qwen3.5-9b-sushi-coder-rl-mlx).
+    # Independent of panel_model so you can mix.
+    devil_model: str = ""
+    # If you have a second LM Studio endpoint (e.g. a beefier machine on
+    # the tailnet), point devil_base_url at it. The devil will hit that
+    # URL with a fresh client; the panel + worker keep using lmstudio.base_url.
+    # Empty means "same endpoint as the worker". This is the hook that
+    # enables true parallelism across machines later.
+    devil_base_url: str = ""
+    devil_temperature: float = 0.4
 
 
 @dataclass
@@ -144,6 +161,10 @@ def load_config() -> Config:
         personas=os.getenv("CRITIC_PANEL_PERSONAS", cp_raw.get("personas", _cp_defaults.personas)),
         devil_advocate=_truthy(os.getenv("CRITIC_PANEL_DEVIL", str(cp_raw.get("devil_advocate", _cp_defaults.devil_advocate)))),
         temperature=float(os.getenv("CRITIC_PANEL_TEMPERATURE", cp_raw.get("temperature", _cp_defaults.temperature))),
+        panel_model=os.getenv("CRITIC_PANEL_MODEL", cp_raw.get("panel_model", _cp_defaults.panel_model)),
+        devil_model=os.getenv("CRITIC_PANEL_DEVIL_MODEL", cp_raw.get("devil_model", _cp_defaults.devil_model)),
+        devil_base_url=os.getenv("CRITIC_PANEL_DEVIL_BASE_URL", cp_raw.get("devil_base_url", _cp_defaults.devil_base_url)),
+        devil_temperature=float(os.getenv("CRITIC_PANEL_DEVIL_TEMPERATURE", cp_raw.get("devil_temperature", _cp_defaults.devil_temperature))),
     )
 
     return Config(
@@ -187,6 +208,10 @@ def save_config_value(key: str, value: str) -> None:
         "CRITIC_PANEL_PERSONAS": ("critic_panel", "personas"),
         "CRITIC_PANEL_DEVIL": ("critic_panel", "devil_advocate"),
         "CRITIC_PANEL_TEMPERATURE": ("critic_panel", "temperature"),
+        "CRITIC_PANEL_MODEL": ("critic_panel", "panel_model"),
+        "CRITIC_PANEL_DEVIL_MODEL": ("critic_panel", "devil_model"),
+        "CRITIC_PANEL_DEVIL_BASE_URL": ("critic_panel", "devil_base_url"),
+        "CRITIC_PANEL_DEVIL_TEMPERATURE": ("critic_panel", "devil_temperature"),
         "GITOMA_API_TOKEN": ("api", "token"),
     }
 

@@ -606,6 +606,72 @@ def run(
             raise typer.Exit(1)
 
         # ────────────────────────────────────────────────────────────────────────
+        # PHASE 3.5 — DEVIL'S ADVOCATE (broad-scope critic, iter 3)
+        # ────────────────────────────────────────────────────────────────────────
+        # Runs once per run, AFTER all subtasks committed and BEFORE the PR
+        # opens. Sees the full branch diff (base..HEAD) so it can catch
+        # things the per-subtask panel missed by virtue of seeing slices.
+        # Configured via CRITIC_PANEL_DEVIL=true; uses a separate model +
+        # optional separate endpoint (CRITIC_PANEL_DEVIL_MODEL,
+        # CRITIC_PANEL_DEVIL_BASE_URL) so it can run a bigger model on
+        # a beefier machine without slowing the worker.
+        # Crash-safe: a devil failure is logged, never propagates.
+        if (
+            config.critic_panel.mode != "off"
+            and config.critic_panel.devil_advocate
+        ):
+            try:
+                from gitoma.core.trace import current as _current_trace
+                from gitoma.critic import DevilsAdvocate
+                _trace = _current_trace()
+                _devil_diff = git_repo.repo.git.diff(f"{base_branch}..HEAD")
+                with _trace.span(
+                    "critic_devil.review",
+                    branch=branch,
+                    base=base_branch,
+                    devil_model=config.critic_panel.devil_model or "(same as worker)",
+                    devil_base_url=config.critic_panel.devil_base_url or "(same as worker)",
+                ) as fields:
+                    _devil = DevilsAdvocate(config.critic_panel, llm, config)
+                    _devil_result = _devil.review(
+                        full_branch_diff=_devil_diff,
+                        branch_name=branch,
+                    )
+                    fields["verdict"] = _devil_result.verdict
+                    fields["findings_count"] = len(_devil_result.findings)
+                    fields["has_blocker"] = _devil_result.has_blocker()
+                    if _devil_result.tokens_extra is not None:
+                        fields["prompt_tokens"] = _devil_result.tokens_extra[0]
+                        fields["completion_tokens"] = _devil_result.tokens_extra[1]
+                # Per-finding events for greppability via
+                # `gitoma logs --filter critic_devil`
+                for _f in _devil_result.findings:
+                    _trace.emit(
+                        "critic_devil.finding",
+                        persona=_f.persona,
+                        severity=_f.severity,
+                        category=_f.category,
+                        summary=_f.summary,
+                        file=_f.file,
+                    )
+                # Persist into the same state log the panel uses; the
+                # subtask_id "__devil__" makes it distinguishable.
+                state.critic_panel_runs += 1
+                state.critic_panel_findings_log.append(_devil_result.to_dict())
+                # Cap at 200 entries (panel does the same).
+                if len(state.critic_panel_findings_log) > 200:
+                    del state.critic_panel_findings_log[
+                        : len(state.critic_panel_findings_log) - 200
+                    ]
+                save_state(state)
+            except Exception as _devil_exc:  # noqa: BLE001
+                from gitoma.core.trace import current as _current_trace
+                _current_trace().exception(
+                    "critic_devil.crashed",
+                    _devil_exc,
+                )
+
+        # ────────────────────────────────────────────────────────────────────────
         # PHASE 4 — PULL REQUEST
         # ────────────────────────────────────────────────────────────────────────
         # On --resume from PR_OPEN (or later), the prior run already pushed

@@ -158,8 +158,8 @@ class WorkerAgent:
             except Exception as exc:  # noqa: BLE001 — see comment above
                 current_trace().exception(
                     "critic_panel.crashed",
+                    exc,
                     subtask_id=subtask.id,
-                    error=f"{type(exc).__name__}: {exc}",
                 )
 
         # Commit
@@ -199,8 +199,8 @@ class WorkerAgent:
         except Exception as exc:  # noqa: BLE001
             current_trace().exception(
                 "critic_panel.intent_to_add_failed",
+                exc,
                 subtask_id=subtask.id,
-                error=f"{type(exc).__name__}: {exc}",
             )
 
         try:
@@ -208,8 +208,8 @@ class WorkerAgent:
         except Exception as exc:  # noqa: BLE001
             current_trace().exception(
                 "critic_panel.diff_failed",
+                exc,
                 subtask_id=subtask.id,
-                error=f"{type(exc).__name__}: {exc}",
             )
             return
 

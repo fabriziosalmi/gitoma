@@ -322,3 +322,135 @@ def test_panel_result_to_dict_serialisable_for_state_log():
         tokens_extra=(50, 30),
     )
     json.dumps(result.to_dict())  # must not raise
+
+
+# ── Iteration 3: multi-model routing + devil's advocate ──────────────────────
+
+
+def test_panel_passes_panel_model_to_chat_when_set():
+    """When ``CriticPanelConfig.panel_model`` is non-empty, the panel
+    must thread it through to ``LLMClient.chat(model=...)``. Empty value
+    falls back to the client's default model."""
+    llm = _make_llm(content=_F001_LIKE)
+    cfg = _cfg(mode="advisory", personas="dev", panel_model="qwen3.5-9b-sushi-coder")
+    CriticPanel(cfg, llm).review(subtask_id="x", diff_text="diff")
+    # Inspect the kwargs of the actual chat() call.
+    _, kwargs = llm.chat.call_args
+    assert kwargs.get("model") == "qwen3.5-9b-sushi-coder"
+    assert kwargs.get("temperature") == 0.3
+
+
+def test_panel_passes_no_model_override_when_empty():
+    """Empty ``panel_model`` (the default) must result in ``model=None``
+    so the LLMClient uses its configured default — the worker's model."""
+    llm = _make_llm(content=_F001_LIKE)
+    cfg = _cfg(mode="advisory", personas="dev", panel_model="")
+    CriticPanel(cfg, llm).review(subtask_id="x", diff_text="diff")
+    _, kwargs = llm.chat.call_args
+    assert kwargs.get("model") is None
+
+
+def test_devil_advocate_runs_against_full_branch_diff():
+    """Smoke: DevilsAdvocate.review() processes a full-branch diff,
+    parses findings, and returns a PanelResult with subtask_id="__devil__"
+    so the state log can distinguish devil entries from per-subtask ones."""
+    from gitoma.critic.devil import DevilsAdvocate
+
+    devil_response = json.dumps({"findings": [{
+        "severity": "blocker",
+        "category": "compile_breakage",
+        "summary": "removed fn main() — Rust binary won't link",
+        "file": "src/main.rs",
+        "line_range": [56, 103],
+    }]})
+    llm = MagicMock()
+    llm.chat = MagicMock(return_value=devil_response)
+    llm._last_usage = (5000, 200)
+
+    full_cfg = MagicMock()
+    full_cfg.lmstudio.base_url = "http://localhost:1234/v1"
+    cp_cfg = _cfg(devil_advocate=True, devil_model="qwen3.5-9b")
+
+    devil = DevilsAdvocate(cp_cfg, llm, full_cfg)
+    result = devil.review(full_branch_diff="diff --git a/main.rs ...", branch_name="feat/x")
+
+    assert result.subtask_id == "__devil__"
+    assert result.verdict == "advisory_logged"
+    assert result.personas_called == ["devil"]
+    assert len(result.findings) == 1
+    assert result.findings[0].severity == "blocker"
+    assert result.findings[0].persona == "devil"
+    assert result.tokens_extra == (5000, 200)
+    # Used the devil_model override
+    _, kwargs = llm.chat.call_args
+    assert kwargs.get("model") == "qwen3.5-9b"
+    # Used devil_temperature (default 0.4), NOT panel temperature
+    assert kwargs.get("temperature") == cp_cfg.devil_temperature
+
+
+def test_devil_advocate_empty_diff_returns_no_op():
+    """If somehow the devil is invoked with an empty branch diff
+    (very-empty PR, or diff command failed silently), short-circuit to
+    no_op without spending an LLM call."""
+    from gitoma.critic.devil import DevilsAdvocate
+
+    llm = MagicMock()
+    llm.chat = MagicMock()
+    devil = DevilsAdvocate(_cfg(devil_advocate=True), llm, MagicMock())
+    result = devil.review(full_branch_diff="")
+    assert result.subtask_id == "__devil__"
+    assert result.verdict == "no_op"
+    llm.chat.assert_not_called()
+
+
+def test_devil_advocate_call_failure_becomes_synthetic_finding():
+    """If the LLM call crashes (network error, malformed response that
+    triggers TypeError), the devil must NOT propagate — it returns a
+    synthetic ``critic_call_failed`` finding so the trace still records
+    the failure."""
+    from gitoma.critic.devil import DevilsAdvocate
+
+    llm = MagicMock()
+    llm.chat = MagicMock(side_effect=ConnectionError("endpoint unreachable"))
+    devil = DevilsAdvocate(_cfg(devil_advocate=True), llm, MagicMock())
+    result = devil.review(full_branch_diff="diff content")
+    assert result.verdict == "advisory_logged"
+    assert len(result.findings) == 1
+    assert result.findings[0].category == "critic_call_failed"
+    assert "ConnectionError" in result.findings[0].summary
+
+
+def test_devil_advocate_separate_endpoint_builds_secondary_client():
+    """When devil_base_url differs from the worker's, the devil builds a
+    second LLMClient pointing at that URL. The primary client is
+    untouched (worker keeps using it for patches)."""
+    from gitoma.critic.devil import DevilsAdvocate
+    from unittest.mock import patch as patchmock
+
+    primary_llm = MagicMock()
+    primary_llm.chat = MagicMock()
+    full_cfg = MagicMock()
+    full_cfg.lmstudio.base_url = "http://localhost:1234/v1"
+    cp_cfg = _cfg(
+        devil_advocate=True,
+        devil_base_url="http://100.108.97.78:8000/v1",
+        devil_model="some-model",
+    )
+    devil = DevilsAdvocate(cp_cfg, primary_llm, full_cfg)
+
+    # Patch the LLMClient constructor used inside _llm_for_devil.
+    with patchmock("gitoma.planner.llm_client.LLMClient") as MockClient:
+        secondary_instance = MagicMock()
+        secondary_instance.chat = MagicMock(return_value='{"findings": []}')
+        secondary_instance._last_usage = None
+        MockClient.return_value = secondary_instance
+
+        devil.review(full_branch_diff="diff x")
+
+        # The constructor was called once with a config whose lmstudio
+        # base_url matches devil_base_url.
+        assert MockClient.call_count == 1
+        ctor_arg = MockClient.call_args.args[0]
+        assert ctor_arg.lmstudio.base_url == "http://100.108.97.78:8000/v1"
+        # Primary client was NOT touched
+        primary_llm.chat.assert_not_called()

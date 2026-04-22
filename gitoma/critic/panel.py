@@ -144,10 +144,20 @@ class CriticPanel:
         # a per-call temperature; if it doesn't, we fall back to the
         # client's default — slightly higher than ideal for review but
         # not a correctness issue.
+        # Optional model override for the panel — keeps the worker on a
+        # fast model while routing critic calls to a different one (e.g.
+        # the same gemma but a different quant, or a slightly bigger model).
+        # Empty ``panel_model`` falls back to the LLMClient's default.
+        model_override = self._config.panel_model or None
         try:
-            raw = self._llm.chat(messages, temperature=self._config.temperature)
+            raw = self._llm.chat(
+                messages,
+                temperature=self._config.temperature,
+                model=model_override,
+            )
         except TypeError:
-            # Older signature without temperature kwarg — safe fallback.
+            # Older signature — safe fallback (loses model + temperature
+            # override; logged downstream as part of debug raw if enabled).
             raw = self._llm.chat(messages)
         usage = getattr(self._llm, "_last_usage", None)
         # Optional debug emission — gives us a window into WHY the parser

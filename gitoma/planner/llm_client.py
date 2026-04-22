@@ -263,6 +263,7 @@ class LLMClient:
         retry_delay: float = 2.0,
         *,
         temperature: float | None = None,
+        model: str | None = None,
     ) -> str:
         """
         Send a chat completion request. Returns the raw text response.
@@ -270,6 +271,12 @@ class LLMClient:
         ``temperature`` is keyword-only — when provided overrides the
         config default for this single call (e.g. critic panel wants
         deterministic-ish reviews without changing global config).
+
+        ``model`` is keyword-only — when provided routes this single
+        call to a different model loaded on the same LM Studio server
+        (e.g. critic panel uses gemma for personas + a bigger model for
+        the devil's advocate). Falls back to ``self.model`` (which reads
+        from config) when omitted, preserving backwards compat.
 
         Retries on transient connection/timeout errors with exponential backoff.
         Raises LLMError on unrecoverable failures.
@@ -292,7 +299,7 @@ class LLMClient:
         for attempt in range(retries):
             try:
                 response = self._client.chat.completions.create(
-                    model=self.model,
+                    model=model if model else self.model,
                     messages=messages,  # type: ignore[arg-type]
                     temperature=(
                         temperature
