@@ -163,6 +163,7 @@ def worker_user_prompt(
     repo_name: str,
     current_files: dict[str, str],
     file_tree: list[str],
+    compile_error_feedback: str | None = None,
 ) -> str:
     langs = ", ".join(languages) if languages else "Unknown"
 
@@ -177,13 +178,46 @@ def worker_user_prompt(
 
     tree_sample = "\n".join(file_tree[:40])
 
+    # Post-write compile-check retry feedback. When the previous attempt
+    # broke the build, we re-prompt with the compiler's error messages
+    # instead of starting blind. This addresses the failure mode caught
+    # on rung-1 v4: worker hallucinated ``Get(id int) (user, error)``
+    # when the real signature was ``(string, bool)``. The compiler caught
+    # it; now the worker gets a chance to fix based on actual evidence.
+    retry_section = ""
+    if compile_error_feedback:
+        retry_section = f"""
+== ⚠️ PREVIOUS ATTEMPT FAILED TO COMPILE ==
+Your last patch was applied, the project's build/syntax check ran, and
+it failed. Below is the EXACT error from the toolchain. READ it before
+emitting a new patch:
+
+{compile_error_feedback[:1500]}
+
+RULES for this retry (non-negotiable):
+  1. Do NOT invent function signatures or types. Read the CURRENT FILE
+     CONTENTS section above — those are the REAL files in the repo.
+     The signatures you see there are the truth; anything else is
+     hallucination.
+  2. Do NOT re-emit the same patch. The build check is deterministic;
+     the same patch produces the same error.
+  3. If the error says "assignment mismatch: N variables but f() returns
+     M values", the caller must declare M variables with names that
+     match what the test expects. Read the test file if you're unsure.
+  4. If the error says "undefined", "not declared", or "no field", the
+     name you used does NOT exist — pick one that the target file
+     actually exports.
+  5. Minimal change wins. Fix ONLY what broke; do not also refactor.
+
+"""
+
     return f"""Repository: {repo_name}
 Languages: {langs}
 
 Task: {subtask_title}
 Description: {subtask_description}
 Files to touch: {', '.join(file_hints) if file_hints else 'determine appropriate files'}
-
+{retry_section}
 {files_section}
 
 == FILE TREE ==

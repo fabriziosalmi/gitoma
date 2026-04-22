@@ -163,25 +163,18 @@ class WorkerAgent:
             },
         ]
 
-        raw = self._llm.chat_json(messages)
-        patches = raw.get("patches", [])
-        commit_msg = raw.get("commit_message", f"chore: {subtask.title} [gitoma]")
-
-        if not patches:
-            raise ValueError("LLM returned no patches for subtask")
-
-        # Ensure commit message has [gitoma] tag
-        if "[gitoma]" not in commit_msg:
-            commit_msg += " [gitoma]"
-
-        # Apply patches — with build-manifest hard block when the run
-        # is in compile-fix mode (patcher level, not just prompt level).
-        touched = apply_patches(
-            self._git.root, patches, compile_fix_mode=self._compile_fix_mode,
+        # ── Apply + post-write compile-check + retry loop ──────────────────
+        # If the patch breaks the build (compile/syntax error on the fresh
+        # worktree), we revert the filesystem, inject the compiler's error
+        # into the next prompt, and retry. Caught live on rung-1 v4:
+        # worker hallucinated a function signature; compile failed; PR
+        # still landed with broken code. Self-healing closes that gap.
+        #
+        # Budget: GITOMA_WORKER_BUILD_RETRIES env var (default 1 retry →
+        # 2 total attempts). Zero disables the loop entirely.
+        touched, commit_msg = self._apply_with_build_retry(
+            messages, subtask, languages,
         )
-
-        if not touched:
-            raise ValueError("Patches produced no file changes")
 
         # ── Critic panel (M7, walking-skeleton iteration 1) ────────────────
         # Runs AFTER patches hit the filesystem but BEFORE the commit. In
@@ -201,6 +194,163 @@ class WorkerAgent:
         # Commit
         sha = self._committer.commit_patches(touched, commit_msg)
         return sha
+
+    # ── Post-write compile check + retry ────────────────────────────────────
+
+    def _apply_with_build_retry(
+        self,
+        messages: list[dict[str, str]],
+        subtask: SubTask,
+        languages: list[str],
+    ) -> tuple[list[str], str]:
+        """Apply patches → build-check → on failure revert + re-prompt.
+
+        Returns (touched_paths, commit_msg). Raises on exhausted retries.
+        """
+        max_retries = max(0, int(os.environ.get("GITOMA_WORKER_BUILD_RETRIES", "1")))
+        max_attempts = max_retries + 1
+        compile_error_feedback: str | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            # On retry attempts (attempt > 1), rebuild the user prompt
+            # with the compiler error attached as explicit feedback.
+            active_messages = messages
+            if compile_error_feedback is not None:
+                active_messages = self._rebuild_prompt_with_error(
+                    messages, subtask, languages, compile_error_feedback,
+                )
+
+            raw = self._llm.chat_json(active_messages)
+            patches = raw.get("patches", [])
+            commit_msg = raw.get("commit_message", f"chore: {subtask.title} [gitoma]")
+            if not patches:
+                raise ValueError("LLM returned no patches for subtask")
+            if "[gitoma]" not in commit_msg:
+                commit_msg += " [gitoma]"
+
+            touched = apply_patches(
+                self._git.root, patches, compile_fix_mode=self._compile_fix_mode,
+            )
+            if not touched:
+                raise ValueError("Patches produced no file changes")
+
+            err = self._post_write_build_check(languages)
+            if err is None:
+                if attempt > 1:
+                    current_trace().emit(
+                        "critic_build_retry.success",
+                        subtask_id=subtask.id,
+                        attempt=attempt,
+                    )
+                return touched, commit_msg
+
+            # Build failed on this attempt. Decide: revert + retry, or give up.
+            current_trace().emit(
+                "critic_build_retry.fail",
+                subtask_id=subtask.id,
+                attempt=attempt,
+                error=err[:500],
+            )
+
+            if attempt >= max_attempts:
+                # Out of budget — revert, surface as subtask failure.
+                self._revert_touched(touched)
+                raise ValueError(
+                    f"Build check failed after {max_attempts} attempt(s). "
+                    f"Last error: {err[:300]}"
+                )
+
+            # Prepare retry: revert filesystem, carry the error forward.
+            self._revert_touched(touched)
+            compile_error_feedback = err
+
+        # Unreachable — the loop either returns or raises.
+        raise RuntimeError("unreachable: apply_with_build_retry loop exited")
+
+    def _rebuild_prompt_with_error(
+        self,
+        original_messages: list[dict[str, str]],
+        subtask: SubTask,
+        languages: list[str],
+        feedback: str,
+    ) -> list[dict[str, str]]:
+        """Rebuild the user prompt with compile_error_feedback attached,
+        keeping the same system prompt (antislop + worker system)."""
+        # Re-read current file content — the retry reads FRESH truth each
+        # time so the model sees exactly what it just reverted from.
+        current_files: dict[str, str] = {}
+        for hint in subtask.file_hints[:3]:
+            content = self._git.read_file(hint)
+            if content:
+                current_files[hint] = content
+        file_tree = self._git.file_tree(max_files=100)
+
+        new_user = worker_user_prompt(
+            subtask_title=subtask.title,
+            subtask_description=subtask.description,
+            file_hints=subtask.file_hints,
+            languages=languages,
+            repo_name=self._git.name,
+            current_files=current_files,
+            file_tree=file_tree,
+            compile_error_feedback=feedback,
+        )
+        # Keep the system message, replace the user message.
+        return [original_messages[0], {"role": "user", "content": new_user}]
+
+    def _post_write_build_check(self, languages: list[str]) -> str | None:
+        """Run BuildAnalyzer on the CURRENT worktree. Return the error
+        ``details`` string on failure, or None on clean / unknown-toolchain.
+
+        Uses the same analyzer as audit time, so the error text format is
+        consistent between planner-input and retry-feedback — the worker
+        learns one error vocabulary, not two."""
+        try:
+            from gitoma.analyzers.build import BuildAnalyzer
+            a = BuildAnalyzer(root=self._git.root, languages=languages)
+            r = a.analyze()
+        except Exception as exc:  # noqa: BLE001
+            # A build-check crash must not block the pipeline.
+            current_trace().exception("critic_build_check.crashed", exc)
+            return None
+        if r.status == "fail":
+            return r.details
+        return None
+
+    def _revert_touched(self, touched: list[str]) -> None:
+        """Undo filesystem changes made by the just-applied patches.
+
+        Tracked files → ``git checkout HEAD -- path`` restores them.
+        Untracked files (newly-created by the patch) → remove from disk.
+        Directories are not touched — the patcher creates dirs under
+        existing parents, so orphan dirs are harmless noise.
+        """
+        import subprocess
+        for path in touched:
+            abs_path = self._git.root / path
+            try:
+                check = subprocess.run(
+                    ["git", "ls-files", "--error-unmatch", "--", path],
+                    cwd=str(self._git.root),
+                    capture_output=True,
+                    text=True,
+                )
+            except Exception:
+                continue
+            if check.returncode == 0:
+                # Tracked: restore content from HEAD
+                subprocess.run(
+                    ["git", "checkout", "HEAD", "--", path],
+                    cwd=str(self._git.root),
+                    capture_output=True,
+                )
+            else:
+                # Untracked: remove the file we just created
+                try:
+                    if abs_path.is_file():
+                        abs_path.unlink()
+                except OSError:
+                    pass
 
     def _antislop_block_for_subtask(
         self,
