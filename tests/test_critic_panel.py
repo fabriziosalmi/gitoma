@@ -101,17 +101,10 @@ def test_advisory_mode_calls_each_persona_once():
     assert llm.chat.call_count == 1
 
 
-def test_aggregates_findings_across_personas(monkeypatch):
+def test_aggregates_findings_across_personas():
     """When multiple personas are configured, all their findings flow into
-    a single result. We monkey-patch the persona registry so the test
-    doesn't depend on which personas happen to ship in this iteration."""
-    from gitoma.critic import personas
-
-    monkeypatch.setattr(personas, "_REGISTRY", {
-        "dev": "you are dev",
-        "arch": "you are arch",
-    })
-
+    a single result. Iteration 2 ships dev + arch + contributor as real
+    personas, so we exercise the actual registry instead of monkey-patching."""
     arch_finding = json.dumps({
         "findings": [{
             "severity": "minor",
@@ -121,21 +114,66 @@ def test_aggregates_findings_across_personas(monkeypatch):
             "line_range": [1, 26],
         }]
     })
-    # Two personas, two distinct return values — answers cycle by call order.
+    contributor_finding = json.dumps({
+        "findings": [{
+            "severity": "major",
+            "category": "setup_breakage",
+            "summary": "pre-commit config will fail on first run; broken hook URL",
+            "file": ".pre-commit-config.yaml",
+        }]
+    })
+    # Three personas, three distinct return values — answers cycle by call order.
     llm = MagicMock()
-    llm.chat = MagicMock(side_effect=[_F001_LIKE, arch_finding])
+    llm.chat = MagicMock(side_effect=[_F001_LIKE, arch_finding, contributor_finding])
     llm._last_usage = (40, 20)
 
-    panel = CriticPanel(_cfg(mode="advisory", personas="dev,arch"), llm)
+    panel = CriticPanel(_cfg(mode="advisory", personas="dev,arch,contributor"), llm)
     result = panel.review(subtask_id="x", diff_text="diff")
 
     assert result.verdict == "advisory_logged"
-    assert result.personas_called == ["dev", "arch"]
-    assert len(result.findings) == 2
+    assert result.personas_called == ["dev", "arch", "contributor"]
+    assert len(result.findings) == 3
     by_persona = {f.persona for f in result.findings}
-    assert by_persona == {"dev", "arch"}
-    # has_blocker reflects the worst-of across personas.
+    assert by_persona == {"dev", "arch", "contributor"}
+    # has_blocker reflects the worst-of across personas (dev returned blocker).
     assert result.has_blocker() is True
+    # Token totals stack across calls (same usage stub each time).
+    assert result.tokens_extra == (120, 60)
+
+
+# ── Iteration 2: persona registry + prompt distinctness ──────────────────────
+
+
+def test_three_personas_are_registered():
+    """Iteration 2 contract: dev + arch + contributor are all available
+    in the registry. A test pins it so a future refactor that drops
+    a persona by accident fails loud at unit-test time, not at the
+    next gitoma run."""
+    from gitoma.critic.personas import available
+    assert set(available()) >= {"dev", "arch", "contributor"}
+
+
+def test_persona_prompts_are_distinct_in_focus():
+    """Each persona's system prompt must mention its angle and explicitly
+    delegate the other angles. A drift where two personas converge on
+    the same angle = wasted LLM call. The check is a substring sniff —
+    not perfect but enough to catch a copy-paste regression that
+    accidentally re-uses one prompt for all three."""
+    from gitoma.critic.personas import system_prompt_for
+    dev_prompt = system_prompt_for("dev")
+    arch_prompt = system_prompt_for("arch")
+    contrib_prompt = system_prompt_for("contributor")
+
+    # Each prompt must declare its specific role term.
+    assert "developer" in dev_prompt.lower()
+    assert "architect" in arch_prompt.lower()
+    assert "contributor" in contrib_prompt.lower()
+
+    # Each prompt must explicitly delegate the OTHER personas' areas
+    # (defence against copy-paste drift where one prompt overlaps).
+    assert "'arch'" in dev_prompt and "'contributor'" in dev_prompt
+    assert "'dev'" in arch_prompt and "'contributor'" in arch_prompt
+    assert "'dev'" in contrib_prompt and "'arch'" in contrib_prompt
 
 
 def test_persona_failure_becomes_synthetic_finding():

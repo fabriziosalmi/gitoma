@@ -66,9 +66,11 @@ class CriticPanelConfig:
     Toggle via env (``CRITIC_PANEL_MODE``), TOML, or future cockpit setting.
     """
     mode: str = "advisory"  # off | advisory | blocking
-    # Comma-separated personas to instantiate; first iteration ships only
-    # ``dev``. Add ``arch,contributor`` once the walking skeleton is proven.
-    personas: str = "dev"
+    # Comma-separated personas to instantiate. Iteration 2 ships the full
+    # 3-persona panel (dev + arch + contributor) — each covers a distinct
+    # angle so findings don't overlap. To run a leaner panel for cost,
+    # set ``CRITIC_PANEL_PERSONAS=dev`` (env) or override in TOML.
+    personas: str = "dev,arch,contributor"
     # Whether the broad-scope "devil's advocate" critic runs once per
     # subtask after the panel; gated separately because it's the most
     # expensive call (sees full diff). Disabled by default until the
@@ -130,12 +132,18 @@ def load_config() -> Config:
         max_tokens=int(os.getenv("LM_STUDIO_MAX_TOKENS", lm_raw.get("max_tokens", 4096))),
     )
 
+    # Pull defaults from the dataclass so they stay in ONE place. The
+    # previous hand-typed fallbacks (e.g. ``"dev"``) drifted out of sync
+    # when the dataclass default changed (iter 2 default became
+    # ``"dev,arch,contributor"`` but the env-fallback still said ``"dev"``,
+    # silently disabling 2 of 3 personas in production).
+    _cp_defaults = CriticPanelConfig()
     cp_raw = raw.get("critic_panel", {})
     critic_panel = CriticPanelConfig(
-        mode=os.getenv("CRITIC_PANEL_MODE", cp_raw.get("mode", "advisory")),
-        personas=os.getenv("CRITIC_PANEL_PERSONAS", cp_raw.get("personas", "dev")),
-        devil_advocate=_truthy(os.getenv("CRITIC_PANEL_DEVIL", str(cp_raw.get("devil_advocate", False)))),
-        temperature=float(os.getenv("CRITIC_PANEL_TEMPERATURE", cp_raw.get("temperature", 0.3))),
+        mode=os.getenv("CRITIC_PANEL_MODE", cp_raw.get("mode", _cp_defaults.mode)),
+        personas=os.getenv("CRITIC_PANEL_PERSONAS", cp_raw.get("personas", _cp_defaults.personas)),
+        devil_advocate=_truthy(os.getenv("CRITIC_PANEL_DEVIL", str(cp_raw.get("devil_advocate", _cp_defaults.devil_advocate)))),
+        temperature=float(os.getenv("CRITIC_PANEL_TEMPERATURE", cp_raw.get("temperature", _cp_defaults.temperature))),
     )
 
     return Config(
