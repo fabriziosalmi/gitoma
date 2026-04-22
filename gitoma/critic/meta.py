@@ -24,6 +24,7 @@ import re
 from typing import TYPE_CHECKING, Literal
 
 from gitoma.core.trace import current as current_trace
+from gitoma.critic.types import LLMMetaVerdict, ValidationError
 
 if TYPE_CHECKING:
     from gitoma.core.config import Config, CriticPanelConfig
@@ -140,22 +141,27 @@ class MetaEval:
 
 
 def _parse_verdict(raw: str) -> tuple[Literal["v0", "v1", "tie"], str]:
-    """Best-effort parse — same shape as the panel parser. Conservative
-    on malformed: returns ('v0', 'meta_eval_unparseable') so we never
-    accidentally keep a refinement we couldn't validate."""
+    """Parse the meta-eval's raw output via STRICT Pydantic validation.
+
+    Conservative on malformed: returns ('v0', '<reason>') for ANY
+    failure mode so we never accidentally keep a refinement we
+    couldn't validate. Possible reasons:
+      * meta_eval_empty_response — empty raw
+      * meta_eval_no_json_block — no balanced ``{...}`` found
+      * meta_eval_invalid_schema — Pydantic validation failed
+        (e.g. winner is not in the Literal set, extra fields present)
+
+    ¬I axiom: a clean v0 fallback on EVERY failure is the conservative
+    default the meta-eval contract promises. Schema drift cannot
+    silently accept a refinement.
+    """
     if not raw:
         return "v0", "meta_eval_empty_response"
     match = _JSON_BLOCK.search(raw)
     if not match:
         return "v0", "meta_eval_no_json_block"
     try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return "v0", "meta_eval_invalid_json"
-    if not isinstance(parsed, dict):
-        return "v0", "meta_eval_not_dict"
-    winner_raw = str(parsed.get("winner", "v0")).lower()
-    if winner_raw not in ("v0", "v1", "tie"):
-        return "v0", f"meta_eval_unknown_winner:{winner_raw[:32]}"
-    rationale = str(parsed.get("rationale", ""))[:200]
-    return winner_raw, rationale  # type: ignore[return-value]
+        verdict = LLMMetaVerdict.model_validate_json(match.group(0))
+    except (ValidationError, ValueError):
+        return "v0", "meta_eval_invalid_schema"
+    return verdict.winner, verdict.rationale  # type: ignore[return-value]

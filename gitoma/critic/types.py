@@ -1,15 +1,35 @@
-"""Dataclasses for the critic panel — kept narrow on purpose.
+"""Dataclasses + strict Pydantic models for the critic panel.
 
-The Finding shape mirrors the schema used in
-``tests/fixtures/slop_audit_b2v_pr10.json`` so a future regression test can
-match LLM output against the golden audit without a second translation
-layer. If you change a field here, update the fixture comment too.
+Two-layer split (intentional, see Ω_Agent ¬I axiom — "no untyped
+LLM output"):
+
+  * **Dataclasses** (``Finding``, ``PanelResult``) — internal
+    representation, persisted to state.json via ``asdict()``. Stable
+    contract, backwards-compat-friendly.
+
+  * **Pydantic models** (``_LLMFindingModel``, ``LLMPanelOutput``,
+    ``LLMRefinerOutput``, ``LLMMetaVerdict``) — STRICT schema
+    validation at the LLM-output boundary. Replaces the old
+    best-effort "regex-extract a JSON block, dict.get with defaults"
+    pattern that silently degraded on schema drift.
+
+The boundary is one-way: parser receives raw LLM text → validates
+with the Pydantic model → constructs the dataclass on success →
+persists. On Pydantic validation failure, the parser returns empty
+list / conservative-default (matches existing fail-soft behaviour);
+the trace records the failure.
+
+The Finding shape (dataclass) mirrors
+``tests/fixtures/slop_audit_b2v_pr10.json``. If you change a field
+here, update the fixture comment too.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 # Severity ladder — keep in sync with the fixture and with whatever the
 # cockpit eventually renders. Order matters (worst first) for sorting.
@@ -81,3 +101,104 @@ class PanelResult:
 
     def has_blocker(self) -> bool:
         return any(f.severity == "blocker" for f in self.findings)
+
+
+# ── Pydantic strict models for the LLM-output boundary ──────────────────────
+#
+# These models validate raw LLM output before it crosses into our internal
+# dataclasses. Strict mode (``extra="forbid"``) intentionally rejects
+# unknown keys — if the model invents new fields, the trace gets the
+# error and the parser returns empty/default. NEVER silently accept.
+#
+# Field validators normalise minor schema drift (case-insensitive enums,
+# trimmed strings) without opening the gate to fully invalid output.
+
+
+class _StrictModel(BaseModel):
+    """Base for all LLM-boundary models. Strict by default."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class LLMFinding(_StrictModel):
+    """One finding as emitted by the LLM (panel persona OR devil)."""
+    severity: Severity
+    category: str = Field(min_length=1, max_length=64)
+    summary: str = Field(min_length=1, max_length=500)
+    file: str | None = None
+    line_range: tuple[int, int] | None = None
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _normalise_severity(cls, v: Any) -> Any:
+        # Tolerant on case + small synonym drift (small models occasionally
+        # emit "minor" as "low" or "high" instead of major). We map a small
+        # closed set; anything else stays as-is and triggers the Literal
+        # validator which rejects it cleanly.
+        if not isinstance(v, str):
+            return v
+        v = v.strip().lower()
+        return {"low": "minor", "high": "major", "critical": "blocker"}.get(v, v)
+
+
+class LLMPanelOutput(_StrictModel):
+    """The full payload one persona returns: ``{"findings": [...]}``."""
+    findings: list[LLMFinding] = Field(default_factory=list)
+
+
+class LLMDevilOutput(_StrictModel):
+    """The devil's advocate output. Same shape as a persona but allows
+    an optional ``defense`` field for the "no findings, here's why"
+    case spelt out in the prompt."""
+    findings: list[LLMFinding] = Field(default_factory=list)
+    defense: str | None = None
+
+
+class LLMPatchAction(_StrictModel):
+    """One file edit emitted by the refiner. Mirrors ``apply_patches``
+    schema. ``content`` is allowed empty for ``delete`` actions."""
+    action: Literal["create", "modify", "delete"]
+    path: str = Field(min_length=1, max_length=500)
+    content: str = ""
+
+    @field_validator("path")
+    @classmethod
+    def _no_path_traversal(cls, v: str) -> str:
+        # ``apply_patches`` enforces this too, but catching it at the
+        # validation layer means the LLM output never reaches the
+        # patcher in the first place — closes one ¬O surface.
+        if v.startswith("/") or ".." in v.split("/"):
+            raise ValueError(f"path must be relative and within the repo: {v!r}")
+        return v
+
+
+class LLMRefinerOutput(_StrictModel):
+    """The refiner's structured response."""
+    patches: list[LLMPatchAction] = Field(default_factory=list)
+    commit_message: str = Field(default="", max_length=200)
+
+
+class LLMMetaVerdict(_StrictModel):
+    """The meta-eval's verdict between v0 and v1."""
+    winner: Literal["v0", "v1", "tie"]
+    rationale: str = Field(default="", max_length=300)
+
+    @field_validator("winner", mode="before")
+    @classmethod
+    def _normalise_winner(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        return v.strip().lower()
+
+
+__all__ = [
+    "Finding",
+    "LLMDevilOutput",
+    "LLMFinding",
+    "LLMMetaVerdict",
+    "LLMPanelOutput",
+    "LLMPatchAction",
+    "LLMRefinerOutput",
+    "PanelResult",
+    "Severity",
+    "ValidationError",
+]

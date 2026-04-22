@@ -223,16 +223,36 @@ def test_parser_tolerates_prose_padding_around_json():
     assert findings[0].severity == "blocker"
 
 
-def test_parser_handles_unknown_severity_by_downgrading_to_minor():
-    """Schema drift: small models occasionally emit invented severities
-    (``"crit"``, ``"high"``, ``"WAT"``). Rather than drop the finding
-    we downgrade to 'minor' so the audit trail still captures it."""
+def test_parser_normalises_known_synonym_severities():
+    """Small-model schema drift on a CLOSED set of synonyms is
+    normalised by the field validator: ``low`` → ``minor``,
+    ``high`` → ``major``, ``critical`` → ``blocker``. This is
+    deliberate, narrow tolerance — anything outside this set is
+    rejected by Pydantic strict (¬I axiom)."""
+    raw = json.dumps({"findings": [
+        {"severity": "low", "category": "x", "summary": "y"},
+        {"severity": "high", "category": "x", "summary": "y"},
+        {"severity": "CRITICAL", "category": "x", "summary": "y"},
+    ]})
+    findings = _parse_findings(raw, persona="dev")
+    assert [f.severity for f in findings] == ["minor", "major", "blocker"]
+
+
+def test_parser_rejects_invented_severity_strict_mode():
+    """¬I axiom (Anti-Improvvisazione): an LLM that emits a severity
+    outside the closed set {blocker, major, minor, nit} (and the
+    narrow synonym map) MUST be rejected entirely. The old parser
+    silently downgraded ``"WAT"`` to ``minor`` — silent acceptance
+    of invalid schema is the precise pattern this iteration removes.
+
+    Strict-mode contract: the WHOLE findings list is rejected rather
+    than partially salvaged. The trace event upstream will record the
+    failure as ``critic_call_failed``."""
     raw = json.dumps({"findings": [
         {"severity": "WAT", "category": "x", "summary": "y"}
     ]})
     findings = _parse_findings(raw, persona="dev")
-    assert len(findings) == 1
-    assert findings[0].severity == "minor"
+    assert findings == []
 
 
 def test_parser_returns_empty_on_garbage():
@@ -248,17 +268,23 @@ def test_parser_returns_empty_on_garbage():
     assert _parse_findings('{"findings": "should be list"}', persona="dev") == []
 
 
-def test_parser_skips_malformed_findings_keeps_well_formed_ones():
-    """Mixed batch: one valid finding + one garbage finding → valid
-    survives, garbage skipped silently."""
+def test_parser_rejects_entire_batch_when_any_finding_malformed():
+    """¬I axiom: a single malformed item poisons the whole list.
+    Strict Pydantic validation is all-or-nothing — it's safer to
+    reject the whole response than to silently keep "the good ones"
+    when we have evidence the model is producing schema-invalid output.
+
+    The previous parser tolerated mix and salvaged valid items; that
+    tolerance let one corrupt schema-drift slowly become "the new
+    schema" without the trace recording it. Strict reject + trace
+    event upstream is the deterministic signal we want."""
     raw = json.dumps({"findings": [
         {"severity": "blocker", "category": "x", "summary": "good"},
         "this is not even an object",
         {"severity": "major", "category": "y", "summary": "also good"},
     ]})
     findings = _parse_findings(raw, persona="dev")
-    assert len(findings) == 2
-    assert [f.severity for f in findings] == ["blocker", "major"]
+    assert findings == []
 
 
 # ── Token usage / cost telemetry hook ─────────────────────────────────────
@@ -621,7 +647,8 @@ def test_meta_eval_falls_back_to_v0_on_llm_crash():
 
 def test_meta_eval_unknown_winner_string_falls_back_to_v0():
     """LLM returns valid JSON with winner='maybe' or some other invented
-    string → v0 (safer than guessing intent)."""
+    string → v0 (safer than guessing intent). Strict Pydantic schema
+    rejects anything outside Literal[v0, v1, tie] cleanly."""
     from gitoma.critic.meta import MetaEval
 
     llm = MagicMock()
@@ -633,7 +660,7 @@ def test_meta_eval_unknown_winner_string_falls_back_to_v0():
         v0_diff="a", v1_diff="b", devil_findings=[],
     )
     assert winner == "v0"
-    assert "unknown_winner" in rationale
+    assert "invalid_schema" in rationale
 
 
 def test_devil_advocate_separate_endpoint_builds_secondary_client():

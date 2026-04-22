@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Any
 
 from gitoma.core.trace import current as current_trace
 from gitoma.critic.personas import system_prompt_for
-from gitoma.critic.types import Finding, PanelResult
+from gitoma.critic.types import (
+    Finding,
+    LLMPanelOutput,
+    PanelResult,
+    ValidationError,
+)
 
 if TYPE_CHECKING:
     from gitoma.core.config import CriticPanelConfig
@@ -179,13 +184,22 @@ class CriticPanel:
 
 
 def _parse_findings(raw: str, *, persona: str) -> list[Finding]:
-    """Best-effort parse of the persona's raw output into Finding objects.
+    """Parse the LLM's raw output into Finding objects via STRICT Pydantic.
 
-    Returns an empty list when the output cannot be parsed — but always
-    returns a list, never raises. Parse failures bubble up via a synthetic
-    ``critic_call_failed`` finding in the orchestrator above (this function
-    intentionally does NOT generate one because it's also used in tests
-    where empty-on-malformed is the cleaner contract).
+    Pipeline:
+      1. Locate first balanced ``{...}`` block (small models wrap output
+         in markdown fences and prose).
+      2. Validate against ``LLMPanelOutput`` (strict — extra fields rejected).
+      3. Convert each ``LLMFinding`` to internal ``Finding``.
+
+    Returns empty list on any parse/validation failure — NEVER raises.
+    The orchestrator turns "0 findings + non-empty raw" into a
+    ``critic_call_failed`` finding upstream. This function's contract:
+    well-formed list (possibly empty), no exceptions.
+
+    ¬I axiom: schema drift no longer silently passes — the strict
+    Pydantic model rejects it cleanly and the failure is observable
+    via the empty return + the trace event the caller emits.
     """
     if not raw:
         return []
@@ -193,40 +207,19 @@ def _parse_findings(raw: str, *, persona: str) -> list[Finding]:
     if not match:
         return []
     try:
-        parsed: Any = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(parsed, dict):
-        return []
-    raw_findings = parsed.get("findings")
-    if not isinstance(raw_findings, list):
+        parsed_obj = LLMPanelOutput.model_validate_json(match.group(0))
+    except (ValidationError, json.JSONDecodeError, ValueError):
         return []
     out: list[Finding] = []
-    for item in raw_findings:
-        if not isinstance(item, dict):
-            continue
-        try:
-            severity = item.get("severity") or "minor"
-            if severity not in ("blocker", "major", "minor", "nit"):
-                severity = "minor"  # tolerate tiny model schema drift
-            line_range_raw = item.get("line_range")
-            line_range: tuple[int, int] | None = None
-            if isinstance(line_range_raw, list) and len(line_range_raw) == 2:
-                try:
-                    line_range = (int(line_range_raw[0]), int(line_range_raw[1]))
-                except (TypeError, ValueError):
-                    line_range = None
-            out.append(
-                Finding(
-                    persona=persona,
-                    severity=severity,  # type: ignore[arg-type]
-                    category=str(item.get("category") or "uncategorised")[:64],
-                    summary=str(item.get("summary") or "")[:500],
-                    file=item.get("file") if isinstance(item.get("file"), str) else None,
-                    line_range=line_range,
-                )
+    for f in parsed_obj.findings:
+        out.append(
+            Finding(
+                persona=persona,
+                severity=f.severity,
+                category=f.category,
+                summary=f.summary,
+                file=f.file,
+                line_range=f.line_range,
             )
-        except Exception:  # noqa: BLE001 — schema drift is expected
-            # Skip the malformed item, keep the well-formed ones.
-            continue
+        )
     return out

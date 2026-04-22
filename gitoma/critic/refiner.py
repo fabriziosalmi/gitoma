@@ -20,7 +20,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from gitoma.core.trace import current as current_trace
-from gitoma.critic.types import Finding
+from gitoma.critic.types import Finding, LLMRefinerOutput, ValidationError
 
 if TYPE_CHECKING:
     from gitoma.core.config import Config, CriticPanelConfig
@@ -172,10 +172,27 @@ class Refiner:
             current_trace().exception("critic_refiner.call_failed", exc)
             return {"patches": [], "commit_message": ""}
 
-        # Tolerate small schema drift — empty patches is the safe default
-        patches = parsed.get("patches") if isinstance(parsed.get("patches"), list) else []
-        commit_message = parsed.get("commit_message") or "refine: address devil findings"
-        return {"patches": patches, "commit_message": str(commit_message)[:200]}
+        # ¬I axiom: validate against strict Pydantic schema. Anything
+        # off-spec (extra fields, missing required, path traversal in
+        # patch path, action not in {create,modify,delete}) → empty
+        # patches, recorded in trace. NEVER pass an unvalidated patch
+        # blob to the patcher (that's what produced the @@ diff
+        # injection live-bug on iter4).
+        try:
+            validated = LLMRefinerOutput.model_validate(parsed)
+        except ValidationError as exc:
+            current_trace().emit(
+                "critic_refiner.schema_invalid",
+                error=str(exc)[:300],
+            )
+            return {"patches": [], "commit_message": ""}
+
+        patches_out: list[dict[str, Any]] = [
+            {"action": p.action, "path": p.path, "content": p.content}
+            for p in validated.patches
+        ]
+        commit_message = validated.commit_message or "refine: address devil findings"
+        return {"patches": patches_out, "commit_message": commit_message}
 
 
 def _format_findings_for_actor(findings: list[Finding]) -> str:
