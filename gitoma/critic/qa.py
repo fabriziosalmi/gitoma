@@ -150,6 +150,64 @@ def _questioner_user(
 Emit three brutal, specific questions per the fixed slot schema."""
 
 
+def _round_trip_user(
+    subtask_goal: str,
+    branch_diff: str,
+    current_files: dict[str, str],
+    questions: list[dict],
+    answers_with_flips: list[dict],
+) -> str:
+    """Second-pass prompt: the evidence validator caught bluffs; the
+    Defender is now asked to propose CONCRETE patches that close
+    those specific gaps."""
+    files_block = "\n".join(
+        f"\n--- {path} ---\n{content[:2500]}\n" for path, content in current_files.items()
+    )
+    q_by_id = {q["id"]: q["question"] for q in questions}
+    flipped = [a for a in answers_with_flips
+               if a["verdict"] == "gap"
+               and isinstance(a.get("rationale"), str)
+               and a["rationale"].startswith("[auto-flipped")]
+    flipped_block = "\n".join(
+        f"- {a['id']} (question was: {q_by_id.get(a['id'], '?')!r})\n"
+        f"  your first answer tried to claim handled with {a.get('evidence_loc')!r}.\n"
+        f"  VALIDATOR FLIP REASON: {a['rationale']}"
+        for a in flipped
+    )
+    return f"""STATED TASK: {subtask_goal}
+
+== THE DIFF YOU SHIPPED ==
+```diff
+{branch_diff[:6000]}
+```
+
+== CURRENT FILE CONTENTS ==
+{files_block[:6000]}
+
+== YOUR PREVIOUS ANSWERS WERE BUSTED BY THE VALIDATOR ==
+The cross-check of your ``evidence_loc`` citations against the actual diff
+and current files caught bluffs. These answers were flipped from "handled"
+to "gap" because the citation does not hold up:
+
+{flipped_block}
+
+== YOUR JOB NOW ==
+For each flipped gap, either:
+  (a) Emit a MINIMAL revised patch (≤ 15 LOC added, direct fix, no
+      decorative changes) that ACTUALLY closes the gap. The patch will
+      be applied to the worktree and validated by a compile check +
+      test run BEFORE it is committed — if your patch breaks the build
+      or existing tests, it is REVERTED and we ship the original PR
+      (worse for you than an honest "no fix possible").
+  (b) Honestly admit you can't fix it from here — keep the answer as
+      "gap" and return ``"revised_patches": []``. No patch is better
+      than a broken patch.
+
+Respond with ONLY the same JSON schema as before. The ``answers``
+array should include all three slots; update the flipped ones if your
+revised patch addresses them."""
+
+
 def _defender_user(
     subtask_goal: str,
     branch_diff: str,
@@ -198,35 +256,39 @@ class QAAgent:
     # ── Client selection ────────────────────────────────────────────────
 
     def _llm_for_questioner(self) -> "LLMClient":
-        """Questioner uses the devil's endpoint by default (same worldview
-        as the adversarial reviewer upstream), overridable via env."""
-        base_url = os.environ.get("CRITIC_QA_QUESTIONER_BASE_URL") or self._cfg.devil_base_url
-        model = os.environ.get("CRITIC_QA_QUESTIONER_MODEL") or self._cfg.devil_model or self._full_config.lmstudio.model
-        if not base_url:
-            # Same endpoint as worker — different model via chat() kwarg only.
-            if self._questioner_llm is None:
-                self._questioner_llm = self._primary_llm
-            return self._questioner_llm
+        """Questioner uses the devil's endpoint/model by default (same
+        worldview as the adversarial reviewer upstream). Overridable
+        via env — if ONLY the model is set (no base_url), we keep the
+        worker's URL and swap just the model."""
+        override_base = os.environ.get("CRITIC_QA_QUESTIONER_BASE_URL") or self._cfg.devil_base_url
+        override_model = os.environ.get("CRITIC_QA_QUESTIONER_MODEL") or self._cfg.devil_model
+        # No override at all → reuse primary (same model as worker)
+        if not override_base and not override_model:
+            return self._primary_llm
         if self._questioner_llm is None:
             from gitoma.planner.llm_client import LLMClient
             sub_cfg = deepcopy(self._full_config)
-            sub_cfg.lmstudio.base_url = base_url
-            sub_cfg.lmstudio.model = model
+            if override_base:
+                sub_cfg.lmstudio.base_url = override_base
+            if override_model:
+                sub_cfg.lmstudio.model = override_model
             self._questioner_llm = LLMClient(sub_cfg)
         return self._questioner_llm
 
     def _llm_for_defender(self) -> "LLMClient":
-        """Defender uses the worker's endpoint by default — same codebase
-        familiarity as the model that emitted the patch."""
-        base_url = os.environ.get("CRITIC_QA_DEFENDER_BASE_URL") or self._full_config.lmstudio.base_url
-        model = os.environ.get("CRITIC_QA_DEFENDER_MODEL") or self._full_config.lmstudio.model
-        if base_url == self._full_config.lmstudio.base_url and model == self._full_config.lmstudio.model:
+        """Defender uses the worker's endpoint/model by default — same
+        codebase familiarity as the model that emitted the patch."""
+        override_base = os.environ.get("CRITIC_QA_DEFENDER_BASE_URL")
+        override_model = os.environ.get("CRITIC_QA_DEFENDER_MODEL")
+        if not override_base and not override_model:
             return self._primary_llm
         if self._defender_llm is None:
             from gitoma.planner.llm_client import LLMClient
             sub_cfg = deepcopy(self._full_config)
-            sub_cfg.lmstudio.base_url = base_url
-            sub_cfg.lmstudio.model = model
+            if override_base:
+                sub_cfg.lmstudio.base_url = override_base
+            if override_model:
+                sub_cfg.lmstudio.model = override_model
             self._defender_llm = LLMClient(sub_cfg)
         return self._defender_llm
 
@@ -298,23 +360,49 @@ class QAAgent:
             _validate_evidence(a, branch_diff, current_files) for a in result.answers
         ]
 
-        result.duration_ms = (time.monotonic() - t0) * 1000
-
-        # Application of revised patches is a separate gated step —
-        # callers decide via CRITIC_QA_APPLY to enter the apply flow.
-        # This keeps the Q&A phase observation-only by default; once
-        # the Questioner is proven to catch real failures, the apply
-        # path is promoted.
+        # Round-trip: if validator flipped any "handled" → "gap" and
+        # the Defender didn't already propose patches, ask it ONCE more
+        # (naming the bluffed citations explicitly) to propose real
+        # fixes. Caught rung-3 v2b: Defender claimed 3 handled, one
+        # citation was fake, validator flipped it, but Defender's
+        # original revised_patches was empty. Round-trip closes the
+        # gap the validator opened.
         _apply_env = os.environ.get("CRITIC_QA_APPLY") or ""
-        if patches and _apply_env.lower() in ("1", "true", "yes"):
-            # The caller (run.py) is better positioned to run the
-            # BuildAnalyzer + tests post-apply, so we hand the patches
-            # back in a structured shape. QAResult already carries them
-            # via the revised_patches slot when we store them.
-            # For now: emit a trace event so the operator sees the
-            # phase proposed patches (even if not applied).
-            tr.emit("critic_qa.revised_proposed_but_apply_disabled",
-                    count=len(patches))
+        apply_enabled = _apply_env.lower() in ("1", "true", "yes")
+        auto_flipped = [
+            a for a in result.answers
+            if a["verdict"] == "gap"
+            and isinstance(a.get("rationale"), str)
+            and a["rationale"].startswith("[auto-flipped")
+        ]
+        if apply_enabled and auto_flipped and not patches:
+            tr.emit("critic_qa.round_trip.start",
+                    flipped_count=len(auto_flipped))
+            try:
+                rt_raw = self._llm_for_defender().chat_json([
+                    {"role": "system", "content": _DEFENDER_SYSTEM},
+                    {"role": "user", "content": _round_trip_user(
+                        subtask_goal, branch_diff, current_files,
+                        result.questions, result.answers,
+                    )},
+                ])
+                rt_out = LLMQADefenderOutput.model_validate(rt_raw)
+                result.answers = [a.model_dump() for a in rt_out.answers]
+                result.answers = [
+                    _validate_evidence(a, branch_diff, current_files)
+                    for a in result.answers
+                ]
+                patches = [p.model_dump() for p in rt_out.revised_patches]
+                tr.emit("critic_qa.round_trip.end",
+                        revised_proposed=len(patches))
+            except (ValidationError, Exception) as exc:  # noqa: BLE001
+                tr.exception("critic_qa.round_trip_failed", exc)
+
+        # Hand revised_patches (possibly empty) back to the caller.
+        # run.py owns the apply+gate loop because it has access to
+        # git_repo + BuildAnalyzer + pytest.
+        result.revised_patches = patches
+        result.duration_ms = (time.monotonic() - t0) * 1000
         return result
 
 

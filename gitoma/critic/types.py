@@ -326,6 +326,9 @@ class QAResult:
     ran: bool                                  # False when QA disabled
     questions: list[dict] = field(default_factory=list)
     answers: list[dict] = field(default_factory=list)
+    # Patches proposed by the Defender (first-pass or round-trip). Run.py
+    # decides whether to apply them via BuildAnalyzer + test gate.
+    revised_patches: list[dict] = field(default_factory=list)
     revised_applied: bool = False              # True only if patches landed
     revert_reason: str | None = None           # why a revised patch was rejected
     questioner_model: str = ""

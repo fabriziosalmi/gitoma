@@ -5,8 +5,49 @@ from __future__ import annotations
 import atexit
 import os
 import re
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path as _Path
 from typing import Annotated, Optional, TYPE_CHECKING
+
+
+def _qa_run_tests(root: "_Path") -> tuple[bool, str]:
+    """Best-effort language-detected test run for the Q&A apply gate.
+
+    Returns (ok, detail). Missing toolchain OR unrecognised project
+    layout = ``(True, "skipped")`` — we don't block a run just because
+    we can't test. Timeout bounded at 120s; anything longer signals
+    deeper problems and would hold up the pipeline.
+    """
+    # Detect framework (same priority as bench_rung.py)
+    has_cargo = (root / "Cargo.toml").is_file()
+    has_gomod = (root / "go.mod").is_file()
+    has_npm = (root / "package.json").is_file()
+    has_py = (root / "pyproject.toml").is_file() or (root / "setup.py").is_file()
+
+    def _run(cmd: list[str]) -> tuple[bool, str]:
+        try:
+            r = subprocess.run(
+                cmd, cwd=str(root), capture_output=True, text=True, timeout=120,
+            )
+        except FileNotFoundError:
+            return True, f"skipped ({cmd[0]} not in PATH)"
+        except subprocess.TimeoutExpired:
+            return False, f"timeout after 120s: {' '.join(cmd)}"
+        if r.returncode == 0:
+            return True, f"pass ({' '.join(cmd)})"
+        tail = (r.stderr or r.stdout)[-400:].strip()
+        return False, f"fail: {tail}"
+
+    if has_cargo:
+        return _run(["cargo", "test", "--quiet"])
+    if has_gomod:
+        return _run(["go", "test", "./..."])
+    if has_py:
+        return _run(["python", "-m", "pytest", "-q", "--no-header"])
+    if has_npm:
+        return _run(["npm", "test", "--silent"])
+    return True, "skipped (no recognised test framework)"
 
 import typer
 from rich.panel import Panel
@@ -869,6 +910,69 @@ def run(
                             branch_diff=_qa_diff,
                             current_files=_qa_files,
                         )
+
+                        # ── Apply gate: when the Defender proposed revised
+                        # patches AND CRITIC_QA_APPLY is on, try to land them
+                        # under BuildAnalyzer + test-run gate. Any failure =
+                        # full revert so a bad "fix" never lands in the PR.
+                        _qa_apply = (os.environ.get("CRITIC_QA_APPLY") or "").lower() in ("1", "true", "yes")
+                        if _qa_apply and _qa_result.revised_patches:
+                            _qa_pre_sha = git_repo.repo.head.commit.hexsha
+                            try:
+                                from gitoma.worker.patcher import apply_patches as _qa_apply_fn
+                                _qa_touched = _qa_apply_fn(
+                                    git_repo.root,
+                                    _qa_result.revised_patches,
+                                    compile_fix_mode=_compile_fix_mode,
+                                )
+                                if not _qa_touched:
+                                    raise ValueError("Q&A patches produced no file changes")
+
+                                # Gate A: BuildAnalyzer
+                                from gitoma.analyzers.build import BuildAnalyzer as _QABA
+                                _qa_ba = _QABA(root=git_repo.root, languages=languages).analyze()
+                                if _qa_ba.status == "fail":
+                                    raise RuntimeError(
+                                        f"Q&A revised build check failed: {_qa_ba.details[:200]}"
+                                    )
+
+                                # Gate B: test run (best-effort, language-detected)
+                                _qa_test_ok, _qa_test_detail = _qa_run_tests(git_repo.root)
+                                if not _qa_test_ok:
+                                    raise RuntimeError(
+                                        f"Q&A revised tests failed: {_qa_test_detail}"
+                                    )
+
+                                # Commit + keep
+                                from gitoma.worker.committer import Committer as _QACommitter
+                                _QACommitter(git_repo, config).commit_patches(
+                                    _qa_touched,
+                                    "critic(qa): revise patch per evidence-flip + gated re-check",
+                                )
+                                _qa_result.revised_applied = True
+                                _trace.emit(
+                                    "critic_qa.revised_kept",
+                                    touched=_qa_touched,
+                                )
+                                console.print(
+                                    f"[good]Q&A revised patch applied: {_qa_touched}[/good]"
+                                )
+                            except Exception as _qa_apply_exc:  # noqa: BLE001
+                                # Hard revert: restore the pre-QA state so the
+                                # PR ships with the original worker diff only.
+                                try:
+                                    git_repo.repo.git.reset("--hard", _qa_pre_sha)
+                                except Exception:
+                                    pass
+                                _qa_result.revert_reason = str(_qa_apply_exc)[:200]
+                                _trace.emit(
+                                    "critic_qa.revised_reverted",
+                                    reason=str(_qa_apply_exc)[:200],
+                                )
+                                console.print(
+                                    f"[warn]Q&A revised patch reverted: {str(_qa_apply_exc)[:100]}[/warn]"
+                                )
+
                         console.print(
                             f"[muted]{_qa_result.summary_line()}[/muted]"
                         )
