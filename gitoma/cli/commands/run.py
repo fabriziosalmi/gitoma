@@ -259,6 +259,24 @@ def run(
 
     # ── Clone ───────────────────────────────────────────────────────────────
     git_repo = _clone_repo(repo_url, config)
+
+    # ── Pin worktree to base BEFORE anything reads the tree ────────────────
+    # Single source of truth: every downstream consumer (language detector,
+    # analyzer, file_tree snapshot, planner, worker) sees the same tree —
+    # the one rooted at ``base_branch``. Skipping this when --base is the
+    # default is a no-op (clone already left us there). Doing it later is
+    # incoherent: planner pins paths for the wrong tree, worker then
+    # operates on the right tree but with a plan that doesn't match.
+    if git_repo.current_branch() != base_branch:
+        try:
+            git_repo.checkout_base(base_branch)
+            console.print(f"[muted]Base branch checked out: {base_branch}[/muted]")
+        except Exception as e:
+            _abort(
+                f"Failed to check out base branch '{base_branch}': {e}",
+                hint=f"Ensure '{base_branch}' exists on origin (gh api repos/{owner}/{name}/branches).",
+            )
+
     languages = git_repo.detect_languages() or ["Unknown"]
     console.print(f"[muted]Languages detected: {', '.join(languages)}[/muted]")
 
@@ -485,14 +503,8 @@ def run(
                 if resumed_branch:
                     _ok(f"Resumed existing branch: {branch}")
                 else:
-                    # Pin worktree to ``base_branch`` first. ``Repo.clone_from``
-                    # leaves us on the repo's default branch; if --base is
-                    # something else, we must move there before branching, or
-                    # the working branch ends up rooted in the wrong tree
-                    # (PR creation then 422s with "no common ancestor").
-                    if git_repo.current_branch() != base_branch:
-                        git_repo.checkout_base(base_branch)
-                        _ok(f"Base branch checked out: {base_branch}")
+                    # Worktree is already pinned to ``base_branch`` (done
+                    # right after clone). Just branch off it.
                     git_repo.create_branch(branch)
                     _ok(f"Branch created: {branch} (off {base_branch})")
             except Exception as e:

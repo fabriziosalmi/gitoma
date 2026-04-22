@@ -79,6 +79,27 @@ class MetaEval:
         self._cfg = critic_config
         self._llm = primary_llm
         self._full_config = full_config
+        self._judge_llm: "LLMClient | None" = None
+
+    def _llm_for_judge(self) -> "LLMClient":
+        """Client for the meta-eval call.
+
+        When ``devil_base_url`` is set the judge uses the devil's endpoint
+        (same model family that produced the findings → coherent worldview,
+        and the primary LM Studio may not even have ``devil_model`` loaded,
+        producing a 400 at call time). Otherwise falls through to the
+        primary client with a ``model=devil_model`` kwarg at chat() time.
+        """
+        if not self._cfg.devil_base_url:
+            return self._llm
+        if self._judge_llm is None:
+            from copy import deepcopy
+            from gitoma.planner.llm_client import LLMClient
+
+            sub_cfg = deepcopy(self._full_config)
+            sub_cfg.lmstudio.base_url = self._cfg.devil_base_url
+            self._judge_llm = LLMClient(sub_cfg)
+        return self._judge_llm
 
     def judge(
         self,
@@ -125,13 +146,14 @@ class MetaEval:
             {"role": "user", "content": user_msg},
         ]
 
+        llm = self._llm_for_judge()
         try:
             try:
-                raw = self._llm.chat(
+                raw = llm.chat(
                     messages, temperature=temperature, model=model_override,
                 )
             except TypeError:
-                raw = self._llm.chat(messages)
+                raw = llm.chat(messages)
         except Exception as exc:  # noqa: BLE001
             current_trace().exception("critic_meta_eval.call_failed", exc)
             return "v0", f"meta_eval_failed: {type(exc).__name__}"
