@@ -1,0 +1,153 @@
+{
+  "_doc": "Synthetic bench cases for ANTISLOP A/B testing. Each case is one (subtask, context) tuple plus a deterministic checker spec for what 'slop' looks like in the expected output. Designed for both mock-LLM (default suite, deterministic) and live-LLM (opt-in, real model) modes. The checkers MUST be regex/string matches — never an LLM judging another LLM, that would re-introduce the variance we're trying to measure away.",
+  "version": 1,
+  "cases": [
+    {
+      "id": "py_secret_in_diff",
+      "subtask": {
+        "id": "T-S001",
+        "title": "Add a config loader for the staging environment",
+        "description": "Create gitoma/staging_config.py that loads STAGING_API_TOKEN and STAGING_DB_URL from a config dict and returns them.",
+        "file_hints": ["gitoma/staging_config.py"],
+        "action": "create"
+      },
+      "languages": ["Python"],
+      "current_files": {},
+      "antislop_should_select_rule_titles": [
+        "Hardcoded API Keys and Secrets",
+        "Magic Numbers",
+        "Swallowing errors with empty catch blocks"
+      ],
+      "violation_checkers": [
+        {
+          "id": "V_HARDCODED_TOKEN",
+          "category": "hardcoded_secret",
+          "description": "any string that looks like an inline token literal in a Python source",
+          "regex": "(?:STAGING_API_TOKEN|api_token|token)\\s*=\\s*['\"][A-Za-z0-9_\\-]{8,}['\"]",
+          "weight": 3
+        },
+        {
+          "id": "V_BARE_EXCEPT",
+          "category": "swallow_error",
+          "description": "bare except: with no body or just pass — silent failure pattern",
+          "regex": "except\\s*(?:Exception)?\\s*:\\s*\\n\\s*pass",
+          "weight": 2
+        }
+      ]
+    },
+    {
+      "id": "js_jquery_dom_react_repo",
+      "subtask": {
+        "id": "T-S002",
+        "title": "Add a click handler to the new-todo button",
+        "description": "Wire up the #new-todo-btn click event in src/ui/todos.tsx. Use the existing React hooks pattern.",
+        "file_hints": ["src/ui/todos.tsx"],
+        "action": "modify"
+      },
+      "languages": ["TypeScript", "JavaScript"],
+      "current_files": {
+        "src/ui/todos.tsx": "import { useState } from 'react';\n\nexport function TodoList() {\n  const [items, setItems] = useState([]);\n  return <div id=\"todos\"><button id=\"new-todo-btn\">Add</button></div>;\n}\n"
+      },
+      "antislop_should_select_rule_titles": [
+        "Direct DOM manipulation in React/Vue/Angular",
+        "Unnecessary reliance on jQuery in 2025"
+      ],
+      "violation_checkers": [
+        {
+          "id": "V_JQUERY_IMPORT",
+          "category": "jquery_in_react",
+          "description": "import or require of jquery in a React file",
+          "regex": "(?:import\\s+\\$.*from\\s+['\"]jquery['\"]|require\\(['\"]jquery['\"]\\))",
+          "weight": 3
+        },
+        {
+          "id": "V_RAW_DOM_QUERY",
+          "category": "dom_bypass_react",
+          "description": "document.getElementById / querySelector inside a React component",
+          "regex": "document\\.(?:getElementById|querySelector)\\s*\\(",
+          "weight": 2
+        }
+      ]
+    },
+    {
+      "id": "html_no_alt_text",
+      "subtask": {
+        "id": "T-S003",
+        "title": "Add the hero image to the landing page",
+        "description": "Insert <img> for hero.png into public/index.html inside the .hero section.",
+        "file_hints": ["public/index.html"],
+        "action": "modify"
+      },
+      "languages": ["HTML", "CSS"],
+      "current_files": {
+        "public/index.html": "<!DOCTYPE html>\n<html><body>\n  <section class=\"hero\"></section>\n</body></html>\n"
+      },
+      "antislop_should_select_rule_titles": [
+        "Ignoring accessibility (alt tags, ARIA labels)",
+        "Not using semantic HTML"
+      ],
+      "violation_checkers": [
+        {
+          "id": "V_IMG_NO_ALT",
+          "category": "missing_alt",
+          "description": "an <img> tag without an alt attribute",
+          "regex": "<img(?![^>]*\\salt=)[^>]*?/?>",
+          "weight": 3
+        }
+      ]
+    },
+    {
+      "id": "py_magic_number",
+      "subtask": {
+        "id": "T-S004",
+        "title": "Cache HTTP responses for one day",
+        "description": "Set the cache TTL on the get_user() call in gitoma/cache.py to 24 hours.",
+        "file_hints": ["gitoma/cache.py"],
+        "action": "modify"
+      },
+      "languages": ["Python"],
+      "current_files": {
+        "gitoma/cache.py": "import functools\n\n@functools.cache\ndef get_user(uid: str) -> dict:\n    # TODO: add TTL\n    return _fetch(uid)\n"
+      },
+      "antislop_should_select_rule_titles": [
+        "Magic Numbers"
+      ],
+      "violation_checkers": [
+        {
+          "id": "V_MAGIC_SECONDS",
+          "category": "magic_numbers",
+          "description": "raw 86400 as integer literal without a named constant",
+          "regex": "(?<![A-Z_])86400(?![A-Z_])",
+          "weight": 2
+        }
+      ]
+    },
+    {
+      "id": "rust_unwrap_in_lib",
+      "subtask": {
+        "id": "T-S005",
+        "title": "Parse the user-supplied filename in src/cli.rs",
+        "description": "Read the filename from args() in src/cli.rs and convert it to a PathBuf.",
+        "file_hints": ["src/cli.rs"],
+        "action": "modify"
+      },
+      "languages": ["Rust"],
+      "current_files": {
+        "src/cli.rs": "use std::env;\nuse std::path::PathBuf;\n\npub fn main_path() -> PathBuf {\n    todo!()\n}\n"
+      },
+      "antislop_should_select_rule_titles": [
+        "Swallowing errors with empty catch blocks",
+        "Assuming the user will always input valid data"
+      ],
+      "violation_checkers": [
+        {
+          "id": "V_RAW_UNWRAP_USER_INPUT",
+          "category": "panic_on_user_input",
+          "description": "unwrap() or expect() chained directly off env::args() (panic on bad user input)",
+          "regex": "env::args\\(\\)\\s*\\.[a-z_]+\\([^)]*\\)\\s*\\.(?:unwrap|expect)\\(",
+          "weight": 2
+        }
+      ]
+    }
+  ]
+}

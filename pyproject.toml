@@ -73,8 +73,9 @@ asyncio_mode = "strict"
 # with ``pytest -m e2e_cockpit`` (and set GITOMA_COCKPIT_URL + _TOKEN).
 markers = [
     "e2e_cockpit: browser-driven e2e against a live cockpit deploy (opt-in)",
+    "antislop_live: ANTISLOP A/B bench against a live LM Studio endpoint (opt-in)",
 ]
-addopts = "-m 'not e2e_cockpit'"
+addopts = "-m 'not e2e_cockpit and not antislop_live'"
 
 [tool.ruff]
 line-length = 100
