@@ -220,6 +220,7 @@ def _parse_findings(raw: str, *, persona: str) -> list[Finding]:
                 summary=f.summary,
                 file=f.file,
                 line_range=f.line_range,
+                axiom=f.axiom,
             )
         )
     return out

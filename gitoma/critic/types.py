@@ -48,6 +48,11 @@ class Finding:
     ``file`` / ``line_range`` are best-effort; LLMs frequently miss precise
     lines, so we accept ``None`` rather than fabricate.
     ``summary`` is the human sentence that ends up in the trace + log.
+    ``axiom`` is the iter-6 categorisation: ``¬M`` (anti-mutation), ``¬S``
+    (anti-hope), ``¬A`` (anti-ambiguity), or ``¬O`` (anti-opacity). Optional
+    on the dataclass so legacy code keeps working — the devil's prompt
+    requires it, the panel personas may emit it, dashboard metrics
+    aggregate per-axiom when present.
     """
     persona: str
     severity: Severity
@@ -55,6 +60,7 @@ class Finding:
     summary: str
     file: str | None = None
     line_range: tuple[int, int] | None = None
+    axiom: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -97,10 +103,26 @@ class PanelResult:
                 if self.tokens_extra is not None
                 else None
             ),
+            # iter 6 metric layer: per-axiom finding count. Always
+            # 4 keys (zero on absent) so downstream aggregation has a
+            # stable shape across runs / repos.
+            "axiom_profile": self.axiom_profile(),
         }
 
     def has_blocker(self) -> bool:
         return any(f.severity == "blocker" for f in self.findings)
+
+    def axiom_profile(self) -> dict[str, int]:
+        """Return the {¬M:n, ¬S:n, ¬A:n, ¬O:n} count of findings by axiom.
+
+        Findings without an axiom tag (legacy / panel personas pre-iter-6)
+        are NOT counted — the profile measures how many findings the
+        upgraded categorisation captured, not the total."""
+        profile: dict[str, int] = {"¬M": 0, "¬S": 0, "¬A": 0, "¬O": 0}
+        for f in self.findings:
+            if f.axiom in profile:
+                profile[f.axiom] += 1
+        return profile
 
 
 # ── Pydantic strict models for the LLM-output boundary ──────────────────────
@@ -119,13 +141,39 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+# Canonical axiom symbols. Kept here (not imported from axioms.py) so
+# critic/types.py has no circular dependency on axioms.py — the latter
+# imports Rule from antislop, and Rule is independent of types.
+_AXIOM_SYMBOLS = frozenset({"¬M", "¬S", "¬A", "¬O"})
+# Tolerant input synonyms — small models often emit ASCII variants of
+# the unicode symbols. Map to canonical at validation time.
+_AXIOM_SYNONYMS: dict[str, str] = {
+    "¬m": "¬M", "¬s": "¬S", "¬a": "¬A", "¬o": "¬O",
+    "!m": "¬M", "!s": "¬S", "!a": "¬A", "!o": "¬O",
+    "not m": "¬M", "not s": "¬S", "not a": "¬A", "not o": "¬O",
+    "anti_mutation": "¬M", "anti_hope": "¬S",
+    "anti_ambiguity": "¬A", "anti_opacity": "¬O",
+    "anti-mutation": "¬M", "anti-hope": "¬S",
+    "anti-ambiguity": "¬A", "anti-opacity": "¬O",
+    "m": "¬M", "s": "¬S", "a": "¬A", "o": "¬O",
+}
+
+
 class LLMFinding(_StrictModel):
-    """One finding as emitted by the LLM (panel persona OR devil)."""
+    """One finding as emitted by the LLM (panel persona OR devil).
+
+    ``axiom`` is the iter-6 categorisation. Optional for backwards
+    compat with iter 1-5 panel personas that don't emit it; the devil
+    prompt (iter 6) requires it. When present it must be one of
+    {¬M, ¬S, ¬A, ¬O} — synonyms (ASCII, English names, single letters)
+    are normalised to canonical at validation time.
+    """
     severity: Severity
     category: str = Field(min_length=1, max_length=64)
     summary: str = Field(min_length=1, max_length=500)
     file: str | None = None
     line_range: tuple[int, int] | None = None
+    axiom: str | None = None
 
     @field_validator("severity", mode="before")
     @classmethod
@@ -138,6 +186,21 @@ class LLMFinding(_StrictModel):
             return v
         v = v.strip().lower()
         return {"low": "minor", "high": "major", "critical": "blocker"}.get(v, v)
+
+    @field_validator("axiom", mode="before")
+    @classmethod
+    def _normalise_axiom(cls, v: Any) -> Any:
+        """Map common synonyms to the canonical ¬M/¬S/¬A/¬O symbols.
+        Anything else (including unparseable input) stays None — the
+        finding survives but is uncategorised in the dashboard."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return None
+        s = v.strip()
+        if s in _AXIOM_SYMBOLS:
+            return s
+        return _AXIOM_SYNONYMS.get(s.lower())  # None if no match
 
 
 class LLMPanelOutput(_StrictModel):

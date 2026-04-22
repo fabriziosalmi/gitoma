@@ -336,6 +336,96 @@ def test_finding_to_dict_matches_fixture_schema():
     json.dumps(d)
 
 
+# ── Iteration 6 (repositioned): axiom field on findings + profile ───────────
+
+
+def test_finding_dataclass_accepts_optional_axiom_field():
+    """Iter 6 added an optional ``axiom`` field to Finding for the
+    devil-prompt-driven categorisation. Legacy code (panel personas
+    pre-iter-6) that constructs Finding WITHOUT axiom must still work
+    — backward compat contract."""
+    legacy = Finding("dev", "blocker", "x", "y")
+    assert legacy.axiom is None
+    iter6 = Finding("devil", "major", "x", "y", axiom="¬S")
+    assert iter6.axiom == "¬S"
+
+
+def test_llm_finding_pydantic_normalises_axiom_synonyms():
+    """The LLM may emit ASCII variants or English names for the
+    axiom symbols. The validator normalises a closed set of synonyms
+    to the canonical {¬M, ¬S, ¬A, ¬O}; everything else → None
+    (finding survives, just uncategorised in the profile)."""
+    from gitoma.critic.types import LLMFinding
+
+    base = {"severity": "minor", "category": "x", "summary": "y"}
+    # Canonical passes through
+    assert LLMFinding(**base, axiom="¬M").axiom == "¬M"
+    # ASCII variants normalised
+    assert LLMFinding(**base, axiom="!s").axiom == "¬S"
+    assert LLMFinding(**base, axiom="anti_ambiguity").axiom == "¬A"
+    assert LLMFinding(**base, axiom="ANTI-OPACITY").axiom == "¬O"
+    assert LLMFinding(**base, axiom="m").axiom == "¬M"
+    # Unknown gets dropped silently to None — finding survives
+    assert LLMFinding(**base, axiom="totally_made_up").axiom is None
+    # None stays None
+    assert LLMFinding(**base, axiom=None).axiom is None
+
+
+def test_panel_result_axiom_profile_aggregates_4_keys():
+    """PanelResult.axiom_profile() returns a dict with the canonical
+    4 keys (¬M ¬S ¬A ¬O) ALWAYS, populated from finding.axiom counts.
+    Findings without an axiom tag are NOT counted (profile measures
+    coverage of the iter-6 categorisation, not total volume)."""
+    findings = [
+        Finding("devil", "blocker", "x", "y", axiom="¬M"),
+        Finding("devil", "major", "x", "y", axiom="¬S"),
+        Finding("devil", "major", "x", "y", axiom="¬S"),
+        Finding("devil", "minor", "x", "y", axiom="¬A"),
+        Finding("dev", "minor", "x", "y"),  # no axiom — uncategorised
+    ]
+    pr = PanelResult(
+        subtask_id="x", verdict="advisory_logged",
+        personas_called=["devil"], findings=findings,
+    )
+    profile = pr.axiom_profile()
+    assert profile == {"¬M": 1, "¬S": 2, "¬A": 1, "¬O": 0}
+    # And the same shape lands in to_dict() for state.json persistence
+    d = pr.to_dict()
+    assert d["axiom_profile"] == profile
+
+
+def test_devil_prompt_includes_all_four_axiom_filters():
+    """¬B / source-pin: the devil prompt MUST surface all 4 axioms with
+    their binary filters. A future refactor that drops one (e.g. ¬M
+    because 'we don't deal with mutation') would silently weaken the
+    review without anyone noticing — pin it explicitly."""
+    from gitoma.critic.devil import DEVIL_PROMPT
+    for axiom_symbol in ("¬M", "¬S", "¬A", "¬O"):
+        assert axiom_symbol in DEVIL_PROMPT, (
+            f"devil prompt missing axiom {axiom_symbol} — categorisation "
+            "becomes partial"
+        )
+    # The output schema must require ``axiom`` field
+    assert '"axiom"' in DEVIL_PROMPT
+    # The formal validity formula must be in there as the framing
+    assert "S_valid" in DEVIL_PROMPT or "∀x" in DEVIL_PROMPT
+
+
+def test_parse_findings_threads_axiom_through():
+    """End-to-end: when the LLM emits axiom-tagged findings, the parser
+    preserves the axiom on the resulting Finding objects."""
+    raw = json.dumps({"findings": [
+        {"severity": "blocker", "category": "x", "summary": "y", "axiom": "¬M"},
+        {"severity": "major", "category": "x", "summary": "y", "axiom": "anti_hope"},
+        {"severity": "minor", "category": "x", "summary": "y"},  # no axiom
+    ]})
+    findings = _parse_findings(raw, persona="devil")
+    assert len(findings) == 3
+    assert findings[0].axiom == "¬M"
+    assert findings[1].axiom == "¬S"  # normalised from synonym
+    assert findings[2].axiom is None
+
+
 def test_panel_result_to_dict_serialisable_for_state_log():
     """PanelResult.to_dict() is what gets appended to
     AgentState.critic_panel_findings_log and persisted in state.json. It
