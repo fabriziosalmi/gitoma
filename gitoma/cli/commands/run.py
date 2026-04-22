@@ -554,7 +554,20 @@ def run(
                     save_state(state)
 
             console.print()
-            worker = WorkerAgent(llm=llm, git_repo=git_repo, config=config, state=state)
+            # Compile-fix mode: active when the Build Integrity analyzer
+            # reported failure at audit time. Propagates into the patcher
+            # so build-manifest edits are hard-rejected, not merely
+            # prompt-discouraged.
+            _compile_fix_mode = any(
+                m.name == "build" and m.status == "fail" for m in report.metrics
+            )
+            worker = WorkerAgent(
+                llm=llm,
+                git_repo=git_repo,
+                config=config,
+                state=state,
+                compile_fix_mode=_compile_fix_mode,
+            )
 
             from gitoma.planner.task import SubTask, Task
 
@@ -745,8 +758,14 @@ def run(
                         from gitoma.worker.committer import Committer
                         from gitoma.worker.patcher import apply_patches
                         try:
+                            # Refiner patches get the same compile-fix gate
+                            # as worker patches — otherwise the refiner could
+                            # still corrupt a build manifest on its way to
+                            # "fixing" a devil-flagged issue.
                             _refine_touched = apply_patches(
-                                git_repo.root, _refine_out["patches"]
+                                git_repo.root,
+                                _refine_out["patches"],
+                                compile_fix_mode=_compile_fix_mode,
                             )
                             if _refine_touched:
                                 Committer(git_repo, config).commit_patches(

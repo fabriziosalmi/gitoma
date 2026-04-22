@@ -71,6 +71,28 @@ _DENY_FILENAMES: frozenset[str] = frozenset({
 })
 _DENY_FILENAME_PREFIXES: tuple[str, ...] = (".env.",)  # .env.prod, .env.local…
 
+# Build-system manifests: files parsed deterministically by a toolchain
+# at build time. Any malformed edit here breaks the entire project
+# before any unit test can run (caught live rung-1 v2: worker wrote
+# Python-style ``# comments`` into go.mod, go refused to parse).
+#
+# These are NOT in the permanent denylist — some runs legitimately need
+# to add a dependency or tighten a version pin. They are rejected ONLY
+# when ``compile_fix_mode=True`` is passed to ``apply_patches``, i.e.
+# when the Build Integrity analyzer reported FAIL and the run's sole
+# goal is to get the project back to "compiles cleanly". A cosmetic
+# edit to go.mod mid-compile-fix is guaranteed to be garbage.
+_BUILD_MANIFESTS: frozenset[str] = frozenset({
+    "go.mod",
+    "Cargo.toml",
+    "pyproject.toml", "setup.py", "setup.cfg",
+    "requirements.txt", "requirements-dev.txt",
+    "package.json",
+    "Gemfile",
+    "composer.json",
+    "build.gradle", "build.gradle.kts", "pom.xml",
+})
+
 
 def denylist_summary() -> str:
     """Return a compact, human-readable listing of denied paths.
@@ -148,13 +170,48 @@ def _reject_if_denied(rel_path: str) -> None:
         raise PatchError(f"Refusing to touch sensitive file: {rel_path}")
 
 
-def apply_patches(root: Path, patches: list[dict[str, Any]]) -> list[str]:
+def _reject_if_build_manifest(rel_path: str) -> None:
+    """Conditional rejection active only when compile_fix_mode=True.
+
+    A compile-fix run ("project doesn't build; make it build") has no
+    business editing build-system manifests — the compiler's complaint
+    is about source, not about dependencies. Letting the LLM rewrite
+    a manifest here is how rung-1 v2 ended with ``# Python-style``
+    comments in ``go.mod`` and a broken tree."""
+    parts = PurePosixPath(rel_path.replace("\\", "/")).parts
+    if not parts:
+        return
+    filename = parts[-1]
+    if filename in _BUILD_MANIFESTS:
+        raise PatchError(
+            f"Refusing to edit build manifest {rel_path!r} during compile-fix mode — "
+            "the Build Integrity analyzer reported failure; the run's goal is to "
+            "restore a compiling state, not to reshape dependencies. "
+            "If the compile error genuinely requires a manifest change, surface that "
+            "as a separate subtask after the build is green."
+        )
+
+
+def apply_patches(
+    root: Path,
+    patches: list[dict[str, Any]],
+    *,
+    compile_fix_mode: bool = False,
+) -> list[str]:
     """Apply a list of file patches to the repo working tree.
 
     Each patch dict has:
         - action: "create" | "modify" | "delete"
         - path: relative path string (must stay inside ``root``)
         - content: file content (for create/modify, <= MAX_PATCH_SIZE_BYTES)
+
+    When ``compile_fix_mode=True``, any patch whose filename is in
+    ``_BUILD_MANIFESTS`` is rejected — the Build Integrity analyzer
+    failed and the run's goal is to restore a compiling state, NOT
+    to reshape dependencies. This is the patcher-level hard block
+    that backs the planner-level prompt rule (the prompt asks the
+    LLM not to emit those edits; this gate ensures we reject them
+    even when the LLM ignores the prompt).
 
     Returns list of touched relative paths.
     """
@@ -171,6 +228,8 @@ def apply_patches(root: Path, patches: list[dict[str, Any]]) -> list[str]:
 
         _reject_unsafe_relpath(rel_path)
         _reject_if_denied(rel_path)
+        if compile_fix_mode:
+            _reject_if_build_manifest(rel_path)
 
         # Resolve and require strict containment — NOT str.startswith, which
         # would incorrectly accept `/tmp/foo` as a prefix of `/tmp/foo-evil`.

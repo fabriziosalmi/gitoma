@@ -38,11 +38,19 @@ class WorkerAgent:
         git_repo: GitRepo,
         config: Config,
         state: AgentState,
+        *,
+        compile_fix_mode: bool = False,
     ) -> None:
         self._llm = llm
         self._git = git_repo
         self._config = config
         self._state = state
+        # When the Build Integrity analyzer reports failure, the worker
+        # enters "compile-fix mode" — the patcher rejects any edit to
+        # a build manifest (go.mod, pyproject.toml, package.json, …)
+        # because a mid-compile-fix manifest edit is a near-certain
+        # regression (caught rung-1 v2: ``# comments`` corrupted go.mod).
+        self._compile_fix_mode = compile_fix_mode
         self._committer = Committer(git_repo, config)
         # Critic panel is created lazily — only when mode != "off" — so a
         # fresh-clone test that never touches the panel doesn't pay for an
@@ -166,8 +174,11 @@ class WorkerAgent:
         if "[gitoma]" not in commit_msg:
             commit_msg += " [gitoma]"
 
-        # Apply patches
-        touched = apply_patches(self._git.root, patches)
+        # Apply patches — with build-manifest hard block when the run
+        # is in compile-fix mode (patcher level, not just prompt level).
+        touched = apply_patches(
+            self._git.root, patches, compile_fix_mode=self._compile_fix_mode,
+        )
 
         if not touched:
             raise ValueError("Patches produced no file changes")
