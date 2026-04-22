@@ -679,16 +679,33 @@ def run(
                     _v0_sha = git_repo.repo.head.commit.hexsha
                     _v0_diff = git_repo.repo.git.diff(f"{base_branch}..HEAD")
 
+                    # Read current content of files referenced by triggers
+                    # so the refiner can perform "modify" actions without
+                    # hallucinating. Without this, gemma-4 was emitting
+                    # unified-diff fragments into the ``content`` field
+                    # (live-observed on iter4 first run).
+                    _flagged_paths = {
+                        f.file for f in _devil_result.findings
+                        if f.severity in ("blocker", "major") and f.file
+                    }
+                    _flagged_content: dict[str, str] = {}
+                    for _fp in _flagged_paths:
+                        _txt = git_repo.read_file(_fp)
+                        if _txt is not None:
+                            _flagged_content[_fp] = _txt
+
                     with _trace.span(
                         "critic_refiner.propose",
                         triggers_count=sum(
                             1 for f in _devil_result.findings
                             if f.severity in ("blocker", "major")
                         ),
+                        files_supplied=len(_flagged_content),
                     ) as rfields:
                         _refine_out = _refiner.propose(
                             branch_diff=_v0_diff,
                             devil_findings=_devil_result.findings,
+                            flagged_files_content=_flagged_content,
                         )
                         rfields["patches_count"] = len(_refine_out.get("patches", []))
 

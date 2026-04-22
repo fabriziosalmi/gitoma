@@ -52,6 +52,31 @@ Constraints:
     skip it (the meta-eval will catch the gap) — better to fix 3 of 4
     cleanly than 4 of 4 messily.
 
+CRITICAL: ``content`` must be the COMPLETE FINAL file as it will be
+written to disk — NOT a diff, NOT a hunk, NOT a delta. Include every
+line that should exist in the file after the edit, exactly as it
+should appear. The patcher does NOT understand ``@@ -X,Y +A,B @@``,
+``+`` / ``-`` line prefixes, or any other unified-diff syntax. If you
+emit a diff string in ``content``, the patch will be REJECTED.
+
+WRONG (will be rejected):
+{
+  "action": "modify",
+  "path": ".eslintrc.json",
+  "content": "@@ -6,7 +6,8 @@\n   \"extends\": [\n-    \"x\"\n+    \"y\"\n   ]"
+}
+
+RIGHT (entire post-edit file content):
+{
+  "action": "modify",
+  "path": ".eslintrc.json",
+  "content": "{\n  \"extends\": [\n    \"y\",\n    \"prettier\"\n  ]\n}\n"
+}
+
+For "modify" actions you MUST receive the current file content first
+to know what to keep — if you don't have it, prefer to skip that
+finding rather than guess.
+
 Output strictly a JSON object on a single block, nothing else:
 
 {
@@ -59,14 +84,15 @@ Output strictly a JSON object on a single block, nothing else:
     {
       "action": "create" | "modify" | "delete",
       "path": "relative/path/to/file",
-      "content": "full file content as a single string (omit for delete)"
+      "content": "<entire final file content; omit for delete>"
     }
   ],
   "commit_message": "refine: <one short sentence on what was fixed>"
 }
 
 If you cannot or should not refine (no actionable blockers in the
-findings), output ``{"patches": [], "commit_message": ""}``.
+findings, or you'd need file contents you don't have), output
+``{"patches": [], "commit_message": ""}``.
 """
 
 
@@ -98,10 +124,19 @@ class Refiner:
         branch_diff: str,
         devil_findings: list[Finding],
         repo_files_summary: str = "",
+        flagged_files_content: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Run one refinement turn. Returns a dict with ``patches`` (list)
         and ``commit_message`` (str). Empty patches list = "no actionable
         refinement, keep v0".
+
+        ``flagged_files_content`` maps relative path → current content
+        for the files referenced in the devil's findings. WITHOUT these,
+        the model is asked to ``modify`` files it has never seen — and
+        small models hallucinate content (or, observed live, emit unified
+        diffs into the ``content`` field). Even an empty dict is better
+        than None: it tells the prompt template "context omitted on
+        purpose, prefer to skip rather than guess".
 
         Crash-safe: any LLM/parse error returns ``{"patches": [], ...}``
         with the failure recorded in the trace, NOT raised.
@@ -116,11 +151,13 @@ class Refiner:
         # Future enhancement: dedicated CRITIC_PANEL_REFINER_MODEL config
         # if we want a different model for the fix-up step.
         findings_block = _format_findings_for_actor(triggers)
+        files_block = _format_flagged_files(flagged_files_content or {})
 
         user_msg = (
             (f"Repository file context:\n{repo_files_summary}\n\n" if repo_files_summary else "")
             + f"Devil's-advocate findings to address ({len(triggers)}):\n{findings_block}\n\n"
-            + "Current full branch diff (your previous work):\n"
+            + (files_block + "\n\n" if files_block else "")
+            + "Current full branch diff (your previous work, for orientation only — DO NOT echo back as patch content):\n"
             + "```diff\n" + branch_diff.rstrip() + "\n```"
         )
 
@@ -156,3 +193,45 @@ def _format_findings_for_actor(findings: list[Finding]) -> str:
             loc += "]"
         lines.append(f"{i}. ({f.severity}) {f.category}{loc}: {f.summary}")
     return "\n".join(lines)
+
+
+# Per-file content payload cap — keeps the prompt manageable on small
+# models (4-9B with practical 8-32K usable context). Files larger than
+# this are truncated with a clear marker; the model is told the file
+# was truncated so it can decide to skip rather than fabricate.
+_MAX_FILE_PAYLOAD_CHARS = 12_000
+
+
+def _format_flagged_files(content_by_path: dict[str, str]) -> str:
+    """Render the current content of files mentioned in the findings.
+
+    Each file gets a labelled fence with the language inferred from the
+    extension. Large files are truncated explicitly so the model never
+    silently sees a partial file."""
+    if not content_by_path:
+        return ""
+    parts: list[str] = ["Current content of files referenced in findings (for ``modify`` patches, this is what you must transform):"]
+    for path, content in sorted(content_by_path.items()):
+        lang = _lang_for_path(path)
+        body = content
+        if len(body) > _MAX_FILE_PAYLOAD_CHARS:
+            half = _MAX_FILE_PAYLOAD_CHARS // 2
+            body = (
+                body[:half]
+                + f"\n\n... [TRUNCATED {len(content) - _MAX_FILE_PAYLOAD_CHARS} chars; do NOT modify this file unless absolutely necessary] ...\n\n"
+                + body[-half:]
+            )
+        parts.append(f"### `{path}`\n```{lang}\n{body}\n```")
+    return "\n\n".join(parts)
+
+
+def _lang_for_path(path: str) -> str:
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return {
+        "py": "python", "js": "javascript", "ts": "typescript",
+        "rs": "rust", "go": "go", "rb": "ruby", "java": "java",
+        "kt": "kotlin", "swift": "swift", "c": "c", "cpp": "cpp",
+        "h": "c", "hpp": "cpp", "cs": "csharp", "sh": "bash",
+        "yaml": "yaml", "yml": "yaml", "json": "json", "toml": "toml",
+        "md": "markdown", "html": "html", "css": "css",
+    }.get(ext, "")

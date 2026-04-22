@@ -487,6 +487,53 @@ def test_refiner_propose_calls_llm_with_findings_in_prompt():
     assert "src/main.rs" in user_text
 
 
+def test_refiner_includes_flagged_files_content_in_prompt():
+    """The refiner MUST embed the current content of files referenced
+    in the findings — without this the model is asked to ``modify``
+    files it has never seen and (live-observed in iter4) emits unified
+    diffs into the ``content`` field instead of full file content.
+    Mirror image: an empty content dict still works — the model is
+    told to skip rather than guess (handled by the prompt template)."""
+    from gitoma.critic.refiner import Refiner
+
+    llm = MagicMock()
+    llm.chat_json = MagicMock(return_value={"patches": [], "commit_message": ""})
+    r = Refiner(_cfg(), llm, MagicMock())
+
+    findings = [Finding("devil", "blocker", "x", "y", file=".eslintrc.json")]
+    r.propose(
+        branch_diff="diff",
+        devil_findings=findings,
+        flagged_files_content={
+            ".eslintrc.json": '{"extends": ["eslint:recommended"]}\n',
+        },
+    )
+    # Pull out the user message and confirm the file payload landed in it.
+    messages = llm.chat_json.call_args.args[0]
+    user_text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+    assert ".eslintrc.json" in user_text
+    assert '"extends"' in user_text
+    # And the explicit "this is what to transform" framing
+    assert "Current content of files referenced" in user_text
+
+
+def test_refiner_prompt_explicitly_rejects_diff_format():
+    """Pin the system-prompt contract: the refiner prompt MUST contain
+    explicit instructions that ``content`` is the FINAL FILE, not a
+    diff hunk. Live-observed regression on iter4: gemma-4 emitted
+    ``@@ -X,Y +A,B @@`` into ``content`` and the patcher rejected
+    every refinement.  This source-level pin guards against silent
+    drift if someone ever shortens the prompt."""
+    from gitoma.critic.refiner import REFINER_PROMPT
+    # The negative example must be literally present so the model sees
+    # exactly what NOT to do.
+    assert "@@" in REFINER_PROMPT
+    assert "WRONG" in REFINER_PROMPT
+    assert "RIGHT" in REFINER_PROMPT
+    # And the prohibition itself
+    assert "NOT a diff" in REFINER_PROMPT or "not a diff" in REFINER_PROMPT.lower()
+
+
 def test_refiner_crash_returns_empty_not_propagates():
     """LLM crashes during refinement (network error, OOM, etc.) → return
     empty patches, do NOT propagate. The worker is far past commit; a
