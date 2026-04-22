@@ -420,6 +420,175 @@ def test_devil_advocate_call_failure_becomes_synthetic_finding():
     assert "ConnectionError" in result.findings[0].summary
 
 
+# ── Iteration 4: refinement turn (cap 1) + meta-eval keep-if-better ─────────
+
+
+def test_refiner_should_refine_only_on_blocker_or_major():
+    """The refinement turn is expensive (extra LLM call + extra commit
+    that may need revert). Only worth it for blocker/major. nit/minor
+    is cosmetic and the panel already captured it."""
+    from gitoma.critic.refiner import Refiner
+
+    r = Refiner.__new__(Refiner)  # bypass __init__, only testing pure method
+    assert r.should_refine([Finding("devil", "blocker", "x", "y")]) is True
+    assert r.should_refine([Finding("devil", "major", "x", "y")]) is True
+    assert r.should_refine([Finding("devil", "minor", "x", "y")]) is False
+    assert r.should_refine([Finding("devil", "nit", "x", "y")]) is False
+    assert r.should_refine([]) is False
+    # Mixed list: at least one trigger ⇒ refine
+    assert r.should_refine([
+        Finding("devil", "nit", "x", "y"),
+        Finding("devil", "blocker", "x", "y"),
+    ]) is True
+
+
+def test_refiner_propose_returns_empty_when_no_triggers():
+    """Defensive: if propose() is called with only nit/minor findings
+    (caller forgot to gate on should_refine), it returns empty patches
+    instead of burning an LLM call on a non-trigger."""
+    from gitoma.critic.refiner import Refiner
+
+    llm = MagicMock()
+    llm.chat_json = MagicMock()
+    r = Refiner(_cfg(), llm, MagicMock())
+    out = r.propose(
+        branch_diff="diff",
+        devil_findings=[Finding("devil", "nit", "x", "y")],
+    )
+    assert out == {"patches": [], "commit_message": ""}
+    llm.chat_json.assert_not_called()
+
+
+def test_refiner_propose_calls_llm_with_findings_in_prompt():
+    """Happy path — devil flagged a blocker, refiner builds the prompt
+    and emits a patch. The prompt MUST include the finding text so the
+    actor knows what to fix."""
+    from gitoma.critic.refiner import Refiner
+
+    llm = MagicMock()
+    llm.chat_json = MagicMock(return_value={
+        "patches": [{"action": "modify", "path": "src/main.rs", "content": "fn main() {}"}],
+        "commit_message": "refine: restore fn main()",
+    })
+    r = Refiner(_cfg(), llm, MagicMock())
+    findings = [
+        Finding("devil", "blocker", "compile_breakage",
+                "removed fn main()", file="src/main.rs", line_range=(56, 103)),
+    ]
+    out = r.propose(branch_diff="-fn main() {...}", devil_findings=findings)
+
+    assert len(out["patches"]) == 1
+    assert out["commit_message"].startswith("refine:")
+    # Verify the finding text reached the user message
+    _, kwargs = llm.chat_json.call_args
+    messages = llm.chat_json.call_args.args[0]
+    user_text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+    assert "removed fn main()" in user_text
+    assert "src/main.rs" in user_text
+
+
+def test_refiner_crash_returns_empty_not_propagates():
+    """LLM crashes during refinement (network error, OOM, etc.) → return
+    empty patches, do NOT propagate. The worker is far past commit; a
+    crash here would orphan the run for no reason."""
+    from gitoma.critic.refiner import Refiner
+
+    llm = MagicMock()
+    llm.chat_json = MagicMock(side_effect=ConnectionError("LM Studio dead"))
+    r = Refiner(_cfg(), llm, MagicMock())
+    out = r.propose(
+        branch_diff="diff",
+        devil_findings=[Finding("devil", "blocker", "x", "y")],
+    )
+    assert out == {"patches": [], "commit_message": ""}
+
+
+# ── MetaEval keep-if-better ──────────────────────────────────────────────────
+
+
+def test_meta_eval_v0_kept_when_no_diff_change():
+    """If v1 is identical to v0 (refinement produced no actual changes)
+    or v1 is empty, keep v0 — short-circuit no LLM call needed."""
+    from gitoma.critic.meta import MetaEval
+
+    llm = MagicMock()
+    llm.chat = MagicMock()
+    m = MetaEval(_cfg(), llm, MagicMock())
+    winner, _ = m.judge(v0_diff="diff a", v1_diff="diff a", devil_findings=[])
+    assert winner == "v0"
+    winner, _ = m.judge(v0_diff="diff a", v1_diff="", devil_findings=[])
+    assert winner == "v0"
+    llm.chat.assert_not_called()
+
+
+def test_meta_eval_returns_v1_when_llm_says_so():
+    """LLM emits valid JSON with winner=v1 → meta returns v1 with rationale."""
+    from gitoma.critic.meta import MetaEval
+
+    llm = MagicMock()
+    llm.chat = MagicMock(return_value=json.dumps({
+        "winner": "v1",
+        "rationale": "fixed the blocker without introducing new issues",
+    }))
+    llm._last_usage = (200, 50)
+
+    m = MetaEval(_cfg(), llm, MagicMock())
+    winner, rationale = m.judge(
+        v0_diff="diff a", v1_diff="diff b",
+        devil_findings=[Finding("devil", "blocker", "x", "y")],
+    )
+    assert winner == "v1"
+    assert "fixed the blocker" in rationale
+
+
+def test_meta_eval_falls_back_to_v0_on_garbage_response():
+    """Conservative default: any malformed LLM output → v0.
+    Misclassifying a refinement as 'better' than it is is the dangerous
+    failure mode; misclassifying a real improvement as not-better just
+    means we ship v0 (which we'd ship anyway without iter-4)."""
+    from gitoma.critic.meta import MetaEval
+
+    llm = MagicMock()
+    llm.chat = MagicMock(return_value="not json at all")
+    m = MetaEval(_cfg(), llm, MagicMock())
+    winner, rationale = m.judge(
+        v0_diff="a", v1_diff="b", devil_findings=[],
+    )
+    assert winner == "v0"
+    assert "no_json_block" in rationale
+
+
+def test_meta_eval_falls_back_to_v0_on_llm_crash():
+    """Same conservative default for LLM call failures (network, etc.)."""
+    from gitoma.critic.meta import MetaEval
+
+    llm = MagicMock()
+    llm.chat = MagicMock(side_effect=ConnectionError("nope"))
+    m = MetaEval(_cfg(), llm, MagicMock())
+    winner, rationale = m.judge(
+        v0_diff="a", v1_diff="b", devil_findings=[],
+    )
+    assert winner == "v0"
+    assert "meta_eval_failed" in rationale
+
+
+def test_meta_eval_unknown_winner_string_falls_back_to_v0():
+    """LLM returns valid JSON with winner='maybe' or some other invented
+    string → v0 (safer than guessing intent)."""
+    from gitoma.critic.meta import MetaEval
+
+    llm = MagicMock()
+    llm.chat = MagicMock(return_value=json.dumps({
+        "winner": "maybe", "rationale": "i can't decide",
+    }))
+    m = MetaEval(_cfg(), llm, MagicMock())
+    winner, rationale = m.judge(
+        v0_diff="a", v1_diff="b", devil_findings=[],
+    )
+    assert winner == "v0"
+    assert "unknown_winner" in rationale
+
+
 def test_devil_advocate_separate_endpoint_builds_secondary_client():
     """When devil_base_url differs from the worker's, the devil builds a
     second LLMClient pointing at that URL. The primary client is

@@ -664,6 +664,92 @@ def run(
                         : len(state.critic_panel_findings_log) - 200
                     ]
                 save_state(state)
+
+                # ── PHASE 3.6 — REFINEMENT TURN (cap 1) + META-EVAL ──
+                # If the devil flagged blocker/major findings, give the
+                # actor exactly ONE chance to fix them with a follow-up
+                # commit. The meta-eval then decides whether to keep the
+                # refinement or revert it (default conservative: keep v0
+                # on tie / parse failure / crash).
+                from gitoma.critic import Refiner, MetaEval
+                _refiner = Refiner(config.critic_panel, llm, config)
+                if _refiner.should_refine(_devil_result.findings):
+                    # Snapshot v0 SHA before any refinement commit so we can
+                    # revert if meta-eval votes v0.
+                    _v0_sha = git_repo.repo.head.commit.hexsha
+                    _v0_diff = git_repo.repo.git.diff(f"{base_branch}..HEAD")
+
+                    with _trace.span(
+                        "critic_refiner.propose",
+                        triggers_count=sum(
+                            1 for f in _devil_result.findings
+                            if f.severity in ("blocker", "major")
+                        ),
+                    ) as rfields:
+                        _refine_out = _refiner.propose(
+                            branch_diff=_v0_diff,
+                            devil_findings=_devil_result.findings,
+                        )
+                        rfields["patches_count"] = len(_refine_out.get("patches", []))
+
+                    if _refine_out.get("patches"):
+                        # Apply + commit the refinement (v1 = v0 + 1 commit).
+                        from gitoma.worker.committer import Committer
+                        from gitoma.worker.patcher import apply_patches
+                        try:
+                            _refine_touched = apply_patches(
+                                git_repo.root, _refine_out["patches"]
+                            )
+                            if _refine_touched:
+                                Committer(git_repo, config).commit_patches(
+                                    _refine_touched,
+                                    _refine_out.get("commit_message")
+                                    or "refine: address devil findings (1 turn)",
+                                )
+                                _v1_diff = git_repo.repo.git.diff(
+                                    f"{base_branch}..HEAD"
+                                )
+                                # Meta-eval: keep v1 only if genuinely better.
+                                with _trace.span(
+                                    "critic_meta_eval.judge",
+                                    v0_sha=_v0_sha[:8],
+                                ) as mfields:
+                                    _meta = MetaEval(
+                                        config.critic_panel, llm, config
+                                    )
+                                    _winner, _rationale = _meta.judge(
+                                        v0_diff=_v0_diff,
+                                        v1_diff=_v1_diff,
+                                        devil_findings=_devil_result.findings,
+                                    )
+                                    mfields["winner"] = _winner
+                                    mfields["rationale"] = _rationale[:160]
+                                # tie / v0 → revert v1 commit (keep v0)
+                                if _winner != "v1":
+                                    git_repo.repo.git.reset(
+                                        "--hard", _v0_sha
+                                    )
+                                    _trace.emit(
+                                        "critic_refiner.reverted",
+                                        winner=_winner,
+                                        rationale=_rationale[:160],
+                                    )
+                                else:
+                                    _trace.emit(
+                                        "critic_refiner.kept",
+                                        rationale=_rationale[:160],
+                                    )
+                        except Exception as _refine_exc:  # noqa: BLE001
+                            # Refinement / commit / meta failed AFTER
+                            # patches applied — revert any partial changes.
+                            from gitoma.core.trace import current as _ct
+                            _ct().exception(
+                                "critic_refiner.apply_failed", _refine_exc,
+                            )
+                            try:
+                                git_repo.repo.git.reset("--hard", _v0_sha)
+                            except Exception:
+                                pass
             except Exception as _devil_exc:  # noqa: BLE001
                 from gitoma.core.trace import current as _current_trace
                 _current_trace().exception(

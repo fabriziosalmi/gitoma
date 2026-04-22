@@ -15,7 +15,16 @@ tests/fixtures/slop_audit_b2v_pr10.json for the regression baseline.
 """
 
 from gitoma.critic.devil import DevilsAdvocate
+from gitoma.critic.meta import MetaEval
 from gitoma.critic.panel import CriticPanel
+from gitoma.critic.refiner import Refiner
 from gitoma.critic.types import Finding, PanelResult
 
-__all__ = ["CriticPanel", "DevilsAdvocate", "Finding", "PanelResult"]
+__all__ = [
+    "CriticPanel",
+    "DevilsAdvocate",
+    "Finding",
+    "MetaEval",
+    "PanelResult",
+    "Refiner",
+]
