@@ -115,6 +115,34 @@ Rules (non-negotiable):
      must directly close a gap that the evidence actually supports.
   6. Respond with ONLY the JSON object below. No markdown, no prose.
 
+CRITICAL — patch shape (caught live rung-3 v4d: Defender emitted a
+unified-diff string and Pydantic rejected it):
+
+  Each element of ``revised_patches`` MUST be an OBJECT, never a string.
+  The ``content`` field MUST be the COMPLETE FINAL file content — a new
+  full copy of the file with your changes merged in. It is NOT a diff
+  hunk, NOT a unified-diff, NOT just the changed lines.
+
+  WRONG (will be rejected):
+    "revised_patches": [
+      "--- a/src/db.py\\n+++ b/src/db.py\\n@@ -1,5 +1,5 @@\\n-bad\\n+good\\n"
+    ]
+
+  WRONG (will be rejected):
+    "revised_patches": [
+      {"action": "modify", "path": "src/db.py",
+       "content": "@@ -53,1 +53,4 @@\\n+    cur = conn.execute(...)\\n"}
+    ]
+
+  RIGHT:
+    "revised_patches": [
+      {
+        "action": "modify",
+        "path": "src/db.py",
+        "content": "# full file content here, every line, including untouched ones\\nimport sqlite3\\n\\n... rest of the file with your fix merged in ..."
+      }
+    ]
+
 Schema:
 {
   "answers": [
