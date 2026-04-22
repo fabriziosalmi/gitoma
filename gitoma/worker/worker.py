@@ -232,8 +232,15 @@ class WorkerAgent:
         if not selected:
             return ""
 
+        # iter 6: ``ANTISLOP_FORMAT=axioms`` switches injection to the
+        # 4-axiom stratified format (¬M ¬S ¬A ¬O). Default ``flat``
+        # preserves iter-5 behaviour. A/B by toggling on alternating runs.
+        fmt = os.getenv("ANTISLOP_FORMAT", "flat").strip().lower()
+        if fmt not in ("flat", "axioms"):
+            fmt = "flat"
+
         # Trace event for A/B + observability — what was injected, in
-        # what categories, for which subtask.
+        # what categories, for which subtask, in what format.
         try:
             current_trace().emit(
                 "antislop.injected",
@@ -241,12 +248,13 @@ class WorkerAgent:
                 rule_ids=[r.id for r in selected],
                 rule_count=len(selected),
                 top_n=top_n,
+                format=fmt,
                 tags_active=sorted({t for r in selected for t in r.tags}),
             )
         except Exception:
             pass  # trace must never break the worker
 
-        return antislop_format(selected)
+        return antislop_format(selected, mode=fmt)
 
     def _run_critic_panel(self, subtask: SubTask, touched: list[str]) -> None:
         """Build the diff for the touched files, run the panel, log the result.

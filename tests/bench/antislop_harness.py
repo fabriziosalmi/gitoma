@@ -309,7 +309,12 @@ def run_bench(
 def _default_antislop_block(case: dict) -> str:
     """Run the real gitoma antislop classifier against the case's
     subtask context. This is what `worker.py` does at runtime — bench
-    measuring the real path, not a fake."""
+    measuring the real path, not a fake.
+
+    Honours ``ANTISLOP_FORMAT=flat|axioms`` env (mirror of the worker)
+    so the bench can A/B between iter-5 flat and iter-6 axiom format.
+    """
+    import os
     from gitoma.critic.antislop import classify_for_subtask, format_for_injection, load_rules
 
     rules = load_rules()
@@ -325,4 +330,7 @@ def _default_antislop_block(case: dict) -> str:
         action_hint=case["subtask"].get("action", ""),
         top_n=10,
     )
-    return format_for_injection(selected)
+    fmt = os.getenv("ANTISLOP_FORMAT", "flat").strip().lower()
+    if fmt not in ("flat", "axioms"):
+        fmt = "flat"
+    return format_for_injection(selected, mode=fmt)

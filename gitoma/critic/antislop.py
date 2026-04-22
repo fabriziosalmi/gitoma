@@ -336,10 +336,27 @@ _INJECTION_FOOTER = (
 )
 
 
-def format_for_injection(rules: list[Rule]) -> str:
-    """Render selected rules as a punchy bullet list ready to paste into a
-    system prompt. Empty list → empty string (caller can no-op the inject)."""
+def format_for_injection(rules: list[Rule], *, mode: str = "flat") -> str:
+    """Render selected rules ready to paste into a system prompt.
+
+    ``mode``:
+      * ``"flat"`` (default, iter 5)  — single bullet list with the
+        canonical "CRITICAL anti-patterns to AVOID" header. Empty list
+        → empty string.
+      * ``"axioms"`` (iter 6) — stratified by the 4 negative axioms
+        (¬M ¬S ¬A ¬O), each axiom rendered with principle + binary
+        filter + 1-3 rule examples. Shorter, more imperative.
+
+    The axiom mode hypothesis (per the Gemini formalisation): a 4-axiom
+    structured prompt outperforms a 15-rule flat list on adversarial
+    cases, because each axiom is a discrete decision the model has to
+    make rather than soft suggestions to consider.
+    """
     if not rules:
         return ""
+    if mode == "axioms":
+        from gitoma.critic.axioms import format_axiom_block, stratify_by_axiom
+        return format_axiom_block(stratify_by_axiom(rules))
+    # default: flat list (iter 5 behaviour)
     body = "\n".join(r.punchy() for r in rules)
     return _INJECTION_HEADER + body + _INJECTION_FOOTER
