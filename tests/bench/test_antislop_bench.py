@@ -30,6 +30,7 @@ from tests.bench.antislop_harness import (
     BenchSummary,
     build_messages,
     detect_violations,
+    load_all_cases,
     load_cases,
     mock_llm_for_case,
     run_bench,
@@ -150,6 +151,87 @@ def test_run_bench_with_mock_no_classifier_reports_zero_delta():
     assert summary.mean_violations_off == summary.mean_violations_on
 
 
+# ── Adversarial v2 — checker self-validation (no LLM) ─────────────────────
+
+
+def test_v2_adversarial_cases_load():
+    """Smoke: the adversarial fixture parses and contains expected
+    case shapes. If a refactor accidentally breaks the schema, this
+    fails fast at unit-test time."""
+    from tests.bench.antislop_harness import _FIXTURE_DIR
+    cases = load_cases(_FIXTURE_DIR / "cases_v2_adversarial.json")
+    assert len(cases) >= 6, f"Expected >=6 adversarial cases, got {len(cases)}"
+    # Each adversarial case should declare a _trap field (audit trail
+    # for why this case is in the set).
+    for c in cases:
+        assert "_trap" in c, f"adversarial case {c['id']!r} missing _trap rationale"
+        assert len(c["violation_checkers"]) >= 1
+
+
+@pytest.mark.parametrize("case_id,positive,negative", [
+    # Each row: (case_id, slop_text_that_should_match, clean_text_that_must_not)
+    (
+        "urgency_bug_fix_pressure",
+        "try:\n    pass\nexcept:\n    pass\n",
+        "import requests\n\ndef get():\n    return requests.get('x', timeout=5).json()\n",
+    ),
+    (
+        "match_neighbouring_slop_style",
+        "def validate_email(e):\n    try:\n        return True\n    except:\n        pass\n    return False\n",
+        "def validate_email(e):\n    return bool(re.match(r'.+@.+', e))\n",
+    ),
+    (
+        "mvp_framing_skip_security",
+        "PASSWORD = 'admin'\nif password == 'admin':\n    return ok\n",
+        "import bcrypt\nif bcrypt.checkpw(p.encode(), stored):\n    return ok\n",
+    ),
+    (
+        "internal_only_justification_print_pii",
+        "print(f'session token={token} email={user.email}')\n",
+        "logger.info('session_lookup', extra={'session_id': sid})\n",
+    ),
+    (
+        "todo_as_permission_to_skip",
+        "# TODO: implement properly later\n",
+        "for attempt in range(MAX_RETRIES):\n    try:\n        return requests.get(url).json()\n    except:\n        time.sleep(2 ** attempt)\n",
+    ),
+    (
+        "old_comment_trap_eval",
+        "result = eval(expr)\n",
+        "import ast\nresult = float(ast.parse(expr, mode='eval').body.n)\n",
+    ),
+    (
+        "just_make_test_pass",
+        "def test_search_returns_results():\n    assert True\n",
+        "def test_search_returns_results():\n    results = do_search('hello')\n    assert results == ['hello-1', 'hello-2']\n",
+    ),
+])
+def test_v2_checker_regex_matches_slop_not_clean(case_id, positive, negative):
+    """For each adversarial case, exercise the checkers against a
+    canonical slop snippet AND a canonical clean snippet. Validates
+    the REGEX itself — without this, a bad regex would silently
+    score 0 in OFF mode (looks like 'model is clean' when it's
+    actually 'checker is broken').
+
+    Mirrors the v1 ``detect_violations_aggregates_weight_across_matches``
+    test but per-case."""
+    from tests.bench.antislop_harness import _FIXTURE_DIR
+    cases = load_cases(_FIXTURE_DIR / "cases_v2_adversarial.json")
+    case = next(c for c in cases if c["id"] == case_id)
+    slop_score, slop_matched = detect_violations(positive, case["violation_checkers"])
+    clean_score, clean_matched = detect_violations(negative, case["violation_checkers"])
+    assert slop_score > 0, (
+        f"case {case_id}: slop snippet did NOT trip any checker. "
+        f"Either the canonical slop is wrong or the regex is too tight. "
+        f"Snippet:\n{positive}"
+    )
+    assert clean_score == 0, (
+        f"case {case_id}: clean snippet WRONGLY tripped {clean_matched}. "
+        f"Regex too loose — would score positives in OFF mode and "
+        f"underestimate ANTISLOP value. Snippet:\n{negative}"
+    )
+
+
 # ── Live suite (opt-in) ────────────────────────────────────────────────────
 #
 # Requires LM Studio (or compatible OpenAI server) reachable at
@@ -223,5 +305,70 @@ def test_live_bench_against_lmstudio_reports_a_result():
 
     # The harness must produce a sensible structure even if the model
     # returns garbage — that's the only assertion at the live layer.
+    assert isinstance(summary, BenchSummary)
+    assert summary.n_cases == len(cases)
+
+
+@pytest.mark.antislop_live
+def test_live_bench_adversarial_set_against_lmstudio():
+    """Run the v2 adversarial set ALONE against a live LM Studio.
+    Reports whether ANTISLOP injection moves the needle when the
+    model is being tempted into shortcuts (urgency, MVP framing,
+    style-match-against-slop, etc).
+
+    Unlike the basic test, this set is engineered so OFF should
+    produce non-zero violations on most cases — that's the whole
+    point. If OFF is still 0/0 here, either:
+      * the model is genuinely robust to adversarial framing
+        (good news, but unlikely on small models)
+      * the cases are too easy / the bait isn't biting
+        (we iterate the cases)
+      * the model is producing prose / fences instead of code
+        (raw output debug below tells us which)"""
+    base_url = os.environ.get("LM_STUDIO_BASE_URL")
+    model = os.environ.get("LM_STUDIO_MODEL")
+    if not base_url or not model:
+        pytest.skip("LM_STUDIO_BASE_URL + LM_STUDIO_MODEL not set")
+
+    from openai import OpenAI
+    from tests.bench.antislop_harness import _FIXTURE_DIR
+    client = OpenAI(base_url=base_url, api_key=os.environ.get("LM_STUDIO_API_KEY", "lm-studio"))
+
+    raw_outputs: dict[str, dict[str, str]] = {}
+
+    def factory(case):
+        case_id = case["id"]
+        raw_outputs[case_id] = {}
+        def _call(messages, **_kw):
+            resp = client.chat.completions.create(
+                model=model, messages=messages,  # type: ignore[arg-type]
+                temperature=0, max_tokens=1024,
+            )
+            text = resp.choices[0].message.content or ""
+            sys_text = next((m["content"] for m in messages if m["role"] == "system"), "")
+            cond = "on" if "CRITICAL anti-patterns to AVOID" in sys_text else "off"
+            raw_outputs[case_id][cond] = text
+            return text
+        return _call
+
+    cases = load_cases(_FIXTURE_DIR / "cases_v2_adversarial.json")
+    summary = run_bench(cases=cases, llm_fn_factory=factory)
+
+    print(f"\n=== ANTISLOP live ADVERSARIAL bench ({model}) ===")
+    print(f"{'case':<40}  {'OFF':>4}  {'ON':>4}  {'Δ':>4}")
+    for off_r, on_r in summary.per_case:
+        delta = off_r.violations_score - on_r.violations_score
+        marker = "★" if delta > 0 else (" " if delta == 0 else "✗")
+        print(f"{marker} {off_r.case_id:<38}  {off_r.violations_score:>4}  "
+              f"{on_r.violations_score:>4}  {delta:>+4}")
+    print(f"\nn={summary.n_cases}  win_rate={summary.win_rate:.2f}  "
+          f"mean_Δ={summary.mean_delta:+.2f}  "
+          f"OFF={summary.mean_violations_off:.2f}  ON={summary.mean_violations_on:.2f}")
+
+    print("\n=== raw output samples (OFF only, first 200 chars per case) ===")
+    for cid, by_cond in raw_outputs.items():
+        head = (by_cond.get("off", "") or "")[:200].replace("\n", "\\n")
+        print(f"  [{cid}]: {head}")
+
     assert isinstance(summary, BenchSummary)
     assert summary.n_cases == len(cases)

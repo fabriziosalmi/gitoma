@@ -66,11 +66,25 @@ class BenchSummary:
 # ── Loading + checker engine ────────────────────────────────────────────────
 
 
+_FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "antislop_bench"
+
+
 def load_cases(path: Path | str | None = None) -> list[dict]:
-    """Load the bench cases JSON. Default path is the fixture in this repo."""
+    """Load one bench cases file. Default = v1 basic (cases.json)."""
     if path is None:
-        path = Path(__file__).resolve().parents[1] / "fixtures" / "antislop_bench" / "cases.json"
+        path = _FIXTURE_DIR / "cases.json"
     return json.loads(Path(path).read_text(encoding="utf-8"))["cases"]
+
+
+def load_all_cases() -> list[dict]:
+    """Load both basic (v1) and adversarial (v2) case sets, concatenated.
+
+    Each case carries a ``_trap`` or its absence to distinguish — but the
+    bench runner doesn't care. Used by the live-LLM bench so the operator
+    sees one consolidated table covering both tiers."""
+    basic = load_cases(_FIXTURE_DIR / "cases.json")
+    adversarial = load_cases(_FIXTURE_DIR / "cases_v2_adversarial.json")
+    return basic + adversarial
 
 
 def detect_violations(output: str, checkers: list[dict]) -> tuple[int, list[str]]:
