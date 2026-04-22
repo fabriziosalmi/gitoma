@@ -1,0 +1,99 @@
+{
+  "_doc": "Second golden regression fixture for the multi-persona critic panel. PR #12 is the FIRST run of the iter-2 panel (3 personas: dev/arch/contributor on gemma-4-e2b-it). The panel emitted 28 findings across 8 subtasks but ALL were nit/minor — none caught the 4 actual blockers below. This fixture pins what the iter-3 design (devil's advocate broad-scope on Sushi-9B) MUST surface to be considered an improvement. If iter-3 still misses these, the design is wrong, not the model.",
+  "pr_ref": "fabriziosalmi/b2v#12",
+  "pr_title": "🤖 [Gitoma] Improve b2v: 7 quality improvements",
+  "pr_state": "closed",
+  "pr_merged": false,
+  "pr_close_reason": "Closed without merge: PR was a test of the iter-2 panel. The diff contained compile-breaking and policy-breaking changes that the panel missed; merging would have broken main.",
+  "producer_model": "gemma-4-e2b-it",
+  "panel_in_use_at_time": "iter-2 (dev + arch + contributor, all on same model)",
+  "audited_at": "2026-04-22T00:05:00Z",
+  "auditor": "manual (claude-opus-4-7, line-by-line review of unified diff after PR creation)",
+  "diff_stats": {
+    "additions": "~78",
+    "deletions": "~64",
+    "changed_files": 7,
+    "files": [".eslintrc.json", "README.md", "docs/mkdocs.yml", "package.json", "src/decoder.test.ts", "src/encoder.test.ts", "src/main.rs"]
+  },
+  "iter_2_panel_outcome": {
+    "panel_runs_executed": 8,
+    "findings_total": 28,
+    "severity_distribution": {"nit": 20, "minor": 8, "major": 0, "blocker": 0},
+    "personas_called_per_subtask": ["dev", "arch", "contributor"],
+    "tokens_total_estimate": 27666,
+    "duration_total_seconds": 82.3,
+    "verdict": "panel functioned end-to-end with full observability, but every single one of the 4 real blockers below was missed. Severity ladder never exceeded 'minor'. Confirms: gemma-4B with 3 personas is too polite even with explicit adversarial framing. Iter-3 (devil's advocate broad-scope on a larger model) is needed."
+  },
+  "expected_findings_iter3_must_surface": [
+    {
+      "id": "F005",
+      "file": "src/main.rs",
+      "lines_range": [56, 103],
+      "severity": "blocker",
+      "category": "compile_breakage",
+      "summary": "deletes the entire fn main() — the Rust binary has no entry point and will fail to compile",
+      "symptoms": [
+        "the diff removes 47 lines from src/main.rs that constitute the entire fn main() body, including the cli.parse() call, the encode/decode dispatch, and the final Ok(())",
+        "after this patch, `cargo build` exits with E0601 (main function not found in crate `b2v`)",
+        "no other file in the diff defines a replacement entry point"
+      ],
+      "expected_personas_or_role": ["dev (would notice missing main)", "devil_advocate (would notice the binary cannot link)"],
+      "ground_truth_impact": "This change makes the project completely unbuildable. CI would have caught it but the panel should have caught it FIRST."
+    },
+    {
+      "id": "F006",
+      "file": "package.json",
+      "lines_range": [16, 24],
+      "severity": "blocker",
+      "category": "out_of_scope_dependencies",
+      "summary": "adds @vitejs/plugin-react and other React-flavoured packages to a Rust + Jest project",
+      "symptoms": [
+        "the project README + Cargo.toml show this is a Rust CLI; JS surface is jest tests + vitepress docs only",
+        "the diff adds @vitejs/plugin-react ^4.2.1 to devDependencies — there is no React anywhere in the repo",
+        "this expands the dep tree by ~50 packages, increases supply-chain surface area, and ships an unused build tool"
+      ],
+      "expected_personas_or_role": ["arch (would flag unrelated stack additions)", "contributor (would flag onboarding bloat)", "devil_advocate (would flag supply-chain noise)"],
+      "ground_truth_impact": "Unused dependency = security exposure + slower CI installs + onboarding friction. The panel emitted 9 findings on contributor persona for this PR but missed this."
+    },
+    {
+      "id": "F007",
+      "file": "package.json",
+      "lines_range": [10, 15],
+      "severity": "major",
+      "category": "build_policy_regression",
+      "summary": "removes \"engines\": {\"node\": \"^18.0.0\"} from package.json without justification",
+      "symptoms": [
+        "the original package.json declared a minimum Node 18 requirement",
+        "the diff removes this constraint silently — no replacement, no justification",
+        "developers on Node 14 / 16 will install successfully but break at runtime; CI runners pin to a specific version, so this hides the issue locally until prod"
+      ],
+      "expected_personas_or_role": ["arch (build policy)", "contributor (env reproducibility)"],
+      "ground_truth_impact": "Loss of build reproducibility. Caught only by reading what was REMOVED, not just what was added — a common blind spot for line-level critics."
+    },
+    {
+      "id": "F008",
+      "file": "README.md",
+      "lines_range": [80, 99],
+      "severity": "major",
+      "category": "regression_removed_section",
+      "summary": "removes the License section AND the Legal disclaimer section while restructuring README",
+      "symptoms": [
+        "the original README had a 'License' section pointing at MIT and a 'Legal disclaimer' explaining ToS-violation risks for video hosts",
+        "the diff replaces these with additional CLI usage examples — the new content is fine in itself, but the removed sections are NOT relocated anywhere",
+        "the LICENSE file at repo root is unchanged, so technically the project is still MIT-licensed, but a README without a license pointer is a contributor-onboarding regression",
+        "the legal disclaimer was a real safety message for users — its removal is a UX regression that the panel's contributor persona should have caught"
+      ],
+      "expected_personas_or_role": ["contributor (UX onboarding)", "devil_advocate (PR look-good vs real-good)"],
+      "ground_truth_impact": "Documentation regression that turns the README from a complete first-touch into a partial one. Common slop pattern: 'I removed sections I didn't think were needed.'"
+    }
+  ],
+  "negative_controls": {
+    "_doc": "Findings the iter-3 panel should NOT add to its blocker list (these are real but minor or correct).",
+    "do_not_flag_as_blocker_or_major": [
+      "The .eslintrc.json prettier integration (+5 lines) — actually a useful addition for the JS side",
+      "The mkdocs.yml '# Add default theme configuration if needed' comment — minor TODO, fine as nit",
+      "The src/decoder.test.ts and encoder.test.ts NOTE comments — superficial slop, correctly captured by iter-2 panel as nit"
+    ]
+  },
+  "tags": ["iter-2-baseline", "gemma-4-e2b-it", "rust-js-repo", "blockers-missed-by-3-personas"]
+}
