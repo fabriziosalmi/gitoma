@@ -644,7 +644,11 @@ def run(
                         fields["prompt_tokens"] = _devil_result.tokens_extra[0]
                         fields["completion_tokens"] = _devil_result.tokens_extra[1]
                 # Per-finding events for greppability via
-                # `gitoma logs --filter critic_devil`
+                # `gitoma logs --filter critic_devil`. The ``axiom`` field
+                # surfaces the iter-6 categorisation so dashboards can
+                # aggregate {¬M:n, ¬S:n, ¬A:n, ¬O:n} without re-parsing
+                # the raw event. None when the model didn't tag the
+                # finding (legacy / parse drift).
                 for _f in _devil_result.findings:
                     _trace.emit(
                         "critic_devil.finding",
@@ -653,6 +657,7 @@ def run(
                         category=_f.category,
                         summary=_f.summary,
                         file=_f.file,
+                        axiom=_f.axiom,
                     )
                 # Persist into the same state log the panel uses; the
                 # subtask_id "__devil__" makes it distinguishable.

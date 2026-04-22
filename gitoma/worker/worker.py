@@ -327,7 +327,10 @@ class WorkerAgent:
                 fields["completion_tokens"] = result.tokens_extra[1]
 
         # Per-finding trace events — easier to grep ``gitoma logs`` for a
-        # specific category than to walk the aggregated span.
+        # specific category than to walk the aggregated span. Includes
+        # ``axiom`` for the iter-6 categorisation; None when the panel
+        # persona didn't emit it (panel personas are pre-iter-6 by
+        # design — only the devil's prompt requires axiom output).
         for f in result.findings:
             current_trace().emit(
                 "critic_panel.finding",
@@ -337,6 +340,7 @@ class WorkerAgent:
                 category=f.category,
                 summary=f.summary,
                 file=f.file,
+                axiom=f.axiom,
             )
 
         # Persist into AgentState so the cockpit can render it without
