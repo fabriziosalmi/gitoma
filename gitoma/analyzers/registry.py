@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from gitoma.analyzers.base import MetricReport, MetricResult
+from gitoma.analyzers.build import BuildAnalyzer
 from gitoma.analyzers.ci import CIAnalyzer
 from gitoma.analyzers.code_quality import CodeQualityAnalyzer
 from gitoma.analyzers.deps import DepsAnalyzer
@@ -17,7 +18,11 @@ from gitoma.analyzers.security import SecurityAnalyzer
 from gitoma.analyzers.structure import StructureAnalyzer
 from gitoma.analyzers.tests import TestsAnalyzer
 
+# Ordering: BuildAnalyzer first so the cockpit shows "Build Integrity"
+# at the top of the audit table. A failing build dominates downstream
+# planning, so seeing it bottom-of-list is hostile to the operator.
 ALL_ANALYZER_CLASSES = [
+    BuildAnalyzer,
     ReadmeAnalyzer,
     CIAnalyzer,
     TestsAnalyzer,

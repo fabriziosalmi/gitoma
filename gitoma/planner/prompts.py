@@ -44,6 +44,16 @@ Create an improvement plan ONLY for metrics with status "fail" or "warn".
 Order tasks by priority (1=highest urgency).
 Each task must address a specific metric and include 1-4 concrete subtasks.
 
+HARD RULE — BUILD INTEGRITY BEATS EVERYTHING: if the metric named
+"Build Integrity" has status "fail", your plan MUST emit T001 with
+priority=1 addressing THAT metric, with subtasks whose ``file_hints``
+are the files surfaced in the build-error output (parse the ``details``
+field — it lists ``path:line: message`` errors). You MUST NOT emit
+cosmetic / scaffolding tasks (LICENSE, CONTRIBUTING, lint config, docs
+structure, CI workflows) while the build is failing — a project that
+does not compile cannot benefit from any of those. Emit them only once
+the build is green.
+
 Respond with ONLY this JSON schema (no extra text):
 {{
   "tasks": [
