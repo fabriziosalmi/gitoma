@@ -80,6 +80,28 @@ class GitRepo:
         """Create and checkout a new branch."""
         self.repo.git.checkout("-b", branch_name)
 
+    def checkout_base(self, base: str) -> None:
+        """Move the worktree onto ``base`` so a subsequent ``create_branch``
+        branches off it.
+
+        ``Repo.clone_from`` checks out the repo's default branch. When
+        ``--base X`` targets a different branch, both the worktree AND the
+        local ref must be re-pointed at X — otherwise the working branch is
+        created off the default and the resulting PR has no common ancestor
+        with X (GitHub answers 422). No-op when already on ``base``.
+        """
+        if self.current_branch() == base:
+            return
+        origin = self.repo.remotes.origin
+        origin.fetch()
+        remote_ref = f"origin/{base}"
+        if not any(ref.name == remote_ref for ref in origin.refs):
+            raise ValueError(
+                f"Base branch '{base}' not found on origin. "
+                f"Available: {sorted(r.name.removeprefix('origin/') for r in origin.refs if r.name != 'origin/HEAD')}"
+            )
+        self.repo.git.checkout("-B", base, remote_ref)
+
     def checkout_existing_branch(self, branch_name: str) -> bool:
         """Check out a branch that may already exist on the remote.
 

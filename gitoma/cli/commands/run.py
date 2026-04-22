@@ -485,8 +485,16 @@ def run(
                 if resumed_branch:
                     _ok(f"Resumed existing branch: {branch}")
                 else:
+                    # Pin worktree to ``base_branch`` first. ``Repo.clone_from``
+                    # leaves us on the repo's default branch; if --base is
+                    # something else, we must move there before branching, or
+                    # the working branch ends up rooted in the wrong tree
+                    # (PR creation then 422s with "no common ancestor").
+                    if git_repo.current_branch() != base_branch:
+                        git_repo.checkout_base(base_branch)
+                        _ok(f"Base branch checked out: {base_branch}")
                     git_repo.create_branch(branch)
-                    _ok(f"Branch created: {branch}")
+                    _ok(f"Branch created: {branch} (off {base_branch})")
             except Exception as e:
                 _abort(
                     f"Failed to create branch '{branch}': {e}",
