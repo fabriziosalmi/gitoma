@@ -253,6 +253,100 @@ class LLMMetaVerdict(_StrictModel):
         return v.strip().lower()
 
 
+# ── Q&A phase models ────────────────────────────────────────────────────────
+#
+# Three fixed categorical slots instead of "write 10 good questions" —
+# forces Pareto-ROI probes and removes free-text drift at a 4B-model
+# scale. Questioner fills the SCENARIO inside each slot; it does NOT
+# invent the axis. Defender answers slot-by-slot.
+#
+# Slots:
+#   Q1_evidence — "prove the fix exists by citing file:line"
+#   Q2_edge     — "name one concrete input that breaks this patch"
+#   Q3_scope    — "name one change in the diff that wasn't required"
+
+QAQuestionId = Literal["Q1_evidence", "Q2_edge", "Q3_scope"]
+QAVerdict = Literal["handled", "gap", "uncertain"]
+
+
+class LLMQAQuestion(_StrictModel):
+    """One brutal, scenario-specific probe from the Questioner."""
+    id: QAQuestionId
+    question: str = Field(min_length=10, max_length=500)
+
+
+class LLMQAQuestionerOutput(_StrictModel):
+    """Strict schema for the Questioner's response — must emit EXACTLY
+    three questions, one per fixed slot."""
+    questions: list[LLMQAQuestion] = Field(min_length=3, max_length=3)
+
+    @field_validator("questions")
+    @classmethod
+    def _one_per_slot(cls, v: list[LLMQAQuestion]) -> list[LLMQAQuestion]:
+        ids = [q.id for q in v]
+        expected = {"Q1_evidence", "Q2_edge", "Q3_scope"}
+        if set(ids) != expected:
+            raise ValueError(
+                f"Questioner must emit one question per slot "
+                f"{sorted(expected)}; got {ids}"
+            )
+        return v
+
+
+class LLMQAAnswer(_StrictModel):
+    """One slot's answer from the Defender."""
+    id: QAQuestionId
+    verdict: QAVerdict
+    evidence_loc: str | None = Field(default=None, max_length=200)
+    rationale: str = Field(min_length=1, max_length=400)
+
+
+class LLMQADefenderOutput(_StrictModel):
+    """Defender's structured output. ``revised_patches`` stays empty
+    unless at least one answer surfaced a concrete gap."""
+    answers: list[LLMQAAnswer] = Field(min_length=3, max_length=3)
+    revised_patches: list[LLMPatchAction] = Field(default_factory=list)
+
+    @field_validator("answers")
+    @classmethod
+    def _all_slots_answered(cls, v: list[LLMQAAnswer]) -> list[LLMQAAnswer]:
+        ids = [a.id for a in v]
+        expected = {"Q1_evidence", "Q2_edge", "Q3_scope"}
+        if set(ids) != expected:
+            raise ValueError(
+                f"Defender must answer all three slots "
+                f"{sorted(expected)}; got {ids}"
+            )
+        return v
+
+
+@dataclass
+class QAResult:
+    """Aggregated Q&A phase outcome, serialised into state.json + trace."""
+    ran: bool                                  # False when QA disabled
+    questions: list[dict] = field(default_factory=list)
+    answers: list[dict] = field(default_factory=list)
+    revised_applied: bool = False              # True only if patches landed
+    revert_reason: str | None = None           # why a revised patch was rejected
+    questioner_model: str = ""
+    defender_model: str = ""
+    duration_ms: float = 0.0
+
+    def summary_line(self) -> str:
+        if not self.ran:
+            return "Q&A: skipped (disabled)"
+        # Schema guarantees ``verdict`` is present; do not guard with a default.
+        verdicts = [a["verdict"] if "verdict" in a else "?" for a in self.answers]
+        gaps = verdicts.count("gap")
+        handled = verdicts.count("handled")
+        tail = ""
+        if self.revised_applied:
+            tail = " → revised patch applied"
+        elif self.revert_reason:
+            tail = f" → revised rejected ({self.revert_reason})"
+        return f"Q&A: {handled} handled / {gaps} gap / {len(verdicts) - handled - gaps} uncertain{tail}"
+
+
 __all__ = [
     "Finding",
     "LLMDevilOutput",
@@ -260,8 +354,14 @@ __all__ = [
     "LLMMetaVerdict",
     "LLMPanelOutput",
     "LLMPatchAction",
+    "LLMQAAnswer",
+    "LLMQADefenderOutput",
+    "LLMQAQuestion",
+    "LLMQAQuestionerOutput",
     "LLMRefinerOutput",
     "PanelResult",
+    "QAResult",
+    "QAVerdict",
     "Severity",
     "ValidationError",
 ]

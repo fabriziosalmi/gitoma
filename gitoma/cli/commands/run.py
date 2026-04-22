@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import atexit
+import os
+import re
 from datetime import datetime, timezone
 from typing import Annotated, Optional, TYPE_CHECKING
 
@@ -823,6 +825,59 @@ def run(
                     "critic_devil.crashed",
                     _devil_exc,
                 )
+
+            # ── PHASE 3.9 — Q&A self-consistency (gated by env) ─────────────
+            # Rung-3 of the bench (2026-04-22pm) caught a devil
+            # hallucination: the adversarial critic claimed a SQL-injection
+            # fix existed when no change to db.py was in the diff. The Q&A
+            # phase is the brutal-Questioner / gated-Defender check that
+            # would have caught it: "Cite the file:line where the fix is."
+            # Two-model architecture (Questioner = devil endpoint, Defender
+            # = worker endpoint by default) decorrelates biases.
+            #
+            # OFF by default via ``CRITIC_QA_ENABLED``. Observation-only
+            # unless ``CRITIC_QA_APPLY=true`` — the first few rungs collect
+            # data on whether the Questioner's probes actually surface
+            # real gaps before we let the Defender apply revised patches.
+            if (os.environ.get("CRITIC_QA_ENABLED") or "").lower() in ("1", "true", "yes"):
+                try:
+                    from gitoma.critic.qa import QAAgent
+                    _qa_diff = git_repo.repo.git.diff(f"{base_branch}..HEAD")
+                    if _qa_diff.strip():
+                        # Collect the current content of any file that
+                        # appears in the branch diff — gives both the
+                        # Questioner and Defender real source to cite.
+                        _qa_paths: list[str] = []
+                        for _line in _qa_diff.splitlines():
+                            _m = re.match(r"^diff --git a/(\S+) b/\S+", _line)
+                            if _m and _m.group(1) not in _qa_paths:
+                                _qa_paths.append(_m.group(1))
+                        _qa_files: dict[str, str] = {}
+                        for _p in _qa_paths[:8]:  # cap prompt size
+                            _t = git_repo.read_file(_p)
+                            if _t is not None:
+                                _qa_files[_p] = _t
+                        _qa_goal = (
+                            plan.tasks[0].title if plan and plan.tasks
+                            else "improve repository quality"
+                        )
+                        _qa = QAAgent(
+                            config.critic_panel, llm, config,
+                        )
+                        _qa_result = _qa.review(
+                            subtask_goal=_qa_goal,
+                            branch_diff=_qa_diff,
+                            current_files=_qa_files,
+                        )
+                        console.print(
+                            f"[muted]{_qa_result.summary_line()}[/muted]"
+                        )
+                        # Persist the result to state for post-run inspection.
+                        state.current_operation = _qa_result.summary_line()
+                        save_state(state)
+                except Exception as _qa_exc:  # noqa: BLE001
+                    from gitoma.core.trace import current as _ct2
+                    _ct2().exception("critic_qa.crashed", _qa_exc)
 
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 4 — PULL REQUEST
