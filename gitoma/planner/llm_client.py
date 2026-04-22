@@ -238,10 +238,20 @@ class LLMClient:
     def _build_client(self) -> "OpenAI":
         try:
             from openai import OpenAI
+            import os
+            # 120s default is OK for medium-context worker calls; some
+            # phases (Q&A on 4B model with multi-file context) need more.
+            # Operator-tunable via env, capped at 600s to surface stuck
+            # calls instead of pretending forever.
+            try:
+                _t = float(os.environ.get("LM_STUDIO_TIMEOUT") or "120")
+            except ValueError:
+                _t = 120.0
+            _t = max(10.0, min(600.0, _t))
             return OpenAI(
                 base_url=self._config.lmstudio.base_url,
                 api_key=self._config.lmstudio.api_key,
-                timeout=120.0,
+                timeout=_t,
             )
         except Exception as e:
             raise LLMError(f"Failed to initialize OpenAI client: {e}") from e
