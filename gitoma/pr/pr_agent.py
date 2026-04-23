@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from gitoma.analyzers.base import MetricReport
 from gitoma.core.config import Config
 from gitoma.core.github_client import GitHubClient, PRInfo
@@ -9,6 +11,9 @@ from gitoma.core.repo import GitRepo
 from gitoma.core.state import AgentState, AgentPhase, save_state
 from gitoma.planner.task import TaskPlan
 from gitoma.pr.templates import build_pr_body, build_pr_title
+
+if TYPE_CHECKING:
+    from gitoma.critic.types import QAResult
 
 
 class PRAgent:
@@ -32,6 +37,7 @@ class PRAgent:
         plan: TaskPlan,
         branch: str,
         base: str,
+        qa_result: "QAResult | None" = None,
     ) -> PRInfo:
         """
         Push the agent branch to origin and create a PR.
@@ -41,6 +47,11 @@ class PRAgent:
             plan: the completed task plan
             branch: the gitoma branch name (e.g. gitoma/improve-20260420)
             base: the default branch to merge into (e.g. main)
+            qa_result: optional Q&A phase result. When the Defender
+                admitted a gap, the PR body grows a ``⚠ Q&A gap``
+                block so the operator sees the unfixed signal before
+                merging. ``None`` when the Q&A phase was disabled or
+                never reached — body unchanged in that case.
 
         Returns:
             PRInfo with PR number and URL
@@ -57,7 +68,7 @@ class PRAgent:
 
         # Build PR content
         title = build_pr_title(self._git.name, plan)
-        body = build_pr_body(report, plan, branch)
+        body = build_pr_body(report, plan, branch, qa_result=qa_result)
 
         # Create PR
         pr_info = self._gh.create_pr(

@@ -539,6 +539,11 @@ def run(
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 3 — EXECUTE
         # ────────────────────────────────────────────────────────────────────────
+        # Pre-declare any phase-3-set state PHASE 4 needs to read. Keeping
+        # ``_qa_result`` initialised here means the PR composer can safely
+        # treat it as ``None`` when QA was disabled / never reached / crashed.
+        from gitoma.critic.types import QAResult as _QAResultT
+        _qa_result_outer: _QAResultT | None = None
         with _phase("PHASE 3 — EXECUTION", cleanup=git_repo, state=state):
             from gitoma.worker.worker import WorkerAgent
 
@@ -884,6 +889,7 @@ def run(
             # unless ``CRITIC_QA_APPLY=true`` — the first few rungs collect
             # data on whether the Questioner's probes actually surface
             # real gaps before we let the Defender apply revised patches.
+            #
             if (os.environ.get("CRITIC_QA_ENABLED") or "").lower() in ("1", "true", "yes"):
                 try:
                     from gitoma.critic.qa import QAAgent
@@ -983,6 +989,9 @@ def run(
                         # Persist the result to state for post-run inspection.
                         state.current_operation = _qa_result.summary_line()
                         save_state(state)
+                        # Hoist to outer scope so PHASE 4 can annotate the PR
+                        # body when Q&A reported a gap that wasn't closed.
+                        _qa_result_outer = _qa_result
                 except Exception as _qa_exc:  # noqa: BLE001
                     from gitoma.core.trace import current as _ct2
                     _ct2().exception("critic_qa.crashed", _qa_exc)
@@ -1095,6 +1104,7 @@ def run(
                         plan=plan,
                         branch=branch,
                         base=base_branch,
+                        qa_result=_qa_result_outer,
                     )
                 except Exception as e:
                     err_str = str(e)
