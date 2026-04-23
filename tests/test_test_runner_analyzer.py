@@ -214,6 +214,21 @@ def test_failure_with_unparseable_output_still_reports_fail(tmp_path: Path) -> N
 # ── Parser unit tests (isolated, no subprocess) ─────────────────────────────
 
 
+def test_pytest_parser_handles_trailing_reason_block() -> None:
+    """Caught live on rung-3 v7: pytest summary lines often carry a
+    trailing ``- AssertionError: ...`` reason. The parser MUST capture
+    the test path even when followed by arbitrary text."""
+    text = (
+        "FAILED tests/test_db.py::test_no_sql_injection - AssertionError: leak\n"
+        "FAILED tests/test_db.py::test_two - AssertionError: another fail\n"
+        "2 failed, 2 passed in 0.01s\n"
+    )
+    out = _parse_failing("pytest", text, "")
+    assert "tests/test_db.py::test_no_sql_injection" in out
+    assert "tests/test_db.py::test_two" in out
+    assert len(out) == 2
+
+
 def test_pytest_parser_extracts_failed_and_error() -> None:
     text = (
         "FAILED tests/test_a.py::test_foo\n"

@@ -174,13 +174,18 @@ class TestRunnerAnalyzer(BaseAnalyzer):
 # pytest emits failures in two shapes:
 #   * Live (one per test as it runs):    ``tests/x.py::test_y FAILED``
 #   * Summary (after the run completes): ``FAILED tests/x.py::test_y``
+#     — and may have a trailing ``- AssertionError: ...`` reason block,
+#     which we tolerate (caught live on rung-3 v7 — the trailing reason
+#     made the original ``\s*$``-anchored regex miss the path).
 # Match both so the parser is robust regardless of which output snippet
 # the analyzer captures.
 _PYTEST_FAIL_RE = re.compile(
-    r"^(?:FAILED\s+(\S+)|(\S+)\s+FAILED)\s*$", re.MULTILINE,
+    r"^(?:FAILED\s+(\S+)(?:\s+-\s+.*)?|(\S+)\s+FAILED(?:\s+\(.*\))?)\s*$",
+    re.MULTILINE,
 )
 _PYTEST_ERROR_RE = re.compile(
-    r"^(?:ERROR\s+(\S+)|(\S+)\s+ERROR)\s*$", re.MULTILINE,
+    r"^(?:ERROR\s+(\S+)(?:\s+-\s+.*)?|(\S+)\s+ERROR(?:\s+\(.*\))?)\s*$",
+    re.MULTILINE,
 )
 _PYTEST_PASS_COUNT_RE = re.compile(r"(\d+)\s+passed", re.MULTILINE)
 
