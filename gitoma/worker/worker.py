@@ -22,7 +22,11 @@ from gitoma.planner.llm_client import LLMClient
 from gitoma.planner.prompts import worker_system_prompt, worker_user_prompt
 from gitoma.planner.task import SubTask, Task, TaskPlan
 from gitoma.worker.committer import Committer
-from gitoma.worker.patcher import BUILD_MANIFESTS, apply_patches
+from gitoma.worker.patcher import (
+    BUILD_MANIFESTS,
+    apply_patches,
+    validate_post_write_syntax,
+)
 
 # Cap on how many critic panel runs we keep in AgentState before dropping
 # the oldest. State.json must stay manageable on long runs (60+ subtasks);
@@ -244,6 +248,40 @@ class WorkerAgent:
             )
             if not touched:
                 raise ValueError("Patches produced no file changes")
+
+            # Per-file post-write syntax check (TOML/JSON/YAML).
+            # ``BuildAnalyzer`` covers source files; this catches
+            # config/manifest authoring slop the language compiler
+            # never sees. Caught live on rung-3 v12: a planner-
+            # sanctioned T004 edit on ``pyproject.toml`` shipped
+            # ``source = src`` (bare ident) — invalid TOML, pytest
+            # config-parse fails at runtime, entire suite uncollectable.
+            syntax_err = validate_post_write_syntax(self._git.root, touched)
+            if syntax_err is not None:
+                bad_path, parser_msg = syntax_err
+                err_text = (
+                    f"Syntax check failed on {bad_path}: {parser_msg}. "
+                    "The patcher wrote the file but the parser refused "
+                    "it. Re-emit a patch for this file with valid "
+                    "syntax (TOML strings need quotes, JSON needs no "
+                    "trailing commas, YAML respects indentation)."
+                )
+                current_trace().emit(
+                    "critic_syntax_check.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    path=bad_path,
+                    error=parser_msg[:300],
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"Syntax check failed after {max_attempts} attempt(s) "
+                        f"on {bad_path}. Last error: {parser_msg[:200]}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
 
             err = self._post_write_build_check(languages)
             if err is None:

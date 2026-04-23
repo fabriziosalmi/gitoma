@@ -231,6 +231,69 @@ def _reject_if_unsanctioned_manifest(
     )
 
 
+def validate_post_write_syntax(
+    root: Path, touched: list[str]
+) -> tuple[str, str] | None:
+    """Per-file syntax check for files we just wrote.
+
+    Routes by extension to a stdlib parser:
+      * ``.toml`` → ``tomllib``
+      * ``.json`` → ``json``
+      * ``.yml`` / ``.yaml`` → ``yaml.safe_load`` (skipped if PyYAML
+        absent — yaml is an optional dep, no transitive cost)
+
+    ``.py`` files are deliberately skipped here — ``BuildAnalyzer``
+    already runs ``py_compile`` on every Python source via the
+    build-retry loop and reports a richer error format.
+
+    Other extensions (``.md``, ``.txt``, ``.go``, ``.rs``, ``.js``,
+    ``.ts``, …) have no stdlib parser cheap enough to justify a per-
+    write call here; they go through ``BuildAnalyzer`` instead.
+
+    Returns ``(rel_path, error_message)`` on the FIRST failure, or
+    ``None`` on clean. Errors include the parser's own line/column
+    so the worker's retry prompt can point the LLM at the exact
+    bad spot.
+
+    Caught live on rung-3 v12: a planner-sanctioned T004 edit added
+    ``[tool.coverage.config]`` to ``pyproject.toml`` with
+    ``source = src`` (bare identifier instead of quoted string).
+    The patcher allowed it (sanction-by-file_hint), the build check
+    didn't run TOML through ``tomllib``, pytest config-parse
+    failed at runtime → entire test suite uncollectable.
+    """
+    import json as _json
+    try:
+        import tomllib as _tomllib
+    except ImportError:
+        _tomllib = None
+
+    try:
+        import yaml as _yaml  # type: ignore[import-not-found]
+    except ImportError:
+        _yaml = None
+
+    for rel in touched:
+        full = root / rel
+        if not full.is_file():
+            continue
+        suffix = full.suffix.lower()
+        try:
+            if suffix == ".toml" and _tomllib is not None:
+                with open(full, "rb") as f:
+                    _tomllib.load(f)
+            elif suffix == ".json":
+                with open(full, encoding="utf-8") as f:
+                    _json.load(f)
+            elif suffix in (".yml", ".yaml") and _yaml is not None:
+                with open(full, encoding="utf-8") as f:
+                    _yaml.safe_load(f)
+        except Exception as exc:
+            return rel, f"{type(exc).__name__}: {exc}"
+
+    return None
+
+
 def apply_patches(
     root: Path,
     patches: list[dict[str, Any]],

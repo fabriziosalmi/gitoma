@@ -676,6 +676,26 @@ def run(
                 state.current_operation = f"{sub.id} FAILED: {error[:80]}"
                 save_state(state)
                 console.print(f"  [danger]✗ {sub.id} failed: {error[:120]}[/danger]")
+                # Visible trace event so silent worker failures (LLM
+                # JSON-emit failure, all-patches-rejected, build-retry
+                # exhaustion) show up in the jsonl alongside critic
+                # events. Caught live on rung-3 v12: T001-S01/S02
+                # failed with "Could not obtain valid JSON from LLM
+                # after 3 attempts" but the trace had ZERO worker
+                # events — only the state file recorded the error,
+                # making post-mortems painful.
+                try:
+                    from gitoma.core.trace import current as _ct
+                    _ct().emit(
+                        "worker.subtask.failed",
+                        task_id=task.id,
+                        subtask_id=sub.id,
+                        title=sub.title,
+                        file_hints=sub.file_hints,
+                        error=error[:500],
+                    )
+                except Exception:
+                    pass
 
             plan = worker.execute(
                 plan,
