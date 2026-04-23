@@ -481,6 +481,29 @@ def run(
                     _safe_cleanup(git_repo)
                     raise typer.Exit(1)
 
+                # ── Layer-2 Occam: deterministic plan post-process ──────────
+                # Caught live on rung-3 v8: planner respected the prompt's
+                # T001-priority-1 rule but interpreted "target failing test
+                # paths" as "edit the test files" — wrong file. Layer-1
+                # (the prompt) is necessary; Layer-2 (this) is the safety
+                # net. Scope: ONLY rewrite T001's file_hints when (a)
+                # Test Results metric is fail AND (b) every current
+                # file_hint sits under a tests/-like dir. Test → source
+                # mapping is per-language regex on imports.
+                if plan and plan.tasks:
+                    from gitoma.planner.test_to_source import rewrite_plan_in_place
+                    _occam = rewrite_plan_in_place(plan, report, git_repo.root)
+                    if _occam:
+                        console.print(
+                            f"[muted]Occam plan-rewrite: T001 file_hints "
+                            f"{_occam['before']} → {_occam['after']}[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _ot
+                            _ot().emit("plan.occam_rewrite", **_occam)
+                        except Exception:
+                            pass
+
                 if not plan.tasks:
                     console.print("[warning]⚠ LLM returned an empty task plan. Nothing to do.[/warning]")
                     _safe_cleanup(git_repo)
