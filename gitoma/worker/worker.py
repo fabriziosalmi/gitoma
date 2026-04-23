@@ -29,6 +29,7 @@ from gitoma.worker.patcher import (
     validate_post_write_syntax,
     validate_top_level_preservation,
 )
+from gitoma.worker.config_grounding import validate_config_grounding
 from gitoma.worker.content_grounding import validate_content_grounding
 from gitoma.worker.schema_validator import validate_config_semantics
 
@@ -338,6 +339,44 @@ class WorkerAgent:
                     self._revert_touched(touched)
                     raise ValueError(
                         f"Content-grounding check failed after {max_attempts} "
+                        f"attempt(s) on {bad_path}. Last error: {msg[:200]}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
+            # G12 config-grounding: JS/TS config files (prettier,
+            # tailwind, vite, webpack, …) get checked for package
+            # references that don't appear in npm deps. Catches the
+            # b2v PR #21 failure mode (prettier.config.js with
+            # ``plugins: ['prettier-plugin-tailwindcss']`` shipped
+            # without tailwindcss in package.json). Silent pass when
+            # fingerprint missing or no package.json declared.
+            cfg_grounding_err = validate_config_grounding(
+                self._git.root, touched, self._repo_fingerprint,
+            )
+            if cfg_grounding_err is not None:
+                bad_path, msg = cfg_grounding_err
+                err_text = (
+                    f"Config-grounding check failed on {bad_path}: {msg} "
+                    "Re-emit a patch that ONLY references npm packages "
+                    "actually declared in package.json. If the package "
+                    "really IS needed, also propose adding it to the "
+                    "deps in the same patch — but the patcher's manifest "
+                    "block may reject; safer to drop the unsupported "
+                    "reference."
+                )
+                current_trace().emit(
+                    "critic_config_grounding.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    path=bad_path,
+                    error=msg[:300],
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"Config-grounding check failed after {max_attempts} "
                         f"attempt(s) on {bad_path}. Last error: {msg[:200]}"
                     )
                 self._revert_touched(touched)

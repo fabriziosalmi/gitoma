@@ -4,6 +4,41 @@ All notable changes to gitoma are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning is
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **G12 — Config-grounding for JS/TS configs**
+  (`gitoma/worker/config_grounding.py`): JS/TS config files
+  (47-basename closed set: prettier, eslint, tailwind, vite,
+  webpack, jest, playwright, next, nuxt, astro, svelte, postcss,
+  babel) get their package references checked against
+  `fingerprint['declared_deps']['npm']`. Three extractors cover
+  `require()`, `import-from`, and `plugins/presets: [...]`
+  arrays. Normaliser handles `@scope/pkg/sub` and `lodash/fp` →
+  base package; 84-entry Node-builtin set + relative paths are
+  skipped. Catches the b2v PR #21 second-half: generated
+  `prettier.config.js` referenced `prettier-plugin-tailwindcss`
+  while `package.json` only declared `vitepress`. G11 caught the
+  doc hallucination; G12 catches the symmetric config one.
+  Wired both worker and refiner apply paths. Live-validated
+  against the b2v fingerprint via `/repo/fingerprint`.
+
+### Trace events
+
+- `critic_config_grounding.fail` — G12 fired (carries `phase` =
+  `worker` or `refiner`)
+
+### Tests
+
+- 859 passing (was 822 at v0.3.0). +37 new tests in
+  `test_config_grounding.py`: PR #21 replay, extractor coverage
+  for 7 import/require shapes, normaliser table for scoped /
+  sub-path / relative / empty inputs, builtin-skip table for
+  modern `node:` prefix, silent-pass paths (no fingerprint, no
+  `package.json`, non-config `.js`), first-violation
+  short-circuit, sanity tests for the basename + builtin sets.
+
 ## [0.3.0] — 2026-04-23
 
 The "ground truth" release. Two new guards (G10, G11) extend the

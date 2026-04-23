@@ -397,11 +397,59 @@ violation injected as feedback.
 
 - Source-code grounding (function-name existence checks) — needs
   a symbol index across the repo.
-- JS config plugin grounding (`prettier.config.js` referencing a
-  plugin that isn't in npm deps) — easy follow-up: add a JS
-  string-literal scanner per extension.
+- ~~JS config plugin grounding~~ — **shipped as G12 below**.
 - Negative claims ("Unlike React, we use vanilla DOM") — accepted
   as a known low-volume false-positive; revisit if FP rate climbs.
+
+### G12 — Config-grounding for JS/TS configs
+
+**Catches**: JS/TS config files (`prettier.config.js`,
+`tailwind.config.js`, `vite.config.ts`, etc.) that reference npm
+packages absent from `package.json`. The b2v PR #21 case had this
+failure mode side-by-side with the doc hallucination G11 catches:
+the generated `prettier.config.js` shipped
+`plugins: ['prettier-plugin-tailwindcss']` but b2v's `package.json`
+only declares `vitepress` — the plugin reference would fail at
+prettier load time. Every prior structural guard silent.
+
+**Mechanism**: `gitoma/worker/config_grounding.py` matches files
+by basename against a closed `CONFIG_FILE_BASENAMES` set (47
+entries — Prettier, ESLint, Tailwind, Vite, Webpack, Jest,
+Playwright, Next, Nuxt, Astro, Svelte, PostCSS, Babel).
+Three extractors collect package references:
+
+- `require('pkg')` — CommonJS form
+- `import x from 'pkg'` / `import 'pkg'` — ESM form
+- `plugins: [...]` / `presets: [...]` — string-literal arrays
+  (this is the PR #21 shape — the offending plugin was a string
+  in the array, not an import)
+
+Each extracted reference is normalised
+(`@scope/pkg/sub` → `@scope/pkg`, `lodash/fp` → `lodash`),
+filtered against an 84-entry `NODE_BUILTINS` set (`fs`,
+`path`, …, including the `node:` prefix variants), and
+relative/absolute paths are skipped. The remaining package names
+are membership-tested against
+`fingerprint['declared_deps']['npm']`. First miss → revert+retry.
+
+**Closed scope on purpose**: greping every `.js` file in the repo
+for package references would be a false-positive minefield —
+application code legitimately calls `require('lodash')` even when
+that dep isn't yet declared (the developer is mid-edit, npm will
+flag it at install time). G12 only fires on files we're certain
+are configs.
+
+**Silent pass** when:
+
+- Fingerprint is `None` / empty / no `package.json` declared
+  (pure-Rust/Python/Go projects that happen to ship a config
+  file get a free pass — extending grounding to them is a
+  conscious deferred decision, not a default)
+- File basename not in `CONFIG_FILE_BASENAMES`
+- Every extracted reference resolves against npm deps OR is a
+  Node builtin OR is a relative/absolute path
+
+**Wired both worker and refiner apply paths.**
 
 ## Q&A self-consistency phase (orthogonal to the stack)
 
@@ -580,3 +628,4 @@ existing ones.
 | 2026-04-23 PM | v27 launch | G9 deterministic post-plan filter (commits `e2e9a04` + `a17ebc3` + `d7ee293`) — drops subtasks with recently-failing `file_hints` at plan time. Wider 7d/200 window than planner prompt (24h/20). **Cleanest rung-3 run of the day** — 1 worker fail vs usual 3-5. |
 | 2026-04-23 PM | b2v PR #19 | G10 (semantic config schema validator) — bundled schemastore.org schemas for ESLint/Prettier/package.json/tsconfig/github-workflow/dependabot/Cargo. Catches valid-JSON-but-wrong-shape configs that G2 silently passes. v0.2.0 release. |
 | 2026-04-23 PM | b2v PR #21 | G11 (content-grounding via Occam `/repo/fingerprint`) — new endpoint exposes declared deps + inferred frameworks; planner prompt + worker apply loop both consume it. Catches the React-in-Rust-repo hallucination that every prior guard misses by design. |
+| 2026-04-24 AM | b2v PR #21 second issue | G12 (config-grounding for JS/TS configs) — closes the OTHER half of PR #21: `prettier.config.js` referenced `prettier-plugin-tailwindcss` not in npm deps. Same fingerprint as G11; 47-basename closed-set, 3 extractors (require/import/plugin-array). Live-validated against b2v fingerprint. |

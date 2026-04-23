@@ -1022,6 +1022,9 @@ def run(
                                 validate_post_write_syntax,
                                 validate_top_level_preservation,
                             )
+                            from gitoma.worker.config_grounding import (
+                                validate_config_grounding,
+                            )
                             from gitoma.worker.content_grounding import (
                                 validate_content_grounding,
                             )
@@ -1156,6 +1159,41 @@ def run(
                                                 ),
                                             )
                                             _refine_grounding_ok = False
+                                    # G12 config-grounding on refiner
+                                    # output — same shape as G11 above.
+                                    # Catches the b2v PR #21 prettier
+                                    # case in the refiner path too:
+                                    # references to npm packages absent
+                                    # from package.json.
+                                    _refine_cfg_ok = True
+                                    if _refine_schema_ok and _refine_grounding_ok:
+                                        _refine_cfg = (
+                                            validate_config_grounding(
+                                                git_repo.root,
+                                                _refine_touched,
+                                                _repo_fp,
+                                            )
+                                        )
+                                        if _refine_cfg is not None:
+                                            _bad_p, _cf_msg = _refine_cfg
+                                            _trace.emit(
+                                                "critic_config_grounding.fail",
+                                                phase="refiner",
+                                                path=_bad_p,
+                                                error=_cf_msg[:300],
+                                            )
+                                            git_repo.repo.git.reset(
+                                                "--hard", _v0_sha
+                                            )
+                                            _trace.emit(
+                                                "critic_refiner.reverted",
+                                                winner="v0",
+                                                rationale=(
+                                                    "config_grounding_failed: "
+                                                    f"{_bad_p}: {_cf_msg[:120]}"
+                                                ),
+                                            )
+                                            _refine_cfg_ok = False
                                     # AST-diff guard on refiner output —
                                     # same shape as the syntax check above.
                                     # Catches the rung-3 v17/v18 pattern
@@ -1163,7 +1201,7 @@ def run(
                                     # patch that drops sibling functions
                                     # without flagging the deletion.
                                     _refine_ast = None
-                                    if _refine_schema_ok and _refine_grounding_ok:
+                                    if _refine_schema_ok and _refine_grounding_ok and _refine_cfg_ok:
                                         _refine_ast = (
                                             validate_top_level_preservation(
                                                 git_repo.root,
@@ -1171,7 +1209,7 @@ def run(
                                                 _refine_originals,
                                             )
                                         )
-                                    if not _refine_schema_ok or not _refine_grounding_ok:
+                                    if not _refine_schema_ok or not _refine_grounding_ok or not _refine_cfg_ok:
                                         pass  # earlier guard already reset; skip
                                     elif _refine_ast is not None:
                                         _bad_p, _missing = _refine_ast
