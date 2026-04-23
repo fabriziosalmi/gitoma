@@ -262,6 +262,37 @@ feedback injected → worker preserved row_factory on attempt 2 →
 feedback forced the fix. End result: **4/4 tests passing,
 engineered rather than lucky**.
 
+### G9 — Deterministic post-plan filter against Occam failure history
+
+**Catches**: subtasks whose `file_hints` overlap with paths that have
+failed repeatedly in prior runs, blocking them at plan time before the
+worker even tries. Rung-3 v24 showed that soft prompt injection alone
+(the PRIOR RUNS CONTEXT block) is too gentle — 4B planner read the
+log, rephrased the subtask title, kept identical `file_hints`.
+
+**How**: after `planner.plan()` returns, fetch a wide agent-log slice
+(`since=7d limit=200`), build a `{path: fail_count}` counter via
+`count_failed_hints`, call
+`filter_plan_by_failure_history(plan, counter, threshold=2)` which
+mutates the plan in place — dropping subtasks whose max-over-hints
+count ≥ threshold, and dropping tasks that lose all their subtasks.
+Emits `plan.occam_filter` with the summary `{filtered_subtasks,
+tasks_dropped, kept_subtasks, total_subtasks, threshold}`. Threshold
+via `GITOMA_OCCAM_FILTER_THRESHOLD`, default 2 (clamped ≥ 1).
+
+Two-window design: the planner prompt uses the narrow 24h/20 slice
+(fresh for display, <= 15 bullets rendered); G9 uses the wide
+7d/200 slice (failure patterns from yesterday are still diagnostic).
+Caught live v26b: narrow 24h/20 missed older CI-workflow fails that
+had fallen out of the recent-20 slice due to successes pushing them
+out.
+
+**Evidence**: rung-3 v27 — `plan.occam_filter` dropped T001-S02
+(`tests/test_db.py`, count=3) and T004-S01
+(`.github/workflows/ci.yml`, count=5) at plan time. Worker never
+tried either. 10 kept / 12 total. Only 1 worker.subtask.failed
+(T002-S03 transient JSON-emit). Cleanest rung-3 run of the day.
+
 ### G6 — Refiner-phase syntax check
 
 **Catches**: refiner's apply path silently corrupting working code.
@@ -338,6 +369,8 @@ model. Idempotent on already-valid JSON.
 | v23 | qwen8b | ✅ | ❌ | Mac first run with Occam; CRITIC_PANEL_DEVIL=false (no .env) → devil/refiner/Q&A silent; 14 observations POSTed to Occam |
 | v24 | qwen8b | ✅ | ❌ | Occam read+write live (planner injected 15 prior entries); refiner injected `>` into init_schema SQL string — G8 gap on refiner path |
 | **v25** | qwen8b | ✅ | **✅** | **4/4 GREEN — G8-on-refiner caught the v24 regression live (`phase=refiner` fired, reverted to v0)** |
+| **v26b** | qwen8b | ✅ | **✅** | **4/4 GREEN — G9 partial fire (narrow window missed CI pattern) + G8-on-refiner catch** |
+| **v27** | qwen8b | ✅ | **✅** | **4/4 GREEN — G9 full coverage (7d/200 window) dropped 2/12 subtasks at plan time + G8-on-refiner. Only 1 worker fail (transient). Cleanest run yet.** |
 
 ## Open problems (as of 2026-04-23 PM end-of-day)
 
@@ -458,3 +491,4 @@ existing ones.
 | 2026-04-23 PM | v22 launch | G7 (AST-diff top-level preservation) + G8 (runtime test regression gate) — **first 4/4 green ENGINEERED**: both guards fired live, retry recovered the row_factory regression |
 | 2026-04-23 PM | v23 launch | Occam Observer P1 integration (commit `49c1d57`) — `POST /observation` after every subtask + `GET /repo/agent-log` pre-planner. Feature off when `OCCAM_URL` unset. |
 | 2026-04-23 PM | v25 launch | G8 extended to refiner apply path (commit `c2e3af6`) — `critic_test_regression.fail phase=refiner` → v0 reset. Caught the v16/v24 `>`-in-SQL-string pattern that G6/G7 miss by design. **Third 4/4 green ENGINEERED run.** |
+| 2026-04-23 PM | v27 launch | G9 deterministic post-plan filter (commits `e2e9a04` + `a17ebc3` + `d7ee293`) — drops subtasks with recently-failing `file_hints` at plan time. Wider 7d/200 window than planner prompt (24h/20). **Cleanest rung-3 run of the day** — 1 worker fail vs usual 3-5. |
