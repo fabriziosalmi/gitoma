@@ -47,11 +47,41 @@ def test_unrelated_extensions_skipped(tmp_path: Path) -> None:
     assert validate_post_write_syntax(tmp_path, rels) is None
 
 
-def test_python_files_skipped(tmp_path: Path) -> None:
-    """``.py`` is BuildAnalyzer's job — a richer error format and it
-    runs ``py_compile`` per language. Don't double-cover."""
-    rel = _write(tmp_path, "src/x.py", "def broken(:\n    pass\n")  # syntax error
+def test_python_files_now_validated(tmp_path: Path) -> None:
+    """``.py`` is now checked here too via ``py_compile`` — rung-3 v16
+    caught the refiner silently corrupting src/db.py (triple-quote
+    truncated to empty-string-plus-bare-bracket) on its own apply
+    path which doesn't go through BuildAnalyzer. A patcher-level
+    Python check covers both worker and refiner with one helper."""
+    rel = _write(tmp_path, "src/x.py", "def broken(:\n    pass\n")
+    result = validate_post_write_syntax(tmp_path, [rel])
+    assert result is not None
+    assert result[0] == "src/x.py"
+    assert "SyntaxError" in result[1]
+
+
+def test_valid_python_passes(tmp_path: Path) -> None:
+    rel = _write(tmp_path, "src/x.py", "def fine():\n    return 42\n")
     assert validate_post_write_syntax(tmp_path, [rel]) is None
+
+
+def test_v16_actual_corruption_caught(tmp_path: Path) -> None:
+    """The exact corruption the v16 refiner shipped: changed a Python
+    triple-quoted string to an empty-string-plus-bare-bracket
+    sequence. Python sees the empty string then a stray operator."""
+    body = (
+        "import sqlite3\n"
+        "def init_schema(conn):\n"
+        "    conn.execute(\n"
+        "        \"\">\n"
+        "        CREATE TABLE x (id INT)\n"
+        "        \"\"\n"
+        "    )\n"
+    )
+    rel = _write(tmp_path, "src/db.py", body)
+    result = validate_post_write_syntax(tmp_path, [rel])
+    assert result is not None
+    assert result[0] == "src/db.py"
 
 
 def test_missing_file_silently_skipped(tmp_path: Path) -> None:

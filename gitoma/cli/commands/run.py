@@ -868,44 +868,85 @@ def run(
                                 allowed_manifests=set(),
                             )
                             if _refine_touched:
-                                Committer(git_repo, config).commit_patches(
-                                    _refine_touched,
-                                    _refine_out.get("commit_message")
-                                    or "refine: address devil findings (1 turn)",
+                                # Per-file syntax check on refiner output.
+                                # The refiner has no build-retry loop and
+                                # didn't go through worker.py's
+                                # _apply_with_build_retry — so without
+                                # this we'd ship whatever the refiner
+                                # wrote, syntax errors and all. Caught
+                                # live rung-3 v16: refiner changed a
+                                # triple-quote opener to an empty-string-
+                                # plus-bare-bracket sequence in
+                                # src/db.py, breaking pytest collection.
+                                # On failure: revert touched files to v0
+                                # and skip meta-eval entirely (v0 wins
+                                # by default — a broken patch can never
+                                # be a refinement).
+                                from gitoma.worker.patcher import (
+                                    validate_post_write_syntax,
                                 )
-                                _v1_diff = git_repo.repo.git.diff(
-                                    f"{base_branch}..HEAD"
+                                _refine_syntax = validate_post_write_syntax(
+                                    git_repo.root, _refine_touched,
                                 )
-                                # Meta-eval: keep v1 only if genuinely better.
-                                with _trace.span(
-                                    "critic_meta_eval.judge",
-                                    v0_sha=_v0_sha[:8],
-                                ) as mfields:
-                                    _meta = MetaEval(
-                                        config.critic_panel, llm, config
+                                if _refine_syntax is not None:
+                                    _bad_path, _parser_msg = _refine_syntax
+                                    _trace.emit(
+                                        "critic_syntax_check.fail",
+                                        phase="refiner",
+                                        path=_bad_path,
+                                        error=_parser_msg[:300],
                                     )
-                                    _winner, _rationale = _meta.judge(
-                                        v0_diff=_v0_diff,
-                                        v1_diff=_v1_diff,
-                                        devil_findings=_devil_result.findings,
-                                    )
-                                    mfields["winner"] = _winner
-                                    mfields["rationale"] = _rationale[:160]
-                                # tie / v0 → revert v1 commit (keep v0)
-                                if _winner != "v1":
                                     git_repo.repo.git.reset(
                                         "--hard", _v0_sha
                                     )
                                     _trace.emit(
                                         "critic_refiner.reverted",
-                                        winner=_winner,
-                                        rationale=_rationale[:160],
+                                        winner="v0",
+                                        rationale=(
+                                            "syntax_check_failed: "
+                                            f"{_bad_path}: "
+                                            f"{_parser_msg[:120]}"
+                                        ),
                                     )
                                 else:
-                                    _trace.emit(
-                                        "critic_refiner.kept",
-                                        rationale=_rationale[:160],
+                                    Committer(git_repo, config).commit_patches(
+                                        _refine_touched,
+                                        _refine_out.get("commit_message")
+                                        or "refine: address devil findings (1 turn)",
                                     )
+                                    _v1_diff = git_repo.repo.git.diff(
+                                        f"{base_branch}..HEAD"
+                                    )
+                                    # Meta-eval: keep v1 only if genuinely better.
+                                    with _trace.span(
+                                        "critic_meta_eval.judge",
+                                        v0_sha=_v0_sha[:8],
+                                    ) as mfields:
+                                        _meta = MetaEval(
+                                            config.critic_panel, llm, config
+                                        )
+                                        _winner, _rationale = _meta.judge(
+                                            v0_diff=_v0_diff,
+                                            v1_diff=_v1_diff,
+                                            devil_findings=_devil_result.findings,
+                                        )
+                                        mfields["winner"] = _winner
+                                        mfields["rationale"] = _rationale[:160]
+                                    # tie / v0 → revert v1 commit (keep v0)
+                                    if _winner != "v1":
+                                        git_repo.repo.git.reset(
+                                            "--hard", _v0_sha
+                                        )
+                                        _trace.emit(
+                                            "critic_refiner.reverted",
+                                            winner=_winner,
+                                            rationale=_rationale[:160],
+                                        )
+                                    else:
+                                        _trace.emit(
+                                            "critic_refiner.kept",
+                                            rationale=_rationale[:160],
+                                        )
                         except Exception as _refine_exc:  # noqa: BLE001
                             # Refinement / commit / meta failed AFTER
                             # patches applied — revert any partial changes.

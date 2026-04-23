@@ -242,9 +242,14 @@ def validate_post_write_syntax(
       * ``.yml`` / ``.yaml`` → ``yaml.safe_load`` (skipped if PyYAML
         absent — yaml is an optional dep, no transitive cost)
 
-    ``.py`` files are deliberately skipped here — ``BuildAnalyzer``
-    already runs ``py_compile`` on every Python source via the
-    build-retry loop and reports a richer error format.
+    ``.py`` files use ``py_compile.compile`` — same parser as the
+    interpreter, no subprocess overhead. Originally skipped here in
+    favour of BuildAnalyzer, but rung-3 v16 caught the refiner
+    silently corrupting src/db.py (a triple-quote string opener
+    truncated to an empty-string-plus-bare-bracket sequence) on its
+    own apply path which doesn't go through BuildAnalyzer. A
+    patcher-level Python check covers BOTH the worker AND the
+    refiner with one helper.
 
     Other extensions (``.md``, ``.txt``, ``.go``, ``.rs``, ``.js``,
     ``.ts``, …) have no stdlib parser cheap enough to justify a per-
@@ -288,6 +293,13 @@ def validate_post_write_syntax(
             elif suffix in (".yml", ".yaml") and _yaml is not None:
                 with open(full, encoding="utf-8") as f:
                     _yaml.safe_load(f)
+            elif suffix == ".py":
+                # Use builtin ``compile()`` rather than
+                # ``py_compile.compile`` — same parser, no .pyc side-
+                # effect. ``compile`` raises ``SyntaxError`` directly.
+                with open(full, "rb") as f:
+                    _src = f.read()
+                compile(_src, str(full), "exec")
         except Exception as exc:
             return rel, f"{type(exc).__name__}: {exc}"
 
