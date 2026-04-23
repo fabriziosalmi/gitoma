@@ -542,12 +542,23 @@ def run(
                 # No-op when Occam is off / agent-log empty / nothing
                 # overlaps. Threshold defaults to 2, env override via
                 # ``GITOMA_OCCAM_FILTER_THRESHOLD``.
-                if plan and plan.tasks and _occam_cli.enabled and _log:
+                #
+                # Wider window than the planner-prompt fetch above:
+                # the prompt only renders ~15 bullets so 24h/20 is fine
+                # for display, but the failure counter needs the full
+                # accumulated history (failure patterns from yesterday
+                # are still relevant). Caught live v26b: 24h/20 sliced
+                # the agent-log to the most-recent successes and
+                # under-counted older repeated fails on
+                # ``.github/workflows/ci.yml`` → those subtasks slipped
+                # through the filter and re-failed in worker.
+                if plan and plan.tasks and _occam_cli.enabled:
                     from gitoma.context.occam_client import count_failed_hints
                     from gitoma.planner.occam_filter import (
                         filter_plan_by_failure_history, resolve_threshold,
                     )
-                    _hints_count = count_failed_hints(_log)
+                    _g9_log = _occam_cli.get_agent_log(since="7d", limit=200)
+                    _hints_count = count_failed_hints(_g9_log)
                     _g9_threshold = resolve_threshold()
                     _g9_summary = filter_plan_by_failure_history(
                         plan, _hints_count, threshold=_g9_threshold,
