@@ -9,7 +9,7 @@ _warnings.filterwarnings("ignore", message=".*NotOpenSSLWarning.*")
 _warnings.filterwarnings("ignore", message=".*LibreSSL.*")
 _warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "FabGPT"
 __email__ = "fabgpt.inbox@gmail.com"
 
