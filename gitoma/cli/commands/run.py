@@ -994,6 +994,9 @@ def run(
                                 validate_post_write_syntax,
                                 validate_top_level_preservation,
                             )
+                            from gitoma.worker.schema_validator import (
+                                validate_config_semantics,
+                            )
                             from gitoma.analyzers.test_runner import (
                                 detect_failing_tests,
                             )
@@ -1052,20 +1055,55 @@ def run(
                                         ),
                                     )
                                 else:
+                                    # G10 semantic config check on refiner
+                                    # output — same shape as the syntax
+                                    # check above. JSON/YAML/TOML parses
+                                    # valid but must also match the tool's
+                                    # schema. If refiner ships a broken
+                                    # ``.eslintrc.json`` shape, revert to
+                                    # v0.
+                                    _refine_schema_ok = True
+                                    _refine_schema = validate_config_semantics(
+                                        git_repo.root, _refine_touched,
+                                    )
+                                    if _refine_schema is not None:
+                                        _bad_p, _sch_msg = _refine_schema
+                                        _trace.emit(
+                                            "critic_schema_check.fail",
+                                            phase="refiner",
+                                            path=_bad_p,
+                                            error=_sch_msg[:300],
+                                        )
+                                        git_repo.repo.git.reset(
+                                            "--hard", _v0_sha
+                                        )
+                                        _trace.emit(
+                                            "critic_refiner.reverted",
+                                            winner="v0",
+                                            rationale=(
+                                                "schema_check_failed: "
+                                                f"{_bad_p}: {_sch_msg[:120]}"
+                                            ),
+                                        )
+                                        _refine_schema_ok = False
                                     # AST-diff guard on refiner output —
                                     # same shape as the syntax check above.
                                     # Catches the rung-3 v17/v18 pattern
                                     # extended to the refiner: a "modify"
                                     # patch that drops sibling functions
                                     # without flagging the deletion.
-                                    _refine_ast = (
-                                        validate_top_level_preservation(
-                                            git_repo.root,
-                                            _refine_touched,
-                                            _refine_originals,
+                                    _refine_ast = None
+                                    if _refine_schema_ok:
+                                        _refine_ast = (
+                                            validate_top_level_preservation(
+                                                git_repo.root,
+                                                _refine_touched,
+                                                _refine_originals,
+                                            )
                                         )
-                                    )
-                                    if _refine_ast is not None:
+                                    if not _refine_schema_ok:
+                                        pass  # schema check already reset; skip
+                                    elif _refine_ast is not None:
                                         _bad_p, _missing = _refine_ast
                                         _missing_list = ", ".join(
                                             sorted(_missing)

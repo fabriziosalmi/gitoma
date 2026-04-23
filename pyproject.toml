@@ -33,6 +33,16 @@ dependencies = [
     # cockpit that fails to push state snapshots.
     "websockets>=13.0",
     "mcp[cli]>=1.0",
+    # G10 semantic config validator — JSON Schema checks for common
+    # configs (ESLint, Prettier, tsconfig, package.json, GitHub
+    # workflow, dependabot, Cargo). Schemas bundled under
+    # ``gitoma/worker/schemas/`` for reproducibility; jsonschema is
+    # the stdlib-shaped validator (zero transitive deps).
+    "jsonschema>=4.20",
+    # G10 YAML validation for github-workflow + dependabot configs.
+    # Also lifts the soft-import in RepoBrief / syntax check paths
+    # — yaml was opt-in before, now guaranteed.
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]

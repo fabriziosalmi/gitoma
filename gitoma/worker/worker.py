@@ -29,6 +29,7 @@ from gitoma.worker.patcher import (
     validate_post_write_syntax,
     validate_top_level_preservation,
 )
+from gitoma.worker.schema_validator import validate_config_semantics
 
 # Cap on how many critic panel runs we keep in AgentState before dropping
 # the oldest. State.json must stay manageable on long runs (60+ subtasks);
@@ -264,6 +265,39 @@ class WorkerAgent:
             )
             if not touched:
                 raise ValueError("Patches produced no file changes")
+
+            # G10 semantic config validation: for known config files
+            # (ESLint, Prettier, package.json, tsconfig, github-
+            # workflow, dependabot, Cargo), verify the content matches
+            # the tool's JSON Schema. Catches the b2v v0.2.0 case:
+            # ``.eslintrc.json`` with ``parser`` as object instead of
+            # string (valid JSON → G2 silent, but ESLint refuses it).
+            schema_err = validate_config_semantics(self._git.root, touched)
+            if schema_err is not None:
+                bad_path, schema_msg = schema_err
+                err_text = (
+                    f"Config schema check failed on {bad_path}: {schema_msg}. "
+                    "The file parses as valid JSON/YAML/TOML but doesn't "
+                    "match the tool's schema. Re-emit a patch with the "
+                    "field shapes and option names the tool actually "
+                    "accepts (check the tool's docs)."
+                )
+                current_trace().emit(
+                    "critic_schema_check.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    path=bad_path,
+                    error=schema_msg[:300],
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"Config schema check failed after {max_attempts} "
+                        f"attempt(s) on {bad_path}. Last error: {schema_msg[:200]}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
 
             # AST-diff guard: every top-level def the original had,
             # the new content must still have. Catches the rung-3
