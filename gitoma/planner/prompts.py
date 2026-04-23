@@ -39,6 +39,7 @@ def planner_user_prompt(
     file_tree: list[str],
     languages: list[str],
     repo_brief: RepoBrief | None = None,
+    prior_runs_context: str | None = None,
 ) -> str:
     metrics_summary = "\n".join(
         f"- {m.display_name}: score={m.score:.2f} status={m.status} | {m.details}"
@@ -56,6 +57,19 @@ def planner_user_prompt(
     brief_block = ""
     if repo_brief is not None:
         brief_block = f"\n{render_brief(repo_brief)}\n"
+
+    # Prior-runs context — agent-log replay from Occam Observer.
+    # When present, tells the planner which patterns have failed in
+    # recent runs on THIS repo so it doesn't re-propose them. Empty
+    # string when the feature is off or the log is empty. Designed as
+    # a "negative filter" signal (what NOT to emit), consistent with
+    # the Meta-Dev Reflection framing.
+    prior_runs_block = ""
+    if prior_runs_context:
+        prior_runs_block = (
+            "\n== PRIOR RUNS CONTEXT (from Occam Observer) ==\n"
+            f"{prior_runs_context}\n"
+        )
 
     # Build Integrity status drives the compile-fix mode — an extra
     # constraint block we inject when the project does not compile.
@@ -84,7 +98,7 @@ COMPILE-FIX MODE ACTIVE (Build Integrity = fail). Until the build is green:
     return f"""Repository: {report.repo_url}
 Languages: {langs}
 Overall score: {report.overall_score:.2f}/1.0
-{brief_block}
+{brief_block}{prior_runs_block}
 == METRIC REPORT ==
 {metrics_summary}
 

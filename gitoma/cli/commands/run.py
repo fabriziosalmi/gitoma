@@ -463,8 +463,32 @@ def run(
                 repo_brief = extract_brief(git_repo.root)
                 planner = PlannerAgent(llm)
 
+                # Occam Observer prior-runs context — queried ONCE at
+                # plan time. Feature off (no-op) when OCCAM_URL env
+                # var is unset. Empty agent-log → empty string →
+                # planner prompt unchanged. See
+                # ``gitoma.context.occam_client`` for the fail-open
+                # contract.
+                from gitoma.context.occam_client import (
+                    default_client as _occam_client,
+                    format_agent_log_for_prompt as _fmt_agent_log,
+                )
+                _occam = _occam_client()
+                _prior_runs = ""
+                if _occam.enabled:
+                    _log = _occam.get_agent_log(since="24h", limit=20)
+                    _prior_runs = _fmt_agent_log(_log, max_bullets=15)
+                    if _prior_runs:
+                        console.print(
+                            f"[muted]Occam: injected {len(_log)} prior-runs entries into planner context[/muted]"
+                        )
+
                 try:
-                    plan = planner.plan(report, file_tree, repo_brief=repo_brief)
+                    plan = planner.plan(
+                        report, file_tree,
+                        repo_brief=repo_brief,
+                        prior_runs_context=_prior_runs or None,
+                    )
                 except LLMError as e:
                     # LLM-specific error — give actionable hint
                     console.print(
@@ -662,15 +686,58 @@ def run(
                     f"[dim]({config.lmstudio.model} generating…)[/dim]"
                 )
 
+            # Shared Occam client for the subtask callbacks. Lazy-
+            # created here (same instance across all subtasks) so we
+            # don't re-read the env var per callback fire. Disabled
+            # when OCCAM_URL is unset — every method returns None /
+            # empty and the pipeline proceeds unchanged.
+            from gitoma.context.occam_client import (
+                default_client as _occam_cb_client,
+                map_error_to_failure_modes as _map_modes,
+            )
+            _occam_cb = _occam_cb_client()
+
+            def _post_occam_observation(
+                task: Task, sub: SubTask, *,
+                outcome: str,
+                sha: str | None,
+                failure_modes: list[str],
+            ) -> None:
+                if not _occam_cb.enabled:
+                    return
+                try:
+                    _occam_cb.post_observation({
+                        "run_id": branch,
+                        "agent": "gitoma",
+                        "subtask_id": sub.id,
+                        "model": llm.model,
+                        "branch": branch,
+                        "commit_sha": sha or "",
+                        "outcome": outcome,
+                        "touched_files": list(sub.file_hints or []),
+                        "failure_modes": failure_modes,
+                        "confidence": 0.7 if outcome == "success" else 0.3,
+                    })
+                except Exception:
+                    pass  # fail-open — Occam is never critical path
+
             def on_subtask_done(task: Task, sub: SubTask, sha: str | None) -> None:
                 if sha:
                     state.current_operation = f"{sub.id} committed → {sha[:7]}"
                     save_state(state)
                     print_commit(sha, sub.title, sub.id)
+                    _post_occam_observation(
+                        task, sub,
+                        outcome="success", sha=sha, failure_modes=[],
+                    )
                 else:
                     state.current_operation = f"{sub.id} skipped (no changes)"
                     save_state(state)
                     console.print(f"  [warning]◎ {sub.id} — skipped (no file changes)[/warning]")
+                    _post_occam_observation(
+                        task, sub,
+                        outcome="skipped", sha=None, failure_modes=[],
+                    )
 
             def on_subtask_error(task: Task, sub: SubTask, error: str) -> None:
                 state.current_operation = f"{sub.id} FAILED: {error[:80]}"
@@ -696,6 +763,11 @@ def run(
                     )
                 except Exception:
                     pass
+                _post_occam_observation(
+                    task, sub,
+                    outcome="fail", sha=None,
+                    failure_modes=_map_modes(error),
+                )
 
             plan = worker.execute(
                 plan,
