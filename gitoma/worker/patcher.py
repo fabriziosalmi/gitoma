@@ -231,6 +231,109 @@ def _reject_if_unsanctioned_manifest(
     )
 
 
+def read_modify_originals(
+    root: Path, patches: list[dict[str, Any]]
+) -> dict[str, str]:
+    """Read the current content of every "modify" target BEFORE the
+    patcher writes new content. The result feeds
+    ``validate_top_level_preservation`` so we can compare what was
+    in the file to what the LLM emitted.
+
+    Pure read pass; no side effects. Skips:
+      * non-existent files (``modify`` of a missing file is the
+        worker's bug, not ours — let the patcher's normal flow
+        report the file write outcome)
+      * unreadable files (treat as "no original" → preservation
+        check skipped)
+      * "create" / "delete" actions (no original needed)
+
+    Returns ``{rel_path: content}`` for each readable modify target.
+    """
+    out: dict[str, str] = {}
+    for patch in patches:
+        if patch.get("action") != "modify":
+            continue
+        rel_path = patch.get("path", "")
+        if not rel_path:
+            continue
+        full = (root / rel_path).resolve()
+        if not full.is_file():
+            continue
+        try:
+            out[rel_path] = full.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Binary or unreadable — skip, no preservation check
+            continue
+    return out
+
+
+def _python_top_level_defs(source: str) -> set[str]:
+    """Return the set of top-level function and class names in
+    ``source``. Returns an empty set if the source doesn't parse
+    (the syntax check catches that separately; this helper just
+    can't compare apples to apples then)."""
+    import ast as _ast
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            names.add(node.name)
+    return names
+
+
+def validate_top_level_preservation(
+    root: Path, touched: list[str], originals: dict[str, str],
+) -> tuple[str, set[str]] | None:
+    """For each ``.py`` file in ``touched`` that we have an original
+    for, parse both versions and verify every top-level function /
+    class name in the original is still present in the new content.
+
+    Catches the rung-3 v17/v18 failure mode: worker emits a "modify"
+    patch on a test file or source file that drops sibling functions
+    (e.g. a ``db`` pytest fixture + 3 sibling tests) because its
+    rewrite "didn't need them". The new file parses cleanly (so the
+    syntax check passes) but is semantically a different program —
+    test collection or runtime imports break later.
+
+    Scope decisions for v1:
+      * Only top-level functions and classes; assignments
+        (``CONST = ...``) are noisy across legitimate edits.
+      * Only Python (``.py``); other languages would need
+        per-language AST tooling.
+      * Only "modify" actions (passed via ``originals``); "create"
+        has no baseline to compare against.
+      * Only INSIDE class bodies is OUT of scope — method
+        deletions are common in legitimate refactors.
+      * False positives on legitimate renames (``def old`` →
+        ``def new``) are accepted: the worker prompt should
+        instruct against renames in surgical-fix tasks.
+
+    Returns ``(rel_path, missing_names)`` on FIRST violation, or
+    ``None`` on clean.
+    """
+    for rel in touched:
+        if not rel.endswith(".py"):
+            continue
+        if rel not in originals:
+            continue
+        full = root / rel
+        if not full.is_file():
+            continue
+        try:
+            new_text = full.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        old_names = _python_top_level_defs(originals[rel])
+        new_names = _python_top_level_defs(new_text)
+        missing = old_names - new_names
+        if missing:
+            return rel, missing
+    return None
+
+
 def validate_post_write_syntax(
     root: Path, touched: list[str]
 ) -> tuple[str, str] | None:

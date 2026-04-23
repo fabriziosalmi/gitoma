@@ -25,7 +25,9 @@ from gitoma.worker.committer import Committer
 from gitoma.worker.patcher import (
     BUILD_MANIFESTS,
     apply_patches,
+    read_modify_originals,
     validate_post_write_syntax,
+    validate_top_level_preservation,
 )
 
 # Cap on how many critic panel runs we keep in AgentState before dropping
@@ -241,6 +243,10 @@ class WorkerAgent:
                 Path(h).name for h in (subtask.file_hints or [])
                 if Path(h).name in BUILD_MANIFESTS
             }
+            # Capture the BEFORE-write content of every "modify" target.
+            # Used by ``validate_top_level_preservation`` (post-apply)
+            # to detect dropped functions / classes.
+            originals = read_modify_originals(self._git.root, patches)
             touched = apply_patches(
                 self._git.root, patches,
                 compile_fix_mode=self._compile_fix_mode,
@@ -248,6 +254,46 @@ class WorkerAgent:
             )
             if not touched:
                 raise ValueError("Patches produced no file changes")
+
+            # AST-diff guard: every top-level def the original had,
+            # the new content must still have. Catches the rung-3
+            # v17/v18 failure mode (worker emitted a "modify" patch
+            # on a test file that dropped the ``db`` fixture + 3
+            # sibling tests because its rewrite "didn't need them").
+            # New file parses cleanly so the syntax check above
+            # passes — but test collection breaks at import. Same
+            # revert+retry shape as the syntax check.
+            ast_err = validate_top_level_preservation(
+                self._git.root, touched, originals,
+            )
+            if ast_err is not None:
+                bad_path, missing = ast_err
+                missing_list = ", ".join(sorted(missing))
+                err_text = (
+                    f"AST-diff check failed on {bad_path}: top-level "
+                    f"definition(s) {missing_list} were present in the "
+                    "original file but missing from your new content. "
+                    "Re-emit a patch that copies every existing function "
+                    "and class verbatim, modifying ONLY the body of the "
+                    "one you came to fix. Do NOT delete sibling functions, "
+                    "fixtures, or classes from the file."
+                )
+                current_trace().emit(
+                    "critic_ast_diff.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    path=bad_path,
+                    missing=sorted(missing),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"AST-diff check failed after {max_attempts} "
+                        f"attempt(s) on {bad_path}. Missing: {missing_list}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
 
             # Per-file post-write syntax check (TOML/JSON/YAML).
             # ``BuildAnalyzer`` covers source files; this catches
