@@ -223,12 +223,75 @@ RULES for this retry (non-negotiable):
 
 """
 
+    # ── Scope boundaries (rung-3 v13 fallout) ─────────────────────────
+    # The worker over-scoped T001-S02 ("Verify Test Coverage for SQLi
+    # Fix") from "make sure tests pass" to "rewrite db.py from stdlib
+    # sqlite3 to psycopg2 + add src/main.py importing a function that
+    # doesn't exist". The patch was syntactically valid TOML/Python,
+    # the SQL was even correctly parameterised — but the test suite
+    # broke because the entire scaffolding (get_conn/init_schema/seed)
+    # was deleted and a phantom ``connect_to_database`` was imported
+    # from a module that no longer exported it. None of our existing
+    # patcher / build-check / syntax-check guards catch this — it's
+    # semantically a different program now. The only place to push
+    # back is the prompt: fence the scope BEFORE the LLM commits to
+    # a direction.
+    boundaries_section = """
+== SCOPE BOUNDARIES — read before patching ==
+The ``Files to touch`` line above is the COMPLETE scope of this
+subtask. Treat the listed paths as a hard fence, not a starting
+suggestion.
+
+  1. Do NOT emit patches for files outside ``Files to touch`` unless
+     the task body literally names them. Inventing scaffolding (new
+     ``__init__.py``, new ``main.py``, "structure" refactors) when
+     the task is "fix bug X" is hallucination — those new files have
+     no callers, no tests, and silently break imports.
+
+  2. Do NOT add new top-level ``import`` / ``use`` / ``require``
+     statements unless the task explicitly requests a new dependency.
+     A "fix SQL injection" task is satisfied by parameterising the
+     EXISTING query against the EXISTING driver — switching from
+     stdlib ``sqlite3`` to ``psycopg2`` (or stdlib ``http`` to
+     ``requests``, or stdlib ``json`` to ``orjson``) is an
+     architectural rewrite, not a fix. Caught live rung-3 v13:
+     worker rewrote db.py to psycopg2; tests failed with
+     ModuleNotFoundError before any assertion ran.
+
+  3. Do NOT change public function signatures — names, parameter
+     order, parameter types, return types. Tests and other callers
+     in the repo depend on them. A signature change ripples across
+     the codebase; a function-body change stays local. Read the
+     CURRENT FILE CONTENTS section to see the real signatures
+     before you start.
+
+  4. Do NOT delete unrelated functions / classes / constants from a
+     file just because your patch doesn't reference them. Other code
+     (tests, callers, scripts you can't see in the truncated tree)
+     uses them. If a file has helper functions you don't recognise,
+     LEAVE THEM. Caught live rung-3 v13: worker deleted
+     ``get_conn``/``init_schema``/``seed`` from db.py because its
+     own rewrite "didn't need them" — every test fixture broke.
+
+  5. Cross-module imports must reference symbols that ACTUALLY EXIST.
+     If you write ``from .db import connect_to_database``, the name
+     ``connect_to_database`` MUST be defined in db.py somewhere your
+     patch puts it (or already exists there). Inventing import names
+     and hoping the runtime has them is the most expensive hallucination
+     — it gets past compile checks and only fails on first use.
+
+  6. Minimal-change wins. The smallest patch that satisfies the task
+     description and keeps existing tests green is correct; anything
+     more is risk without reward.
+"""
+
     return f"""Repository: {repo_name}
 Languages: {langs}
 
 Task: {subtask_title}
 Description: {subtask_description}
 Files to touch: {', '.join(file_hints) if file_hints else 'determine appropriate files'}
+{boundaries_section}
 {retry_section}
 {files_section}
 
