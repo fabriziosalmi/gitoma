@@ -128,6 +128,56 @@ def test_cargo_failures_listed(tmp_path: Path) -> None:
     assert "calculator::divides_cleanly" in r.details
 
 
+def test_node_failures_listed_with_time_suffix(tmp_path: Path) -> None:
+    """``node --test`` TTY output uses ``✖ name (Xms)`` for failures.
+    Header lines like ``✖ failing tests:`` (no time suffix) MUST be
+    filtered out — caught live on rung-4 v1, where the header was
+    captured as a fake fourth failure."""
+    (tmp_path / "package.json").write_text('{"name":"x","scripts":{"test":"node --test"}}')
+    a = TestRunnerAnalyzer(root=tmp_path, languages=["JavaScript"])
+    fake = subprocess.CompletedProcess(
+        args=["npm"], returncode=1, stdout=(
+            "✔ normal name renders inside a div (0.4ms)\n"
+            "✖ ampersand is escaped (0.3ms)\n"
+            "✖ script tag is text (0.1ms)\n"
+            "✖ failing tests:\n"  # this is a HEADER, not a test
+            "ℹ pass 1\n"
+            "ℹ fail 2\n"
+        ), stderr="",
+    )
+    with patch("subprocess.run", return_value=fake):
+        r = a.analyze()
+    assert r.score == 0.0
+    assert "TESTS FAILING (2)" in r.details, (
+        f"header line was likely captured as fake test; details={r.details!r}"
+    )
+    assert "ampersand is escaped" in r.details
+    assert "script tag is text" in r.details
+    # The header itself must NOT appear as a "failure"
+    assert "failing tests:" not in r.details
+
+
+def test_node_failures_in_raw_tap_format(tmp_path: Path) -> None:
+    """Some node test runners emit raw TAP. ``not ok N - name`` is the
+    canonical fail line — no time suffix to filter on, but the ``not ok``
+    prefix is unambiguous."""
+    (tmp_path / "package.json").write_text('{"name":"x","scripts":{"test":"node --test"}}')
+    a = TestRunnerAnalyzer(root=tmp_path, languages=["JavaScript"])
+    fake = subprocess.CompletedProcess(
+        args=["npm"], returncode=1, stdout=(
+            "TAP version 13\n"
+            "ok 1 - first test\n"
+            "not ok 2 - second test fails\n"
+            "not ok 3 - third also fails\n"
+        ), stderr="",
+    )
+    with patch("subprocess.run", return_value=fake):
+        r = a.analyze()
+    assert r.score == 0.0
+    assert "second test fails" in r.details
+    assert "third also fails" in r.details
+
+
 def test_go_failures_listed(tmp_path: Path) -> None:
     (tmp_path / "go.mod").write_text("module x\n")
     a = TestRunnerAnalyzer(root=tmp_path, languages=["Go"])

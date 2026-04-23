@@ -35,6 +35,12 @@ from gitoma.analyzers.base import BaseAnalyzer, MetricResult
 # Per-language run command + output-parser hook. Entry order matters —
 # first matching marker file wins, so a polyglot repo gets exactly one
 # run command (the most prominent stack).
+#
+# JS/TS path: ``npm test`` runs whatever is in ``package.json scripts.test``.
+# Many repos wire stdlib ``node --test`` there (rung-4 does), which works
+# offline. Repos that wire jest/vitest need their node_modules installed
+# already; we can't fix that, but we don't try — soft-pass on the
+# eventual subprocess.run failure.
 _LANG_RUNNERS: tuple[tuple[str, tuple[str, ...], list[str], str], ...] = (
     # (language, marker files, command, parser key)
     ("Python", ("pyproject.toml", "setup.py", "setup.cfg"),
@@ -43,6 +49,10 @@ _LANG_RUNNERS: tuple[tuple[str, tuple[str, ...], list[str], str], ...] = (
      ["cargo", "test", "--quiet", "--no-fail-fast"], "cargo"),
     ("Go", ("go.mod",),
      ["go", "test", "./..."], "go"),
+    ("JavaScript", ("package.json",),
+     ["npm", "test", "--silent"], "node"),
+    ("TypeScript", ("package.json",),
+     ["npm", "test", "--silent"], "node"),
 )
 
 
@@ -181,6 +191,18 @@ _CARGO_PASS_COUNT_RE = re.compile(r"test result:\s+\w+\.\s+(\d+)\s+passed", re.M
 _GO_FAIL_RE = re.compile(r"^---\s+FAIL:\s+(\S+)", re.MULTILINE)
 _GO_PASS_COUNT_RE = re.compile(r"^ok\s+\S+", re.MULTILINE)
 
+# Node ``node --test`` (and TAP-emitting wrappers) print failing test
+# names in two shapes that we both pick up:
+#   * ``✖ test name (Xms)`` — TTY-rendered TAP. Requires the timing
+#     suffix to filter out section headers like ``✖ failing tests:``
+#     which would otherwise be captured as a fake test name.
+#   * ``not ok N - test name`` — raw TAP. Numbered, unambiguous.
+_NODE_FAIL_RE = re.compile(
+    r"(?:^✖\s+(.+?)\s+\(\d+(?:\.\d+)?ms\)\s*$|^not\s+ok\s+\d+\s+-\s+(.+?)$)",
+    re.MULTILINE,
+)
+_NODE_PASS_COUNT_RE = re.compile(r"^(?:ℹ\s+pass\s+|# pass\s+)(\d+)\s*$", re.MULTILINE)
+
 
 def _parse_failing(parser_key: str, stdout: str, stderr: str) -> list[str]:
     text = (stdout or "") + "\n" + (stderr or "")
@@ -200,6 +222,13 @@ def _parse_failing(parser_key: str, stdout: str, stderr: str) -> list[str]:
                 out.extend(line.strip() for line in chunk.splitlines() if line.strip())
     elif parser_key == "go":
         out = list(_GO_FAIL_RE.findall(text))
+    elif parser_key == "node":
+        out = []
+        for groups in _NODE_FAIL_RE.findall(text):
+            for g in groups:
+                if g and g.strip():
+                    out.append(g.strip())
+                    break
     else:
         out = []
     # Deduplicate, preserve order
@@ -222,4 +251,7 @@ def _count_passing(parser_key: str, stdout: str, stderr: str) -> int:
         return int(m.group(1)) if m else 0
     if parser_key == "go":
         return len(_GO_PASS_COUNT_RE.findall(text))
+    if parser_key == "node":
+        m = _NODE_PASS_COUNT_RE.search(text)
+        return int(m.group(1)) if m else 0
     return 0
