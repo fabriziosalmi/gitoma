@@ -334,7 +334,10 @@ model. Idempotent on already-valid JSON.
 | v19 | qwen8b | ✅ | ❌ | Helpers preserved, but `>` in SQL string → runtime OperationalError |
 | v20 | qwen8b | ✅ | 3/4 | `row_factory` dropped from `get_conn` body |
 | v21 | qwen8b | ✅ | 3/4 | Same row_factory loss — stochastic repeat (G7 silent — no AST violation) |
-| **v22** | qwen8b | ✅ | **✅** | **4/4 GREEN — ENGINEERED (G7 + G8 both fired live + recovered via retry)** |
+| **v22** | qwen8b | ✅ | **✅** | **4/4 GREEN — ENGINEERED (G7 + G8-worker both fired live + recovered via retry)** |
+| v23 | qwen8b | ✅ | ❌ | Mac first run with Occam; CRITIC_PANEL_DEVIL=false (no .env) → devil/refiner/Q&A silent; 14 observations POSTed to Occam |
+| v24 | qwen8b | ✅ | ❌ | Occam read+write live (planner injected 15 prior entries); refiner injected `>` into init_schema SQL string — G8 gap on refiner path |
+| **v25** | qwen8b | ✅ | **✅** | **4/4 GREEN — G8-on-refiner caught the v24 regression live (`phase=refiner` fired, reverted to v0)** |
 
 ## Open problems (as of 2026-04-23 PM end-of-day)
 
@@ -363,16 +366,64 @@ even with the in-process repair. Visible as `worker.subtask.failed`
 with error `Could not obtain valid JSON from LLM after 3 attempts`.
 Dominant residual failure family on rung-3 today.
 
-### O4 — Body-level semantic regression — ✅ CLOSED by G8
+### O4 — Body-level semantic regression — ✅ CLOSED by G8 (worker) + G8-on-refiner
 
 Worker preserves function signatures but rewrites bodies in ways
 that break callers (e.g. drops `row_factory = sqlite3.Row`; injects
 stray characters into string literals). G8 runtime test gate
 catches this at the only layer where it's visible: running tests.
-Validated live rung-3 v22 — the feedback-driven retry recovered
-from the regression on attempt 2, producing a 4/4 green PR from
-the same stochastic 4B worker that would have shipped a 3/4 result
-without the gate.
+
+G8 was originally wired only to the WORKER apply path. Rung-3 v24
+(first Mac run with Occam feedback loop) exposed the gap: the
+REFINER phase has its own apply path without G8. Refiner injected
+a stray `>` into `init_schema`'s SQL string — valid Python, valid
+AST, but sqlite3 errors at DDL execution → 4/4 tests broken.
+Fixed in commit `c2e3af6`: refiner apply captures a test baseline
+before its patches, re-runs tests after syntax+AST both pass,
+and resets to v0 + skips meta-eval when regressions are detected.
+
+Validated live rung-3 v25 — `critic_test_regression.fail
+phase=refiner sample=tests/test_db.py::test_find_known_user
+total_count=4` fired, refiner reverted, worker's correct fix
+shipped. 4/4 tests green.
+
+## Feedback loop integration (Occam Observer)
+
+Starting commit `49c1d57` gitoma speaks to a separate Go gateway
+(Occam Observer) that aggregates observations across runs. Two
+directions:
+
+- **WRITE — `POST /observation`** after every subtask in
+  `on_subtask_done` / `on_subtask_error`. Payload:
+  `{run_id (=branch), agent:"gitoma", subtask_id, model,
+  outcome (success|fail|skipped), touched_files, failure_modes,
+  confidence}`. `failure_modes` is a closed set of 11 labels
+  (`json_emit`, `ast_diff`, `test_regression`, `syntax_invalid`,
+  `denylist`, `manifest_block`, `patcher_reject`,
+  `build_retry_exhausted`, `git_refused`, `json_parse_bad`,
+  `unknown`) mapped from error strings by
+  `map_error_to_failure_modes`.
+
+- **READ — `GET /repo/agent-log?since=24h&limit=20`** right before
+  `planner.plan()`. Results render into a `== PRIOR RUNS CONTEXT ==`
+  block in the planner user prompt, grouped by outcome (FAILED
+  first since that's the actionable "don't re-propose" signal).
+
+Validated end-to-end rung-3 v23 → v25: 31 observations landed
+across 3 runs, 4 distinct failure_modes surfaced live, planner
+console announced `Occam: injected N prior-runs entries into
+planner context` on each run after the first.
+
+Observed limitation (v24): soft prompt injection ("AVOID these
+patterns") is too gentle for a 4B-class planner. It reshapes the
+subtask title but keeps identical `file_hints`, so the worker hits
+the same slop. Deterministic post-plan filter (reject subtasks
+whose file_hints overlap with recent-failed file_hints) is the
+likely next guard.
+
+Feature off when `OCCAM_URL` env var is unset. Client
+fail-open on every network / schema / gateway error — gitoma
+pipeline runs unchanged without Occam.
 
 ## Composability model
 
@@ -405,3 +456,5 @@ existing ones.
 | 2026-04-23 PM | v17 launch | G6 (refiner syntax check, `.py` coverage) |
 | 2026-04-23 PM | (orthogonal) | Q&A crash → PR annotation, JSON repair |
 | 2026-04-23 PM | v22 launch | G7 (AST-diff top-level preservation) + G8 (runtime test regression gate) — **first 4/4 green ENGINEERED**: both guards fired live, retry recovered the row_factory regression |
+| 2026-04-23 PM | v23 launch | Occam Observer P1 integration (commit `49c1d57`) — `POST /observation` after every subtask + `GET /repo/agent-log` pre-planner. Feature off when `OCCAM_URL` unset. |
+| 2026-04-23 PM | v25 launch | G8 extended to refiner apply path (commit `c2e3af6`) — `critic_test_regression.fail phase=refiner` → v0 reset. Caught the v16/v24 `>`-in-SQL-string pattern that G6/G7 miss by design. **Third 4/4 green ENGINEERED run.** |
