@@ -269,9 +269,53 @@ suggestion.
      file just because your patch doesn't reference them. Other code
      (tests, callers, scripts you can't see in the truncated tree)
      uses them. If a file has helper functions you don't recognise,
-     LEAVE THEM. Caught live rung-3 v13: worker deleted
+     LEAVE THEM. Caught live rung-3 v13+v14: worker deleted
      ``get_conn``/``init_schema``/``seed`` from db.py because its
      own rewrite "didn't need them" — every test fixture broke.
+
+     This rule is the most violated one because of a structural
+     trap: you must emit COMPLETE new file content (not diffs), and
+     it's tempting to write only the function you came to fix.
+     Concrete shape:
+
+       WRONG (rung-3 v14 actual output — caused ImportError on
+       ``from src.db import init_schema, seed``):
+
+           import sqlite3
+
+           def find_user_by_name(conn, name):
+               cursor = conn.cursor()
+               cursor.execute("SELECT * FROM users WHERE name = ?", (name,))
+               return cursor.fetchall()
+
+           def get_conn():
+               return sqlite3.connect(':memory:')
+
+           # init_schema and seed remain unchanged
+           # ← LIE. They're gone from the file content above.
+
+       RIGHT — copy every existing function VERBATIM, edit only the
+       one you came to fix:
+
+           import sqlite3
+
+           def get_conn() -> sqlite3.Connection:
+               conn = sqlite3.connect(":memory:")
+               conn.row_factory = sqlite3.Row     # ← preserved
+               return conn
+
+           def init_schema(conn): ...             # ← preserved verbatim
+           def seed(conn): ...                    # ← preserved verbatim
+
+           def find_user_by_name(conn, name):     # ← THIS is the only
+               cur = conn.execute(                #     function you fix
+                   "SELECT id, name FROM users WHERE name = ?", (name,)
+               )
+               return [dict(row) for row in cur]
+
+     If you write a comment like ``# X remains unchanged`` and X is
+     NOT in your file content above the comment, you are lying. The
+     parser doesn't read comments; tests will fail at import time.
 
   5. Cross-module imports must reference symbols that ACTUALLY EXIST.
      If you write ``from .db import connect_to_database``, the name

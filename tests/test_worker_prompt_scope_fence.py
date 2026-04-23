@@ -94,6 +94,24 @@ def test_rule4_protects_helpers_by_name() -> None:
     assert "seed" in rendered
 
 
+def test_rule4_includes_wrong_right_examples() -> None:
+    """rung-3 v14 fallout: rule-4 was present but qwen3-8b violated
+    it anyway, deleting helpers and emitting the lie ``# init_schema
+    and seed remain unchanged``. WRONG/RIGHT examples in the prompt
+    (same pattern that worked for the Defender) close that gap."""
+    rendered = _render()
+    # The WRONG block should reproduce the v14 actual output shape so
+    # the model recognises its own pattern when about to produce it.
+    assert "WRONG" in rendered
+    assert "RIGHT" in rendered
+    # Specific lie phrasing the v14 worker produced — naming it makes
+    # the rule about what it actually does, not abstract style.
+    assert "remains unchanged" in rendered or "remain unchanged" in rendered
+    # Concrete instruction that comments don't substitute for code.
+    assert "comment" in rendered.lower()
+    assert "lying" in rendered.lower() or "lie" in rendered.lower()
+
+
 # ── Rule 5: phantom imports ─────────────────────────────────────────────
 
 
