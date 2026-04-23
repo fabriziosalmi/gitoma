@@ -199,6 +199,69 @@ preserved verbatim. **First fully-passing rung-3 PR** (4/4 tests
 green). Same WRONG/RIGHT pattern that hardened the Defender
 prompt (commit `fc4365e`) ports cleanly to the worker prompt.
 
+### G7 — AST-diff guard (top-level def preservation)
+
+**Catches**: "modify" patches that drop top-level functions / classes
+from a Python file. Exactly the rung-3 v14/v17/v18 pattern: worker
+emits new content for a file, drops helpers its rewrite "doesn't
+need", often with a lying comment like `# X remains unchanged`. New
+file parses cleanly → syntax check silent → import/collection breaks
+at runtime.
+
+**How**: two new helpers in `patcher.py`:
+
+- `read_modify_originals(root, patches) -> dict[str, str]` captures
+  BEFORE-write content of every modify target (pure read).
+- `validate_top_level_preservation(root, touched, originals) ->
+  tuple[str, set[str]] | None` AST-parses both versions, returns
+  `(path, missing_names)` on the FIRST missing top-level def.
+
+Scope: top-level `FunctionDef` / `AsyncFunctionDef` / `ClassDef`
+only. Assignments and class methods are deliberately out of scope
+(too noisy across legitimate edits). Wired into BOTH the worker's
+retry loop AND the refiner's apply path with `critic_ast_diff.fail`
+trace events carrying `phase` = `"worker"` or `"refiner"`.
+
+**Evidence**: rung-3 v22 — T001-S03 attempts 1 and 2 both emitted
+`tests/test_db.py` missing the `db` fixture + 3 sibling tests.
+Retry exhausted, subtask cleanly failed, test file stayed intact.
+
+### G8 — Runtime test regression gate
+
+**Catches**: body-level semantic regressions that every static guard
+misses by design. The worker changes a function body, the signature
+stays intact (so G7 silent), the file compiles (so BuildAnalyzer
+silent), the syntax is valid (so G2 silent) — but the runtime
+behaviour breaks a test. Rung-3 v20/v21 dropped
+`conn.row_factory = sqlite3.Row` from `get_conn`; caller's
+`dict(row)` blew up with `TypeError`. Rung-3 v19 injected a stray
+`>` into an SQL string literal; `sqlite3.OperationalError` at DDL
+execution.
+
+**How**: `analyzers/test_runner.py:detect_failing_tests` is a
+standalone function that reuses the per-language runner + parsers
+and returns `set[str] | None` of currently-failing test
+identifiers. Worker instance holds a lazy baseline captured before
+the first subtask reaches the gate. After each subtask's
+apply+syntax+AST+build all pass, re-run tests and compute
+`current - baseline`:
+
+- Non-empty set → `critic_test_regression.fail` event + revert +
+  retry-with-feedback listing the broken tests.
+- Empty set → baseline advances forward (legitimate fixes move
+  tests OUT of baseline without triggering false positives).
+
+Returns `None` when toolchain missing / timeout / no recognised
+stack → gate silently skipped for the run. Opt-out via
+`GITOMA_TEST_REGRESSION_GATE=off`.
+
+**Evidence**: rung-3 v22 (both G7 and G8 live) — T001-S02 attempt 1
+broke `test_find_known_user` (row_factory drop). G8 fired →
+feedback injected → worker preserved row_factory on attempt 2 →
+`critic_build_retry.success`. Same model, same prompt; runtime
+feedback forced the fix. End result: **4/4 tests passing,
+engineered rather than lucky**.
+
 ### G6 — Refiner-phase syntax check
 
 **Catches**: refiner's apply path silently corrupting working code.
@@ -264,29 +327,24 @@ model. Idempotent on already-valid JSON.
 | v12 | qwen8b | ❌ | ❌ | Silent JSON-emit failures (G3 not yet shipped) |
 | v13 | qwen8b | ✅ | ❌ | Parameterised but psycopg2 over-scope (G4 not yet shipped) |
 | v14 | qwen8b | ✅ | ❌ | sqlite3 kept BUT helpers deleted (G5 not yet shipped) |
-| **v15** | qwen8b | ✅ | **✅** | **4/4 GREEN — first fully passing rung-3 PR** |
+| **v15** | qwen8b | ✅ | **✅** | **4/4 GREEN — first fully passing rung-3 PR (partly lucky)** |
 | v16 | qwen8b | ✅ | ❌ | Refiner corrupted `"""` → `""` (G6 not yet shipped) |
 | v17 | qwen8b | ✅ | ❌ | Refiner gap CLOSED, but T002 ate test fixtures |
 | v18 | qwen8b | ✅ | ❌ | Same test-file rule-4 violation as v17 (2/2 — systematic) |
+| v19 | qwen8b | ✅ | ❌ | Helpers preserved, but `>` in SQL string → runtime OperationalError |
+| v20 | qwen8b | ✅ | 3/4 | `row_factory` dropped from `get_conn` body |
+| v21 | qwen8b | ✅ | 3/4 | Same row_factory loss — stochastic repeat (G7 silent — no AST violation) |
+| **v22** | qwen8b | ✅ | **✅** | **4/4 GREEN — ENGINEERED (G7 + G8 both fired live + recovered via retry)** |
 
-## Open problems (as of 2026-04-23 PM)
+## Open problems (as of 2026-04-23 PM end-of-day)
 
-### O1 — Helper deletion in test files
+### O1 — Helper deletion in test files — ✅ CLOSED by G7
 
-Same class as rule 4 but applied to `tests/` files. Worker fixes one
-test, deletes the `db` fixture and 3 sibling tests in the same file.
-The scope-fence rule 4 cites source-side examples
-(`get_conn`/`init_schema`/`seed`); doesn't generalise to "preserve
-fixtures + sibling tests".
-
-**Candidate fixes**:
-- Cheap: extend rule 4 with a test-file WRONG/RIGHT example
-  (preserve fixtures + sibling tests).
-- Stronger: deterministic AST-diff guard at patcher level — a
-  "modify" patch on a `.py` file MUST preserve every top-level
-  definition (function, class, fixture, top-level constant) from
-  the original unless the deleted name appears in a comment of
-  the new content explaining the deletion.
+Worker drops `db` fixture + sibling tests when emitting
+`tests/test_db.py`. G7 AST-diff fires on the first attempt and
+forces a retry; if the worker repeats the same deletion, retry
+exhausts and the subtask cleanly fails with the test file
+untouched. Validated live rung-3 v22.
 
 ### O2 — qwen3-8b TOML authoring ceiling
 
@@ -304,6 +362,17 @@ qwen3-8b + `/no_think` occasionally fails to produce parseable JSON
 even with the in-process repair. Visible as `worker.subtask.failed`
 with error `Could not obtain valid JSON from LLM after 3 attempts`.
 Dominant residual failure family on rung-3 today.
+
+### O4 — Body-level semantic regression — ✅ CLOSED by G8
+
+Worker preserves function signatures but rewrites bodies in ways
+that break callers (e.g. drops `row_factory = sqlite3.Row`; injects
+stray characters into string literals). G8 runtime test gate
+catches this at the only layer where it's visible: running tests.
+Validated live rung-3 v22 — the feedback-driven retry recovered
+from the regression on attempt 2, producing a 4/4 green PR from
+the same stochastic 4B worker that would have shipped a 3/4 result
+without the gate.
 
 ## Composability model
 
@@ -335,3 +404,4 @@ existing ones.
 | 2026-04-23 PM | v15 launch | G5 (rule 4 WRONG/RIGHT) — **first 4/4 green** |
 | 2026-04-23 PM | v17 launch | G6 (refiner syntax check, `.py` coverage) |
 | 2026-04-23 PM | (orthogonal) | Q&A crash → PR annotation, JSON repair |
+| 2026-04-23 PM | v22 launch | G7 (AST-diff top-level preservation) + G8 (runtime test regression gate) — **first 4/4 green ENGINEERED**: both guards fired live, retry recovered the row_factory regression |
