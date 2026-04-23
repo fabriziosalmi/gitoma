@@ -306,6 +306,17 @@ class LLMClient:
 
         last_error: Exception | None = None
 
+        # Optional: append the Qwen3 ``/no_think`` soft-switch to the LAST
+        # user message when ``LM_STUDIO_DISABLE_THINKING=true``. Verified
+        # 2026-04-23 against ``qwen/qwen3-8b`` on Mac: reasoning_tokens
+        # dropped from 297 → 1, content unchanged. NO-OP on models that
+        # don't recognise the suffix (DeepSeek-R1, Qwen3.5) — they treat
+        # the trailing ``/no_think`` as harmless prose. Per-call: makes a
+        # COPY of the messages list so the caller's data is untouched.
+        import os as _os
+        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING") or "").lower() in ("1", "true", "yes"):
+            messages = _append_no_think(messages)
+
         for attempt in range(retries):
             try:
                 response = self._client.chat.completions.create(
@@ -435,6 +446,31 @@ class LLMClient:
 # ─────────────────────────────────────────────────────────────────────────────
 # JSON extraction helper
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _append_no_think(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Append ``/no_think`` to the last user message's content.
+
+    Qwen3-family soft-switch: appending ``/no_think`` to the prompt
+    short-circuits the chain-of-thought stage. Verified 2026-04-23 on
+    ``qwen/qwen3-8b`` — reasoning tokens 297 → 1. NO-OP on models that
+    don't implement the switch (the suffix is harmless prose).
+
+    Returns a COPY so the caller's messages list isn't mutated.
+    """
+    if not messages:
+        return messages
+    out = [dict(m) for m in messages]
+    # Find the LAST user message and append the marker.
+    for i in range(len(out) - 1, -1, -1):
+        if out[i].get("role") == "user":
+            content = out[i].get("content") or ""
+            if "/no_think" not in content:
+                # Use newline rather than trailing space so the prompt
+                # stays visually clean if a model echoes it back.
+                out[i]["content"] = content + "\n/no_think"
+            break
+    return out
+
 
 def _extract_json(text: str) -> str:
     """
