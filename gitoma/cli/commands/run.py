@@ -836,11 +836,16 @@ def run(
                             # Refiner patches get the same compile-fix gate
                             # as worker patches — otherwise the refiner could
                             # still corrupt a build manifest on its way to
-                            # "fixing" a devil-flagged issue.
+                            # "fixing" a devil-flagged issue. Default
+                            # ``allowed_manifests=set()`` (empty) — the refiner
+                            # has no per-subtask file_hint context to consent
+                            # from, and reshaping deps here is almost always
+                            # collateral damage rather than the intended fix.
                             _refine_touched = apply_patches(
                                 git_repo.root,
                                 _refine_out["patches"],
                                 compile_fix_mode=_compile_fix_mode,
+                                allowed_manifests=set(),
                             )
                             if _refine_touched:
                                 Committer(git_repo, config).commit_patches(
@@ -953,10 +958,18 @@ def run(
                             _qa_pre_sha = git_repo.repo.head.commit.hexsha
                             try:
                                 from gitoma.worker.patcher import apply_patches as _qa_apply_fn
+                                # Q&A's revised patches: same conservative
+                                # default as the refiner — manifests blocked
+                                # unless the original Defender output
+                                # explicitly named one. The Defender doesn't
+                                # currently set per-patch sanction context,
+                                # so default ``set()`` (= block all) is the
+                                # honest stance.
                                 _qa_touched = _qa_apply_fn(
                                     git_repo.root,
                                     _qa_result.revised_patches,
                                     compile_fix_mode=_compile_fix_mode,
+                                    allowed_manifests=set(),
                                 )
                                 if not _qa_touched:
                                     raise ValueError("Q&A patches produced no file changes")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 import os
@@ -21,7 +22,7 @@ from gitoma.planner.llm_client import LLMClient
 from gitoma.planner.prompts import worker_system_prompt, worker_user_prompt
 from gitoma.planner.task import SubTask, Task, TaskPlan
 from gitoma.worker.committer import Committer
-from gitoma.worker.patcher import apply_patches
+from gitoma.worker.patcher import BUILD_MANIFESTS, apply_patches
 
 # Cap on how many critic panel runs we keep in AgentState before dropping
 # the oldest. State.json must stay manageable on long runs (60+ subtasks);
@@ -228,8 +229,18 @@ class WorkerAgent:
             if "[gitoma]" not in commit_msg:
                 commit_msg += " [gitoma]"
 
+            # Manifest-edit allow-list: only those manifests the planner
+            # EXPLICITLY hinted at survive the always-on patcher block
+            # (rung-3 v11 fallout — the worker's pyproject.toml collateral
+            # broke pytest config-parse before any test could run).
+            allowed = {
+                Path(h).name for h in (subtask.file_hints or [])
+                if Path(h).name in BUILD_MANIFESTS
+            }
             touched = apply_patches(
-                self._git.root, patches, compile_fix_mode=self._compile_fix_mode,
+                self._git.root, patches,
+                compile_fix_mode=self._compile_fix_mode,
+                allowed_manifests=allowed,
             )
             if not touched:
                 raise ValueError("Patches produced no file changes")

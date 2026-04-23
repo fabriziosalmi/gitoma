@@ -36,13 +36,44 @@ def test_manifest_edits_rejected_in_compile_fix_mode(
         apply_patches(tmp_path, patches, compile_fix_mode=True)
 
 
-def test_manifest_edits_allowed_when_flag_off(tmp_path: Path) -> None:
-    """The manifest block is conditional — when compile_fix_mode=False
-    the LLM is free to edit manifests (legitimate "add dependency" tasks)."""
+def test_manifest_edits_blocked_by_default_outside_compile_fix(tmp_path: Path) -> None:
+    """Default-on block (rung-3 v11 behaviour change, 2026-04-23am):
+    even outside compile-fix mode, manifest edits are rejected unless
+    the planner explicitly hinted at them. Caught the pyproject.toml
+    collateral on rung-3 v11 — worker fixed src/db.py SQLi correctly
+    AND broke pyproject syntax in the same diff. Default-block
+    closes that path."""
     patches = [_patch("create", "go.mod", "module ok\n\ngo 1.22\n")]
-    touched = apply_patches(tmp_path, patches, compile_fix_mode=False)
+    with pytest.raises(PatchError, match="no subtask file_hint"):
+        apply_patches(tmp_path, patches, compile_fix_mode=False)
+
+
+def test_manifest_edits_allowed_when_explicitly_sanctioned(tmp_path: Path) -> None:
+    """Door stays open for legitimate "add a dependency" subtasks: when
+    the planner puts ``go.mod`` in the subtask's file_hints, the worker
+    passes it through ``allowed_manifests`` and the patcher allows the
+    edit."""
+    patches = [_patch("create", "go.mod", "module ok\n\ngo 1.22\n")]
+    touched = apply_patches(
+        tmp_path, patches,
+        compile_fix_mode=False,
+        allowed_manifests={"go.mod"},
+    )
     assert "go.mod" in touched
     assert (tmp_path / "go.mod").read_text().startswith("module ok")
+
+
+def test_compile_fix_mode_overrides_allowed_manifests(tmp_path: Path) -> None:
+    """Compile-fix mode is the strictest — even an explicit allow-list
+    is overridden, because in compile-fix the goal is to restore source,
+    not to reshape deps."""
+    patches = [_patch("modify", "go.mod", "module x\n")]
+    with pytest.raises(PatchError, match="compile-fix mode"):
+        apply_patches(
+            tmp_path, patches,
+            compile_fix_mode=True,
+            allowed_manifests={"go.mod"},  # ignored in compile-fix
+        )
 
 
 def test_source_edits_still_allowed_in_compile_fix_mode(tmp_path: Path) -> None:
