@@ -422,6 +422,21 @@ class LLMClient:
                     raise json.JSONDecodeError("Expected a JSON object", cleaned, 0)
                 return parsed
             except json.JSONDecodeError:
+                # One in-process repair attempt before burning an LLM
+                # round-trip. The Defender prompt occasionally emits
+                # JSON with bare double-quotes inside string values
+                # (``"the test \"asserts\" X"`` written without the
+                # backslashes) and trailing commas — both deterministic
+                # to fix without a re-prompt. Saves ~30s of round-trip
+                # latency per recovered call on a 4B-class model.
+                try:
+                    repaired = _attempt_json_repair(cleaned)
+                    if repaired != cleaned:
+                        parsed = json.loads(repaired)
+                        if isinstance(parsed, dict):
+                            return parsed
+                except json.JSONDecodeError:
+                    pass
                 if attempt < retries - 1:
                     # Append a correction turn and retry (in-context self-correction)
                     current_messages = current_messages + [
@@ -470,6 +485,161 @@ def _append_no_think(messages: list[dict[str, str]]) -> list[dict[str, str]]:
                 out[i]["content"] = content + "\n/no_think"
             break
     return out
+
+
+def _attempt_json_repair(s: str) -> str:
+    """Try to repair the most common LLM JSON authoring slop.
+
+    Two passes, both string-aware:
+
+      1. **Trailing-comma strip** — ``{"a": 1,}`` and ``[1, 2,]`` are
+         legal in JS / Python but not JSON. Strip commas immediately
+         followed (after whitespace) by ``}`` or ``]``, but ONLY when
+         we're outside a string literal.
+
+      2. **Bare-quote escape** — ``"rationale": "the test "asserts"
+         something"`` parses as three concatenated strings (and fails).
+         Walk every string literal: the OPENER is the first ``"`` after
+         a ``:`` or ``,``; the CLOSER is the next ``"`` followed by
+         ``,`` / ``}`` / ``]`` / whitespace+EOF / newline+JSON syntax.
+         Every quote BETWEEN opener and closer that doesn't qualify as
+         a closer is content and gets backslash-escaped.
+
+    Returns the (possibly modified) string. Caller is expected to
+    re-attempt ``json.loads`` and surrender if it still fails — this
+    is a best-effort repair, not a JSON5 parser. Out of scope:
+    single-quoted keys, unquoted keys, hex literals, comments. Those
+    are JS-isms a 4B-class model rarely emits in JSON-mode prompts.
+
+    Caught live in the Q&A Defender pipeline (rung-3 series): when
+    the Defender's ``rationale`` field quoted a test name with double
+    quotes, the entire JSON broke and the Q&A phase had to retry +
+    burn another LLM round-trip. Now repaired in-process.
+    """
+    return _escape_bare_quotes(_strip_trailing_commas(s))
+
+
+def _strip_trailing_commas(s: str) -> str:
+    """Remove ``,`` immediately preceding ``}``/``]`` (whitespace-tolerant),
+    skipping characters inside string literals."""
+    out: list[str] = []
+    i = 0
+    n = len(s)
+    in_string = False
+    escape_next = False
+    while i < n:
+        ch = s[i]
+        if escape_next:
+            out.append(ch)
+            escape_next = False
+            i += 1
+            continue
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escape_next = True
+            i += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            i += 1
+            continue
+        if not in_string and ch == ",":
+            # Look ahead past whitespace for } or ]. If found, drop the
+            # comma; else preserve it.
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if j < n and s[j] in "}]":
+                # Skip the comma; whitespace stays for readability.
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _escape_bare_quotes(s: str) -> str:
+    """Escape unescaped double-quotes that appear INSIDE a JSON string
+    value (or key). The opener/closer of each string is identified by
+    surrounding JSON syntax; quotes between them that don't sit
+    immediately before ``,``/``:``/``}``/``]``/whitespace-then-syntax
+    are treated as content and backslash-escaped.
+
+    The walker only acts when we're inside a string. Outside a string
+    every ``"`` is a structural opener. The boundary between
+    "structural quote" and "content quote" is decided by what comes
+    AFTER the quote — a closer is followed by syntax; a content quote
+    is followed by anything else (typically alphanumerics or another
+    opening quote).
+
+    Conservative: when uncertain, treat as closer (preserves correct
+    JSON unchanged). Only repairs the unambiguous slop pattern where a
+    quote appears mid-word.
+    """
+    n = len(s)
+    if n == 0:
+        return s
+    out: list[str] = []
+    i = 0
+    in_string = False
+    escape_next = False
+    while i < n:
+        ch = s[i]
+        if escape_next:
+            out.append(ch)
+            escape_next = False
+            i += 1
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escape_next = True
+            i += 1
+            continue
+        if ch != '"':
+            if ch == "\n" and in_string:
+                # Bare newline inside a string is invalid JSON; escape it
+                # so the parser sees a valid \n. Models occasionally emit
+                # multi-line rationales without manual escaping.
+                out.append("\\n")
+            else:
+                out.append(ch)
+            i += 1
+            continue
+
+        # ch == '"' here.
+        if not in_string:
+            # Opening a string.
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+
+        # We're inside a string and saw a quote. Decide: closer or
+        # content? Look at the next non-whitespace char.
+        j = i + 1
+        while j < n and s[j] in " \t\r":
+            j += 1
+        next_ch = s[j] if j < n else ""
+        # Closer if followed by JSON structural punctuation, end-of-input,
+        # or another newline that itself precedes structural punctuation.
+        is_closer = next_ch in (",", ":", "}", "]", "")
+        if not is_closer and next_ch == "\n":
+            k = j + 1
+            while k < n and s[k] in " \t\r\n":
+                k += 1
+            next_after_nl = s[k] if k < n else ""
+            is_closer = next_after_nl in (",", "}", "]", "")
+
+        if is_closer:
+            in_string = False
+            out.append(ch)
+        else:
+            # Content quote — escape it.
+            out.append("\\")
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _extract_json(text: str) -> str:
