@@ -105,6 +105,18 @@ cosmetic / scaffolding tasks (LICENSE, CONTRIBUTING, lint config, docs
 structure, CI workflows) while the build is failing — a project that
 does not compile cannot benefit from any of those. Emit them only once
 the build is green.
+
+HARD RULE — TEST RESULTS BEATS COSMETIC WORK (Occam pre-filter): if the
+metric named "Test Results" has status "fail", your plan MUST emit a
+priority=1 task addressing THOSE specific failing tests. The
+``details`` field lists exact failing-test paths (``file::test_name``
+or ``module::test_x``); your task's ``file_hints`` MUST point at the
+SOURCE files those tests cover (read the test file → find the
+``import`` / ``use`` of the production code → put THAT file as the
+file_hint). You MUST NOT plan generic-project work (README, LICENSE,
+CONTRIBUTING, docs, lint config) when there are failing tests — fix
+the broken code first, scaffolding later. If Build Integrity is also
+failing, Build wins (T001 = build fix, T002 = test fix).
 {compile_fix_block}
 
 Respond with ONLY this JSON schema (no extra text):

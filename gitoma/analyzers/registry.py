@@ -16,13 +16,18 @@ from gitoma.analyzers.license import LicenseAnalyzer
 from gitoma.analyzers.readme import ReadmeAnalyzer
 from gitoma.analyzers.security import SecurityAnalyzer
 from gitoma.analyzers.structure import StructureAnalyzer
+from gitoma.analyzers.test_runner import TestRunnerAnalyzer
 from gitoma.analyzers.tests import TestsAnalyzer
 
 # Ordering: BuildAnalyzer first so the cockpit shows "Build Integrity"
 # at the top of the audit table. A failing build dominates downstream
 # planning, so seeing it bottom-of-list is hostile to the operator.
+# TestRunnerAnalyzer comes RIGHT AFTER Build because a failing test is
+# the second-strongest "fix this before everything else" signal — and
+# the planner prompt keys on its details to enforce T001 priority=1.
 ALL_ANALYZER_CLASSES = [
     BuildAnalyzer,
+    TestRunnerAnalyzer,
     ReadmeAnalyzer,
     CIAnalyzer,
     TestsAnalyzer,
