@@ -528,6 +528,46 @@ def run(
                         except Exception:
                             pass
 
+                # ── G9: Post-plan filter against Occam failure history ───────
+                # Soft prompt injection (the PRIOR RUNS CONTEXT block fed
+                # to the planner) is too gentle for 4B-class planners.
+                # Caught live on rung-3 v24: planner saw the v23 fail log
+                # for T001-S02 on tests/test_db.py with ast_diff, then
+                # rephrased the subtask title but kept identical
+                # file_hints — worker hit the same slop again.
+                # This filter is deterministic: drop any subtask whose
+                # file_hints overlap with paths that have failed ≥
+                # threshold times in the recent agent-log window.
+                # No-op when Occam is off / agent-log empty / nothing
+                # overlaps. Threshold defaults to 2, env override via
+                # ``GITOMA_OCCAM_FILTER_THRESHOLD``.
+                if plan and plan.tasks and _occam.enabled and _log:
+                    from gitoma.context.occam_client import count_failed_hints
+                    from gitoma.planner.occam_filter import (
+                        filter_plan_by_failure_history, resolve_threshold,
+                    )
+                    _hints_count = count_failed_hints(_log)
+                    _g9_threshold = resolve_threshold()
+                    _g9_summary = filter_plan_by_failure_history(
+                        plan, _hints_count, threshold=_g9_threshold,
+                    )
+                    if _g9_summary["filtered_subtasks"]:
+                        _dropped_names = [
+                            f"{s['subtask_id']}({','.join(s['file_hints'][:2])})"
+                            for s in _g9_summary["filtered_subtasks"][:4]
+                        ]
+                        console.print(
+                            f"[muted]Occam filter: dropped "
+                            f"{len(_g9_summary['filtered_subtasks'])} subtask(s) "
+                            f"with file_hints failed ≥{_g9_threshold}× recently "
+                            f"— {', '.join(_dropped_names)}[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _oct
+                            _oct().emit("plan.occam_filter", **_g9_summary)
+                        except Exception:
+                            pass
+
                 if not plan.tasks:
                     console.print("[warning]⚠ LLM returned an empty task plan. Nothing to do.[/warning]")
                     _safe_cleanup(git_repo)

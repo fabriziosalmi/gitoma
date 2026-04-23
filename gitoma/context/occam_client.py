@@ -37,6 +37,7 @@ __all__ = [
     "default_client",
     "FAILURE_MODES",
     "OUTCOMES",
+    "count_failed_hints",
 ]
 
 
@@ -177,6 +178,31 @@ def default_client() -> OccamClient:
     """Build a client from the ``OCCAM_URL`` env var. Returns a
     disabled (no-op) client when the var is unset or empty."""
     return OccamClient(os.environ.get("OCCAM_URL") or None)
+
+
+def count_failed_hints(entries: list[dict[str, Any]]) -> dict[str, int]:
+    """From an agent-log slice, count how many distinct fail
+    observations each file_hint appears in.
+
+    ``tests/test_db.py`` failing in 3 separate subtasks → result is
+    ``{"tests/test_db.py": 3}``. Used by the post-plan filter (G9)
+    to decide whether a freshly-emitted subtask hinting at a path
+    should be dropped (count >= threshold) — the assumption is
+    "this file has been tried and failed N times in the recent
+    window; the (N+1)th attempt is unlikely to differ".
+
+    Skips ``success`` and ``skipped`` outcomes. Only counts the
+    ``touched_files`` array (which is the planner's ``file_hints``
+    propagated through the worker's observation payload).
+    """
+    counter: dict[str, int] = {}
+    for entry in entries:
+        if entry.get("outcome") != "fail":
+            continue
+        for hint in entry.get("touched_files") or []:
+            if hint:
+                counter[hint] = counter.get(hint, 0) + 1
+    return counter
 
 
 def format_agent_log_for_prompt(entries: list[dict[str, Any]], max_bullets: int = 15) -> str:
