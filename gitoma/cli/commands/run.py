@@ -473,10 +473,11 @@ def run(
                     default_client as _occam_client,
                     format_agent_log_for_prompt as _fmt_agent_log,
                 )
-                _occam = _occam_client()
+                _occam_cli = _occam_client()
+                _log: list = []
                 _prior_runs = ""
-                if _occam.enabled:
-                    _log = _occam.get_agent_log(since="24h", limit=20)
+                if _occam_cli.enabled:
+                    _log = _occam_cli.get_agent_log(since="24h", limit=20)
                     _prior_runs = _fmt_agent_log(_log, max_bullets=15)
                     if _prior_runs:
                         console.print(
@@ -541,7 +542,7 @@ def run(
                 # No-op when Occam is off / agent-log empty / nothing
                 # overlaps. Threshold defaults to 2, env override via
                 # ``GITOMA_OCCAM_FILTER_THRESHOLD``.
-                if plan and plan.tasks and _occam.enabled and _log:
+                if plan and plan.tasks and _occam_cli.enabled and _log:
                     from gitoma.context.occam_client import count_failed_hints
                     from gitoma.planner.occam_filter import (
                         filter_plan_by_failure_history, resolve_threshold,
