@@ -317,6 +317,92 @@ v17 with G6 in place: same identical bug intercepted —
 17, reverted to v0, src/db.py final state = correct worker SQLi
 fix preserved.
 
+### G10 — Semantic config schema validator
+
+**Catches**: configs that parse as valid JSON/YAML/TOML but don't
+match the consuming tool's own schema. The b2v PR #19 case:
+`.eslintrc.json` shipped with `"parser": {"parser": "..."}`
+(object where ESLint expects a string) plus invented options on
+`@typescript-eslint/explicit-module-boundary-types`. File parses
+clean → G2 silent → ESLint refuses to load it at runtime.
+
+**Mechanism**: `gitoma/worker/schema_validator.py` ships ~860KB of
+schemastore.org schemas under `gitoma/worker/schemas/` (ESLint,
+Prettier, package.json, tsconfig, github-workflow, dependabot,
+Cargo). On every apply, files matching `PATH_MATCHERS` are
+validated against their bundled schema via `jsonschema`. A
+permissive offline registry resolves cross-schema `$ref`s without
+network access. Same revert+retry shape as G2.
+
+A custom YAML loader excludes `on/off/yes/no` from the boolean
+resolver so GitHub Actions workflows (which use `on:` as a
+trigger key) keep `on` as a string instead of being parsed as
+Python `True`. Without this, every workflow file would fail
+validation against the github-workflow schema.
+
+**Wired both worker and refiner apply paths.**
+
+### G11 — Content-grounding against repo fingerprint
+
+**Catches**: documentation files that make claims contradicting the
+repo's actual stack. The b2v PR #21 case: a generated
+`docs/guide/architecture.md` claimed React + Redux + WebSocket
+frontend for a pure-Rust CLI repo (clap/serde/tokio). Every
+structural guard (G1-G10) silent — the file parses clean, isn't a
+known config, isn't Python so AST-diff doesn't apply, doesn't
+break the build, doesn't fail tests. The hallucination is purely
+*semantic*.
+
+**Mechanism**: `gitoma/worker/content_grounding.py` consumes
+Occam Observer's new `GET /repo/fingerprint` endpoint (declared
+deps per language, inferred frameworks, manifest files,
+entrypoints). For every touched `.md/.mdx/.rst/.txt` file, it
+greps a 42-pattern map of canonical framework names (React, Vue,
+Django, FastAPI, Clap, Cobra, …) against the doc content. A match
+that doesn't appear in `declared_frameworks` OR any
+`declared_deps[lang]` entry triggers revert+retry with the
+violation injected as feedback.
+
+**Two-sided integration**:
+
+- *Planner-side*: the same fingerprint also renders into a
+  `== REPO FINGERPRINT (GROUND TRUTH — verified by Occam) ==`
+  block injected into the planner user prompt, telling the
+  planner NOT to propose subtasks that introduce frameworks/deps
+  absent from the lists. Catches at plan time what G11 catches at
+  apply time — cheaper to prevent than to revert. The fingerprint
+  is fetched ONCE per run by `cli/commands/run.py` and shared
+  with both the planner call and the worker apply loop, so the
+  consumer-side cost is one extra local HTTP roundtrip.
+
+- *Worker/refiner-side*: G11 fires in the apply loop right after
+  G10 (schema check), in both the worker (`worker/worker.py`) and
+  the refiner (`cli/commands/run.py`).
+
+**Silent pass** (no error) when:
+
+- Occam disabled (`OCCAM_URL` unset) → fingerprint is `None`.
+- Occam reachable but `manifest_files` empty → greenfield repo,
+  nothing to ground against (avoids false-positives on brand-new
+  projects).
+- File extension not in `DOC_EXTENSIONS`.
+- No framework keyword matches in the file.
+- Every match resolves against the fingerprint
+  (`declared_frameworks` exact, `declared_deps` exact, OR a dep
+  name that contains the framework id — handles
+  `@reduxjs/toolkit` grounding "Redux" without listing every
+  scope variant).
+
+**Out of scope for v1** (deferred):
+
+- Source-code grounding (function-name existence checks) — needs
+  a symbol index across the repo.
+- JS config plugin grounding (`prettier.config.js` referencing a
+  plugin that isn't in npm deps) — easy follow-up: add a JS
+  string-literal scanner per extension.
+- Negative claims ("Unlike React, we use vanilla DOM") — accepted
+  as a known low-volume false-positive; revisit if FP rate climbs.
+
 ## Q&A self-consistency phase (orthogonal to the stack)
 
 Not a guard against worker slop — a separate post-meta gate that asks
@@ -492,3 +578,5 @@ existing ones.
 | 2026-04-23 PM | v23 launch | Occam Observer P1 integration (commit `49c1d57`) — `POST /observation` after every subtask + `GET /repo/agent-log` pre-planner. Feature off when `OCCAM_URL` unset. |
 | 2026-04-23 PM | v25 launch | G8 extended to refiner apply path (commit `c2e3af6`) — `critic_test_regression.fail phase=refiner` → v0 reset. Caught the v16/v24 `>`-in-SQL-string pattern that G6/G7 miss by design. **Third 4/4 green ENGINEERED run.** |
 | 2026-04-23 PM | v27 launch | G9 deterministic post-plan filter (commits `e2e9a04` + `a17ebc3` + `d7ee293`) — drops subtasks with recently-failing `file_hints` at plan time. Wider 7d/200 window than planner prompt (24h/20). **Cleanest rung-3 run of the day** — 1 worker fail vs usual 3-5. |
+| 2026-04-23 PM | b2v PR #19 | G10 (semantic config schema validator) — bundled schemastore.org schemas for ESLint/Prettier/package.json/tsconfig/github-workflow/dependabot/Cargo. Catches valid-JSON-but-wrong-shape configs that G2 silently passes. v0.2.0 release. |
+| 2026-04-23 PM | b2v PR #21 | G11 (content-grounding via Occam `/repo/fingerprint`) — new endpoint exposes declared deps + inferred frameworks; planner prompt + worker apply loop both consume it. Catches the React-in-Rust-repo hallucination that every prior guard misses by design. |

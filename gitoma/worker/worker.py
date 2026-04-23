@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import os
 
@@ -29,6 +29,7 @@ from gitoma.worker.patcher import (
     validate_post_write_syntax,
     validate_top_level_preservation,
 )
+from gitoma.worker.content_grounding import validate_content_grounding
 from gitoma.worker.schema_validator import validate_config_semantics
 
 # Cap on how many critic panel runs we keep in AgentState before dropping
@@ -48,6 +49,7 @@ class WorkerAgent:
         state: AgentState,
         *,
         compile_fix_mode: bool = False,
+        repo_fingerprint: dict[str, Any] | None = None,
     ) -> None:
         self._llm = llm
         self._git = git_repo
@@ -79,6 +81,12 @@ class WorkerAgent:
         # Opt-out via ``GITOMA_TEST_REGRESSION_GATE=off``.
         self._test_baseline: set[str] | None = None
         self._test_baseline_initialized: bool = False
+        # G11 content-grounding: Occam's verified ``/repo/fingerprint``
+        # snapshot. Drives the doc-grounding guard (rejects e.g. a
+        # ``docs/architecture.md`` that claims React+Redux in a Rust
+        # repo). ``None`` when Occam is disabled / unreachable, in
+        # which case G11 silently passes.
+        self._repo_fingerprint: dict[str, Any] | None = repo_fingerprint
 
     def execute(
         self,
@@ -294,6 +302,43 @@ class WorkerAgent:
                     raise ValueError(
                         f"Config schema check failed after {max_attempts} "
                         f"attempt(s) on {bad_path}. Last error: {schema_msg[:200]}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
+            # G11 content-grounding: doc files (.md/.rst/.txt) get
+            # checked against Occam's verified ``/repo/fingerprint``.
+            # Catches the b2v PR #21 failure mode (generated
+            # ``architecture.md`` claimed a React+Redux frontend in
+            # a pure-Rust CLI repo). Silent pass when fingerprint
+            # is unavailable (Occam off / unreachable / no manifests
+            # detected) — fail-open by design, like every other
+            # Occam-derived feature.
+            grounding_err = validate_content_grounding(
+                self._git.root, touched, self._repo_fingerprint,
+            )
+            if grounding_err is not None:
+                bad_path, msg = grounding_err
+                err_text = (
+                    f"Content-grounding check failed on {bad_path}: {msg} "
+                    "Re-emit a patch that ONLY makes claims supported by "
+                    "the actual repo (deps in the manifests, frameworks "
+                    "in declared_frameworks). Either drop the unsupported "
+                    "claim entirely or scope the doc to what's really there."
+                )
+                current_trace().emit(
+                    "critic_content_grounding.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    path=bad_path,
+                    error=msg[:300],
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"Content-grounding check failed after {max_attempts} "
+                        f"attempt(s) on {bad_path}. Last error: {msg[:200]}"
                     )
                 self._revert_touched(touched)
                 compile_error_feedback = err_text

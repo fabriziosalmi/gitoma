@@ -40,6 +40,7 @@ def planner_user_prompt(
     languages: list[str],
     repo_brief: RepoBrief | None = None,
     prior_runs_context: str | None = None,
+    repo_fingerprint_context: str | None = None,
 ) -> str:
     metrics_summary = "\n".join(
         f"- {m.display_name}: score={m.score:.2f} status={m.status} | {m.details}"
@@ -71,6 +72,25 @@ def planner_user_prompt(
             f"{prior_runs_context}\n"
         )
 
+    # Repo fingerprint — Occam's verified "what is this repo" snapshot.
+    # Tagged GROUND TRUTH on purpose: every line is derived from
+    # actually-existing manifest files, not LLM inference. The planner
+    # is told NOT to propose subtasks that contradict it. This is the
+    # planner-side half of G11 (the worker-side half rejects patches
+    # whose CONTENT contradicts the fingerprint — e.g. a doc that
+    # claims "React + Redux frontend" in a Rust CLI repo, which is the
+    # exact b2v PR #21 hallucination this guard was designed for).
+    fingerprint_block = ""
+    if repo_fingerprint_context:
+        fingerprint_block = (
+            "\n== REPO FINGERPRINT (GROUND TRUTH — verified by Occam) ==\n"
+            f"{repo_fingerprint_context}\n"
+            "Do NOT propose subtasks (especially docs/configs) that "
+            "introduce frameworks, deps, or stack elements absent from "
+            "the lists above. Anything the lists call out as ``(none)`` "
+            "is a hard constraint, not a suggestion.\n"
+        )
+
     # Build Integrity status drives the compile-fix mode — an extra
     # constraint block we inject when the project does not compile.
     build_integrity_fail = any(
@@ -98,7 +118,7 @@ COMPILE-FIX MODE ACTIVE (Build Integrity = fail). Until the build is green:
     return f"""Repository: {report.repo_url}
 Languages: {langs}
 Overall score: {report.overall_score:.2f}/1.0
-{brief_block}{prior_runs_block}
+{brief_block}{fingerprint_block}{prior_runs_block}
 == METRIC REPORT ==
 {metrics_summary}
 

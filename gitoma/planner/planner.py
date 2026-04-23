@@ -23,6 +23,7 @@ class PlannerAgent:
         file_tree: list[str],
         repo_brief: RepoBrief | None = None,
         prior_runs_context: str | None = None,
+        repo_fingerprint_context: str | None = None,
     ) -> TaskPlan:
         """
         Generate a TaskPlan from a MetricReport.
@@ -46,6 +47,7 @@ class PlannerAgent:
                     report, file_tree, report.languages,
                     repo_brief=repo_brief,
                     prior_runs_context=prior_runs_context,
+                    repo_fingerprint_context=repo_fingerprint_context,
                 ),
             },
         ]

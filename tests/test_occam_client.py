@@ -20,6 +20,7 @@ from gitoma.context.occam_client import (
     OccamClient,
     default_client,
     format_agent_log_for_prompt,
+    format_fingerprint_for_prompt,
     map_error_to_failure_modes,
 )
 
@@ -199,6 +200,137 @@ def test_get_repo_context_returns_none_on_failure() -> None:
 
     c = _make_client(handler)
     assert c.get_repo_context("/tmp/x") is None
+
+
+# ── GET /repo/fingerprint ───────────────────────────────────────────────
+
+
+def test_get_repo_fingerprint_returns_dict() -> None:
+    """Happy path — Occam returns the structured snapshot, client passes
+    it through unchanged so callers can inspect every field."""
+    sample = {
+        "target": "/tmp/repo",
+        "commit_sha": "abc123",
+        "computed_at": "2026-04-23T22:00:00Z",
+        "languages": [{"name": "Rust", "files": 47}],
+        "stack": ["rust/cargo"],
+        "declared_deps": {"rust": ["clap", "serde"], "npm": [], "python": [], "go": []},
+        "declared_frameworks": ["clap", "serde"],
+        "entrypoints": ["src/main.rs"],
+        "manifest_files": ["Cargo.toml"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repo/fingerprint"
+        assert request.url.params.get("target") == "/tmp/repo"
+        return httpx.Response(200, json=sample)
+
+    c = _make_client(handler)
+    fp = c.get_repo_fingerprint("/tmp/repo")
+    assert fp is not None
+    assert fp["commit_sha"] == "abc123"
+    assert fp["declared_frameworks"] == ["clap", "serde"]
+    assert fp["manifest_files"] == ["Cargo.toml"]
+
+
+def test_get_repo_fingerprint_returns_none_on_400() -> None:
+    """Non-2xx → None. Treated as fail-open: caller proceeds without
+    fingerprint context, no exception bubbles up."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid target"})
+
+    c = _make_client(handler)
+    assert c.get_repo_fingerprint("/tmp/x") is None
+
+
+def test_get_repo_fingerprint_returns_none_on_connect_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("dead")
+
+    c = _make_client(handler)
+    assert c.get_repo_fingerprint("/tmp/x") is None
+
+
+def test_get_repo_fingerprint_returns_none_when_disabled() -> None:
+    c = OccamClient(None)
+    assert c.get_repo_fingerprint("/tmp/x") is None
+
+
+def test_get_repo_fingerprint_returns_none_when_body_not_dict() -> None:
+    """Defensive: server returns a JSON list / scalar by mistake — client
+    treats it as malformed and returns None instead of leaking the wrong
+    shape upstream."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["not", "a", "dict"])
+
+    c = _make_client(handler)
+    assert c.get_repo_fingerprint("/tmp/x") is None
+
+
+# ── format_fingerprint_for_prompt ───────────────────────────────────────
+
+
+def test_format_fingerprint_empty_returns_empty_string() -> None:
+    assert format_fingerprint_for_prompt(None) == ""
+    assert format_fingerprint_for_prompt({}) == ""
+
+
+def test_format_fingerprint_renders_each_section() -> None:
+    """Sample with every field populated — every section we promised
+    in the docstring shows up in the output."""
+    fp = {
+        "languages": [
+            {"name": "Rust", "files": 47},
+            {"name": "Markdown", "files": 9},
+        ],
+        "stack": ["rust/cargo", "github-actions"],
+        "declared_frameworks": ["clap"],
+        "declared_deps": {
+            "rust": ["clap", "serde", "tokio"],
+            "npm": [],
+            "python": [],
+            "go": [],
+        },
+        "entrypoints": ["src/main.rs"],
+        "manifest_files": ["Cargo.toml"],
+    }
+    out = format_fingerprint_for_prompt(fp)
+    assert "languages: Rust(47)" in out
+    assert "Markdown(9)" in out
+    assert "stack: rust/cargo, github-actions" in out
+    assert "declared_frameworks: clap" in out
+    assert "declared_deps.rust: clap, serde, tokio" in out
+    assert "entrypoints: src/main.rs" in out
+    assert "manifest_files: Cargo.toml" in out
+
+
+def test_format_fingerprint_renders_none_for_empty_frameworks() -> None:
+    """``declared_frameworks: (none)`` is intentional — the empty list
+    is a hard constraint we WANT the planner to see, not skip."""
+    fp = {
+        "languages": [{"name": "Rust", "files": 47}],
+        "stack": ["rust/cargo"],
+        "declared_frameworks": [],
+        "declared_deps": {"rust": ["serde"]},
+        "manifest_files": ["Cargo.toml"],
+    }
+    out = format_fingerprint_for_prompt(fp)
+    assert "declared_frameworks: (none)" in out
+
+
+def test_format_fingerprint_truncates_huge_dep_list() -> None:
+    """A package.json with 50 deps shouldn't blow up the planner prompt.
+    Cap is 12 + ``(+N more)`` suffix for total visibility."""
+    npm_deps = [f"pkg{i}" for i in range(20)]
+    fp = {
+        "declared_frameworks": [],
+        "declared_deps": {"npm": npm_deps},
+        "manifest_files": ["package.json"],
+    }
+    out = format_fingerprint_for_prompt(fp)
+    assert "pkg0" in out and "pkg11" in out      # first 12 shown
+    assert "pkg12" not in out                    # rest hidden
+    assert "(+8 more)" in out
 
 
 # ── map_error_to_failure_modes ──────────────────────────────────────────

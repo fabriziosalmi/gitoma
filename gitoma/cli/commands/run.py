@@ -472,10 +472,24 @@ def run(
                 from gitoma.context.occam_client import (
                     default_client as _occam_client,
                     format_agent_log_for_prompt as _fmt_agent_log,
+                    format_fingerprint_for_prompt as _fmt_fingerprint,
                 )
                 _occam_cli = _occam_client()
                 _log: list = []
                 _prior_runs = ""
+                # Repo fingerprint — Occam's verified "what is this repo"
+                # snapshot. Powers TWO consumers:
+                #   1. Planner prompt injection (== REPO FINGERPRINT (GROUND
+                #      TRUTH) ==) — keeps the planner from inventing tasks
+                #      around frameworks the repo doesn't use.
+                #   2. G11 content-grounding guard in the worker apply loop
+                #      — rejects e.g. an architecture.md that claims
+                #      React+Redux in a Rust CLI repo.
+                # Captured ONCE here so both consumers see the same
+                # snapshot. ``None`` (Occam off / failed) → both consumers
+                # silently skip; the rest of the pipeline runs unchanged.
+                _repo_fp: dict | None = None
+                _fingerprint_block = ""
                 if _occam_cli.enabled:
                     _log = _occam_cli.get_agent_log(since="24h", limit=20)
                     _prior_runs = _fmt_agent_log(_log, max_bullets=15)
@@ -483,12 +497,25 @@ def run(
                         console.print(
                             f"[muted]Occam: injected {len(_log)} prior-runs entries into planner context[/muted]"
                         )
+                    _repo_fp = _occam_cli.get_repo_fingerprint(str(git_repo.root))
+                    if _repo_fp:
+                        _fingerprint_block = _fmt_fingerprint(_repo_fp)
+                        if _fingerprint_block:
+                            _fws = _repo_fp.get("declared_frameworks") or []
+                            _manifests = _repo_fp.get("manifest_files") or []
+                            console.print(
+                                f"[muted]Occam fingerprint: "
+                                f"{len(_manifests)} manifest(s), "
+                                f"{len(_fws)} framework(s) — "
+                                f"{', '.join(_fws[:3]) or '(none)'}[/muted]"
+                            )
 
                 try:
                     plan = planner.plan(
                         report, file_tree,
                         repo_brief=repo_brief,
                         prior_runs_context=_prior_runs or None,
+                        repo_fingerprint_context=_fingerprint_block or None,
                     )
                 except LLMError as e:
                     # LLM-specific error — give actionable hint
@@ -718,6 +745,7 @@ def run(
                 config=config,
                 state=state,
                 compile_fix_mode=_compile_fix_mode,
+                repo_fingerprint=_repo_fp,
             )
 
             from gitoma.planner.task import SubTask, Task
@@ -994,6 +1022,9 @@ def run(
                                 validate_post_write_syntax,
                                 validate_top_level_preservation,
                             )
+                            from gitoma.worker.content_grounding import (
+                                validate_content_grounding,
+                            )
                             from gitoma.worker.schema_validator import (
                                 validate_config_semantics,
                             )
@@ -1086,6 +1117,45 @@ def run(
                                             ),
                                         )
                                         _refine_schema_ok = False
+                                    # G11 content-grounding on refiner
+                                    # output — same shape as the schema
+                                    # check above. Doc files (.md/.rst/
+                                    # .txt) get checked against Occam's
+                                    # ``/repo/fingerprint``. Catches the
+                                    # b2v PR #21 failure mode in the
+                                    # refiner path too: an architecture.md
+                                    # that claims React+Redux in a Rust
+                                    # CLI repo. Silent pass when Occam is
+                                    # off / fingerprint missing.
+                                    _refine_grounding_ok = True
+                                    if _refine_schema_ok:
+                                        _refine_grounding = (
+                                            validate_content_grounding(
+                                                git_repo.root,
+                                                _refine_touched,
+                                                _repo_fp,
+                                            )
+                                        )
+                                        if _refine_grounding is not None:
+                                            _bad_p, _gr_msg = _refine_grounding
+                                            _trace.emit(
+                                                "critic_content_grounding.fail",
+                                                phase="refiner",
+                                                path=_bad_p,
+                                                error=_gr_msg[:300],
+                                            )
+                                            git_repo.repo.git.reset(
+                                                "--hard", _v0_sha
+                                            )
+                                            _trace.emit(
+                                                "critic_refiner.reverted",
+                                                winner="v0",
+                                                rationale=(
+                                                    "content_grounding_failed: "
+                                                    f"{_bad_p}: {_gr_msg[:120]}"
+                                                ),
+                                            )
+                                            _refine_grounding_ok = False
                                     # AST-diff guard on refiner output —
                                     # same shape as the syntax check above.
                                     # Catches the rung-3 v17/v18 pattern
@@ -1093,7 +1163,7 @@ def run(
                                     # patch that drops sibling functions
                                     # without flagging the deletion.
                                     _refine_ast = None
-                                    if _refine_schema_ok:
+                                    if _refine_schema_ok and _refine_grounding_ok:
                                         _refine_ast = (
                                             validate_top_level_preservation(
                                                 git_repo.root,
@@ -1101,8 +1171,8 @@ def run(
                                                 _refine_originals,
                                             )
                                         )
-                                    if not _refine_schema_ok:
-                                        pass  # schema check already reset; skip
+                                    if not _refine_schema_ok or not _refine_grounding_ok:
+                                        pass  # earlier guard already reset; skip
                                     elif _refine_ast is not None:
                                         _bad_p, _missing = _refine_ast
                                         _missing_list = ", ".join(

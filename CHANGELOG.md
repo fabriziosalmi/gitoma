@@ -4,6 +4,70 @@ All notable changes to gitoma are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning is
 [SemVer](https://semver.org/).
 
+## [0.3.0] — 2026-04-23
+
+The "ground truth" release. Two new guards (G10, G11) extend the
+critic stack to cover the failure modes that survived v0.2.0 in
+real-world b2v PRs: valid-but-wrong-shape configs (G10) and
+hallucinated documentation content (G11). G11 is the
+gitoma-side half of a new two-sided integration with Occam
+Observer, which gains a dedicated `/repo/fingerprint` endpoint
+serving as ground truth for both the planner prompt and the
+worker apply loop.
+
+### Added
+
+- **G10 — Semantic config schema validator**
+  (`gitoma/worker/schema_validator.py`): bundled ~860KB of
+  schemastore.org schemas (ESLint, Prettier, package.json, tsconfig,
+  github-workflow, dependabot, Cargo). On every apply, files matching
+  `PATH_MATCHERS` are validated against their bundled schema via
+  `jsonschema`. Custom YAML loader excludes `on/off/yes/no` from the
+  bool resolver so GitHub Actions `on:` keys stay strings. Wired both
+  worker and refiner apply paths. Catches the b2v PR #19 case:
+  `.eslintrc.json` with `parser` as object instead of string —
+  parses as valid JSON (G2 silent), but ESLint refuses it.
+- **G11 — Content-grounding via Occam `/repo/fingerprint`**
+  (`gitoma/worker/content_grounding.py` + new endpoint in Occam):
+  doc files (`.md/.mdx/.rst/.txt`) are checked against the verified
+  "what is this repo" snapshot. A doc that mentions a framework
+  absent from `declared_frameworks` and `declared_deps` (across all
+  languages) triggers revert+retry. 42-pattern map covers React,
+  Vue, Angular, Django, FastAPI, Clap, Cobra, etc. Two-sided
+  integration: the same fingerprint also feeds the planner prompt
+  as `== REPO FINGERPRINT (GROUND TRUTH — verified by Occam) ==`,
+  pre-empting hallucinated tasks at plan time. Wired both worker
+  and refiner apply paths. Catches the b2v PR #21 case: a generated
+  `architecture.md` claiming React+Redux+WebSocket frontend in a
+  pure-Rust CLI repo — every prior guard silent because the file
+  parses, isn't a config, isn't Python, doesn't break build/tests.
+- **Occam Observer — `GET /repo/fingerprint` endpoint** (Occam-side,
+  ~400 LoC in `api/coordination.go`): returns a stable, time-
+  invariant snapshot (`commit_sha`, `languages`, `stack`,
+  `declared_deps` per-language, `declared_frameworks`, `entrypoints`,
+  `manifest_files`). Parses `Cargo.toml`, `package.json`,
+  `pyproject.toml` (PEP 621 + Poetry shapes), `go.mod`. The TOML
+  parser handles the two regression cases that bit during dev:
+  `mcp[cli]>=1.0` (extras `]` inside dep value) and a comment line
+  containing `[brackets]` mid-array — both fixed via
+  `stripTomlComment` + bracket-depth tracking.
+
+### Trace events
+
+- `critic_schema_check.fail` — G10 fired (carries `phase` =
+  `worker` or `refiner`)
+- `critic_content_grounding.fail` — G11 fired (carries `phase`)
+
+### Tests
+
+- 822 passing (was 783 at v0.2.0 release). +39 new tests:
+  `test_content_grounding.py` (30) + extensions to
+  `test_occam_client.py` (+9 for `get_repo_fingerprint` and
+  `format_fingerprint_for_prompt`).
+- Occam coordination test suite: +5 tests in `test_coordination.sh`
+  exercising `/repo/fingerprint`, including the
+  `mcp[cli]` + comment-with-brackets regression cases.
+
 ## [0.2.0] — 2026-04-23
 
 The "guards stack + Occam feedback loop" release. Six fully-green

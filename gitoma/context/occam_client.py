@@ -38,6 +38,7 @@ __all__ = [
     "FAILURE_MODES",
     "OUTCOMES",
     "count_failed_hints",
+    "format_fingerprint_for_prompt",
 ]
 
 
@@ -173,6 +174,31 @@ class OccamClient:
         except Exception:
             return None
 
+    def get_repo_fingerprint(self, target: str) -> dict[str, Any] | None:
+        """GET /repo/fingerprint. Returns the structured "what is this
+        repo" snapshot used by the planner prompt + G11 content-
+        grounding guard, or ``None`` on any failure.
+
+        Shape (see Occam ``handleRepoFingerprint``):
+          ``commit_sha``, ``computed_at``, ``languages`` (list), ``stack``,
+          ``declared_deps`` (per-language dict), ``declared_frameworks``,
+          ``entrypoints``, ``manifest_files``.
+
+        Time-invariant given a commit — caller may cache by ``commit_sha``
+        across a single run, but the cost (one local HTTP roundtrip)
+        rarely justifies it."""
+        if not self.enabled:
+            return None
+        try:
+            with self._client() as c:
+                r = c.get("/repo/fingerprint", params={"target": target})
+                if r.status_code >= 400:
+                    return None
+                body = r.json()
+                return body if isinstance(body, dict) else None
+        except Exception:
+            return None
+
 
 def default_client() -> OccamClient:
     """Build a client from the ``OCCAM_URL`` env var. Returns a
@@ -203,6 +229,59 @@ def count_failed_hints(entries: list[dict[str, Any]]) -> dict[str, int]:
             if hint:
                 counter[hint] = counter.get(hint, 0) + 1
     return counter
+
+
+def format_fingerprint_for_prompt(fp: dict[str, Any] | None) -> str:
+    """Render a fingerprint dict into the ``== REPO FINGERPRINT (GROUND
+    TRUTH) ==`` block injected into the planner prompt.
+
+    Compact + dense by design — we want the LLM to read it as
+    "everything below has been verified by Occam against the actual
+    repo, do not contradict it" rather than as paragraphs of context.
+    Empty / missing fingerprint → empty string (caller injects
+    nothing).
+
+    Why this lives here, not in prompts.py: the formatting decision
+    is part of the contract with Occam's response shape — if the
+    schema gains a new field, this is the one place that needs
+    updating, and prompts.py stays template-only.
+    """
+    if not fp:
+        return ""
+    lines: list[str] = []
+    # Languages — only the top 5, ordered by file count (Occam returns sorted).
+    langs = fp.get("languages") or []
+    if langs:
+        top = ", ".join(
+            f"{l.get('name', '?')}({l.get('files', 0)})" for l in langs[:5]
+        )
+        lines.append(f"languages: {top}")
+    # Stack — manifests + CI detected. Always informative.
+    stack = fp.get("stack") or []
+    if stack:
+        lines.append(f"stack: {', '.join(stack)}")
+    # Frameworks — the high-leverage anti-hallucination signal. Empty
+    # list is itself meaningful ("no web/CLI framework detected") so
+    # render it explicitly instead of skipping.
+    fws = fp.get("declared_frameworks") or []
+    lines.append(f"declared_frameworks: {', '.join(fws) if fws else '(none)'}")
+    # Per-language deps — flatten with a bound so a maximalist
+    # package.json doesn't blow up the prompt. 12 deps per lang max.
+    deps = fp.get("declared_deps") or {}
+    for lang in ("rust", "npm", "python", "go"):
+        names = deps.get(lang) or []
+        if names:
+            shown = ", ".join(names[:12])
+            extra = f" (+{len(names) - 12} more)" if len(names) > 12 else ""
+            lines.append(f"declared_deps.{lang}: {shown}{extra}")
+    # Entrypoints + manifests round out the "what is this".
+    entries = fp.get("entrypoints") or []
+    if entries:
+        lines.append(f"entrypoints: {', '.join(entries)}")
+    manifests = fp.get("manifest_files") or []
+    if manifests:
+        lines.append(f"manifest_files: {', '.join(manifests)}")
+    return "\n".join(lines)
 
 
 def format_agent_log_for_prompt(entries: list[dict[str, Any]], max_bullets: int = 15) -> str:
