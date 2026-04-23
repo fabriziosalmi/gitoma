@@ -246,6 +246,58 @@ def _parse_failing(parser_key: str, stdout: str, stderr: str) -> list[str]:
     return uniq
 
 
+def detect_failing_tests(
+    root, languages: list[str], timeout_sec: int = _TIMEOUT_SEC,
+) -> set[str] | None:
+    """Run the project's tests and return the set of failing test
+    identifiers. Returns ``None`` when the toolchain isn't available
+    / times out / the repo has no recognisable stack — callers use
+    ``None`` to mean "don't enforce regression check on this run".
+
+    Reuses the per-language runner + parser logic from
+    ``TestRunnerAnalyzer``; this helper is the no-scaffolding variant
+    G8 (runtime regression gate) consumes to compare
+    before-subtask vs after-subtask failing sets.
+
+    Uncollectable tests / import errors are treated as failures (they
+    surface via the ERROR parser on pytest, non-zero exit on cargo/go,
+    ``not ok`` on node). This is what makes G8 catch the rung-3 v17/v18
+    fixture-deletion case: when ``tests/test_db.py`` loses the ``db``
+    fixture, pytest raises ``fixture 'db' not found`` as a collection
+    ERROR, which parses as a failing test.
+    """
+    from pathlib import Path as _Path
+    root = _Path(root)
+
+    for lang, markers, cmd, parser_key in _LANG_RUNNERS:
+        if lang not in languages:
+            continue
+        if not any((root / m).exists() for m in markers):
+            continue
+        try:
+            r = subprocess.run(
+                cmd,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if r.returncode == 0:
+            return set()
+        failing = _parse_failing(parser_key, r.stdout, r.stderr)
+        if failing:
+            return set(failing)
+        # Non-zero exit but no parseable failures — conservatively
+        # report a sentinel "unparsed" entry so the regression set is
+        # non-empty and caller treats it as a failure.
+        tail = ((r.stderr or r.stdout) or "")[-200:].strip()
+        return {f"<unparsed-failure>: {tail[:120]}"}
+
+    return None
+
+
 def _count_passing(parser_key: str, stdout: str, stderr: str) -> int:
     text = (stdout or "") + "\n" + (stderr or "")
     if parser_key == "pytest":

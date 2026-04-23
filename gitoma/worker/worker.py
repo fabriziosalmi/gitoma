@@ -68,6 +68,16 @@ class WorkerAgent:
         # means "no ANTISLOP file found / feature off" — injection becomes
         # a no-op without erroring out.
         self._antislop_rules: list[AntislopRule] | None = None
+        # G8 runtime-test regression gate: baseline set of tests that
+        # were failing BEFORE the current subtask. After a patch is
+        # applied, we re-run tests and compute ``current - baseline``
+        # — anything in that set is a regression (a test that used to
+        # pass/collect and now fails/errors). Populated lazily on first
+        # use by ``_ensure_test_baseline``; ``None`` means "never
+        # enforced this run" (toolchain missing, no languages, etc).
+        # Opt-out via ``GITOMA_TEST_REGRESSION_GATE=off``.
+        self._test_baseline: set[str] | None = None
+        self._test_baseline_initialized: bool = False
 
     def execute(
         self,
@@ -331,6 +341,29 @@ class WorkerAgent:
 
             err = self._post_write_build_check(languages)
             if err is None:
+                # G8 runtime-test regression gate. BuildAnalyzer ensures
+                # files compile; this ensures previously-passing tests
+                # still pass. Catches body-level changes that AST-diff
+                # (G7) can't see by design — e.g. rung-3 v20/v21 where
+                # the worker simplified get_conn and dropped
+                # ``row_factory = sqlite3.Row``: function signature
+                # preserved, top-level def preserved, but the caller's
+                # ``dict(row)`` explodes at runtime.
+                regression_err = self._check_test_regression(
+                    subtask, languages, attempt,
+                )
+                if regression_err is not None:
+                    # revert + retry with feedback
+                    if attempt >= max_attempts:
+                        self._revert_touched(touched)
+                        raise ValueError(
+                            f"Test regression after {max_attempts} attempt(s). "
+                            f"{regression_err[:300]}"
+                        )
+                    self._revert_touched(touched)
+                    compile_error_feedback = regression_err
+                    continue
+
                 if attempt > 1:
                     current_trace().emit(
                         "critic_build_retry.success",
@@ -361,6 +394,79 @@ class WorkerAgent:
 
         # Unreachable — the loop either returns or raises.
         raise RuntimeError("unreachable: apply_with_build_retry loop exited")
+
+    def _ensure_test_baseline(self, languages: list[str]) -> None:
+        """Capture the set of currently-failing tests. Called once,
+        lazily, on the first subtask that reaches the regression-gate
+        step. ``None`` means "toolchain not available / no recognised
+        stack / gate disabled" — we then silently skip regression
+        checks for the rest of the run rather than flag false
+        regressions from a broken baseline."""
+        if self._test_baseline_initialized:
+            return
+        self._test_baseline_initialized = True
+        if (os.environ.get("GITOMA_TEST_REGRESSION_GATE") or "").lower() in (
+            "0", "off", "false", "no",
+        ):
+            self._test_baseline = None
+            return
+        try:
+            from gitoma.analyzers.test_runner import detect_failing_tests
+            self._test_baseline = detect_failing_tests(
+                self._git.root, languages,
+            )
+        except Exception:
+            # Defensive: a broken analyzer must not kill the run.
+            self._test_baseline = None
+
+    def _check_test_regression(
+        self, subtask: SubTask, languages: list[str], attempt: int,
+    ) -> str | None:
+        """After a subtask's patches pass the build check, re-run
+        tests and compare to baseline. Returns a feedback message on
+        regression (tests that weren't in baseline but are now
+        failing) or ``None`` on clean.
+
+        Tests that MOVE from failing→passing (legit fix) do NOT
+        trigger a regression — we compute ``current - baseline``,
+        not set-inequality.
+        """
+        self._ensure_test_baseline(languages)
+        if self._test_baseline is None:
+            return None
+        try:
+            from gitoma.analyzers.test_runner import detect_failing_tests
+            current = detect_failing_tests(self._git.root, languages)
+        except Exception:
+            return None
+        if current is None:
+            return None
+        regressions = current - self._test_baseline
+        if not regressions:
+            # Baseline may shift forward on a legitimate fix. Keep
+            # baseline = current so T-next doesn't re-flag whatever
+            # was already failing before this patch but isn't any more.
+            self._test_baseline = current
+            return None
+        sample = list(sorted(regressions))[:8]
+        more = f" … (+{len(regressions) - 8} more)" if len(regressions) > 8 else ""
+        current_trace().emit(
+            "critic_test_regression.fail",
+            subtask_id=subtask.id,
+            attempt=attempt,
+            regressions=sample,
+            total_count=len(regressions),
+        )
+        bullets = "\n  • ".join(sample)
+        return (
+            f"Test regression detected: the following tests were passing "
+            f"BEFORE your patch but are failing AFTER:\n  • {bullets}{more}\n\n"
+            "Your patch changed behaviour those tests depend on. Re-emit "
+            "preserving the semantics the tests expect — copy unchanged "
+            "attributes (e.g. ``conn.row_factory``), unchanged string "
+            "literals (SQL, regex patterns, URLs), and unchanged helper "
+            "functions verbatim from the original file."
+        )
 
     def _rebuild_prompt_with_error(
         self,
