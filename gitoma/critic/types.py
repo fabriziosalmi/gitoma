@@ -334,8 +334,20 @@ class QAResult:
     questioner_model: str = ""
     defender_model: str = ""
     duration_ms: float = 0.0
+    # Crash signal — set by run.py's outer except when the Q&A phase raised
+    # before producing answers. Populated separately from ``ran`` because
+    # ``ran=True`` means "the phase started" and we want to keep that
+    # truthful even on crashes (so post-mortems can tell "never started"
+    # apart from "started then exploded"). Caught live in the rung-3
+    # series (v13/v14): Q&A occasionally crashed with no PR signal —
+    # the PR shipped clean-looking, the operator had no flag.
+    crashed: bool = False
+    crash_reason: str | None = None
 
     def summary_line(self) -> str:
+        if self.crashed:
+            tail = f" ({self.crash_reason[:120]})" if self.crash_reason else ""
+            return f"Q&A: crashed{tail}"
         if not self.ran:
             return "Q&A: skipped (disabled)"
         # Schema guarantees ``verdict`` is present; do not guard with a default.

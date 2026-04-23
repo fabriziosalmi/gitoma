@@ -133,6 +133,103 @@ def test_block_is_appended_at_end_with_separator() -> None:
     assert out.startswith("\n---\n\n## ")
 
 
+def _crashed(reason: str) -> QAResult:
+    """Synthetic crash result — what run.py constructs in its Q&A
+    except-handler. Mirrors the real call site so the tests would
+    catch a contract drift if QAResult fields move around."""
+    return QAResult(ran=False, crashed=True, crash_reason=reason)
+
+
+# ── Crash branch (silent absence ≠ all clear) ───────────────────────────
+
+
+def test_crashed_qa_emits_warning_block() -> None:
+    """When the Q&A phase raised mid-flight, the PR body MUST flag
+    it. Without this signal, a reviewer sees a clean-looking PR
+    body and merges thinking the gate succeeded — when in reality
+    the gate never produced answers."""
+    out = build_qa_section(_crashed("ValueError: bad JSON in Defender output"))
+    assert "Q&A self-consistency phase CRASHED" in out
+    assert "Treat this PR as ungated" in out
+    assert "ValueError: bad JSON in Defender output" in out
+
+
+def test_crash_block_uses_warning_emoji_and_separator() -> None:
+    """The block follows the same shape as the unfixed-gap block —
+    leading separator + ⚠ heading — so it visually composes with the
+    rest of the PR body without surprising layout shifts."""
+    out = build_qa_section(_crashed("KeyError: 'verdict'"))
+    assert out.startswith("\n---\n\n")
+    assert "⚠️" in out
+
+
+def test_crash_reason_first_line_only() -> None:
+    """Multi-line tracebacks would explode the PR body. Cap to one
+    line — the full traceback lives in the run's jsonl trace."""
+    multi = "ValueError: explode\n  File 'x', line 1\n    raise ValueError"
+    out = build_qa_section(_crashed(multi))
+    # The Python-style ``File 'x'`` traceback frame must NOT leak in.
+    assert "File 'x'" not in out
+    # First line preserved.
+    assert "ValueError: explode" in out
+
+
+def test_crash_reason_is_truncated_to_300_chars() -> None:
+    """Long single-line crash messages (LLM JSON parse-error dumps,
+    repr of huge structures) should be capped to keep the block
+    scannable — same 300-char policy as gap bullets."""
+    huge = "RuntimeError: " + ("x" * 5000)
+    out = build_qa_section(_crashed(huge))
+    # Total `x` run inside the block must be at or under 300.
+    assert "x" * 301 not in out
+    assert "x" * 286 in out  # "RuntimeError: " + 286 x's = 300
+
+
+def test_crashed_overrides_ran_check() -> None:
+    """Even if ``ran=False`` (true for a crash that happened before
+    Defender produced any answer), the crash branch must fire FIRST.
+    Without this ordering, the crash signal would be eaten by the
+    ``not qa_result.ran → empty`` early return."""
+    out = build_qa_section(_crashed("any reason"))
+    assert "CRASHED" in out
+
+
+def test_crashed_with_no_reason_still_flags() -> None:
+    """``crash_reason`` may legitimately be None (e.g. exception's
+    str() returned empty). The block still fires with a placeholder
+    so the operator-visible signal isn't suppressed."""
+    out = build_qa_section(QAResult(ran=False, crashed=True, crash_reason=None))
+    assert "CRASHED" in out
+    assert "no reason captured" in out
+
+
+def test_summary_line_for_crashed_result() -> None:
+    """The console / state summary line should reflect the crash too,
+    not silently say "Q&A: skipped (disabled)" (which would be a
+    second invisible failure)."""
+    line = _crashed("ValueError: x").summary_line()
+    assert "crashed" in line.lower()
+    assert "ValueError" in line
+
+
+# ── Original gap/handled branches still take precedence over crashed ────
+
+
+def test_handled_path_unaffected_by_new_crashed_field() -> None:
+    """A normal handled result with crashed=False (default) must
+    still return empty — ensure the new crash branch doesn't
+    swallow the all-handled path."""
+    out = build_qa_section(QAResult(ran=True, answers=[
+        {"id": "Q1_evidence", "verdict": "handled",
+         "evidence_loc": "x:1", "rationale": "ok"},
+        {"id": "Q2_edge", "verdict": "handled",
+         "evidence_loc": "x:2", "rationale": "ok"},
+        {"id": "Q3_scope", "verdict": "handled",
+         "evidence_loc": "x:3", "rationale": "ok"},
+    ]))
+    assert out == ""
+
+
 def test_long_rationale_is_truncated() -> None:
     """Defender rationales are capped at 400 chars by Pydantic, but
     the section caps each bullet at 300 to keep the block scannable."""

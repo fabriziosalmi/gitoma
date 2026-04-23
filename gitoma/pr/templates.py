@@ -30,8 +30,32 @@ def build_qa_section(qa_result: "QAResult | None") -> str:
       * All-handled (no gaps) → empty (nothing actionable to say).
       * Q&A skipped/never ran → empty (don't pollute the body with
         meta-noise on runs that didn't enable the phase).
+      * Q&A CRASHED mid-phase → ⚠ block flagging the operator. Silent
+        absence = "all clear" misreads "the gate broke" as "the gate
+        passed". Rung-3 v13/v14 occasionally hit this; without a
+        signal in the body, a reviewer would merge thinking the
+        Q&A self-consistency had succeeded.
     """
-    if qa_result is None or not qa_result.ran:
+    if qa_result is None:
+        return ""
+
+    if qa_result.crashed:
+        reason = (qa_result.crash_reason or "no reason captured").strip()
+        # Trim multi-line tracebacks — the PR body should give a clear
+        # one-line signal; the full trace lives in the jsonl.
+        reason_line = reason.splitlines()[0][:300]
+        return (
+            "\n---\n\n"
+            "## ⚠️ Q&A self-consistency phase CRASHED\n\n"
+            "The post-meta Q&A gate raised an exception before producing "
+            "answers. **Treat this PR as ungated** — the patch was reviewed "
+            "by the panel + devil but did NOT pass the additional Q&A "
+            "self-consistency check. Inspect the run's trace JSONL for "
+            "the full traceback before merging.\n\n"
+            f"_Crash reason:_ `{reason_line}`\n"
+        )
+
+    if not qa_result.ran:
         return ""
 
     gap_answers = [

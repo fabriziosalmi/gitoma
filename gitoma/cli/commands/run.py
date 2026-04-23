@@ -1051,6 +1051,25 @@ def run(
                 except Exception as _qa_exc:  # noqa: BLE001
                     from gitoma.core.trace import current as _ct2
                     _ct2().exception("critic_qa.crashed", _qa_exc)
+                    # Synthesise a crash-flagged QAResult so PHASE 4 can
+                    # annotate the PR body. Silent absence ≠ all clear:
+                    # without this, a reviewer would merge thinking the
+                    # Q&A gate had passed when in reality it never
+                    # produced answers. Rung-3 v13/v14 hit this — log
+                    # had ``critic_qa.crashed`` but the PR body looked
+                    # identical to a clean run.
+                    try:
+                        from gitoma.critic.types import QAResult as _QR
+                        _qa_result_outer = _QR(
+                            ran=False,
+                            crashed=True,
+                            crash_reason=f"{type(_qa_exc).__name__}: {str(_qa_exc)[:200]}",
+                        )
+                    except Exception:
+                        # Defensive: never let the crash-annotation path
+                        # itself crash the run. The trace event is the
+                        # authoritative record either way.
+                        pass
 
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 4 — PULL REQUEST
