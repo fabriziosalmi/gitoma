@@ -8,6 +8,32 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **Plan-time deterministic post-processors (Layer-A + Layer-B)**
+  (`gitoma/planner/real_bug_filter.py`): two LLM-free
+  transformations applied after `planner.plan()` returns and
+  before worker apply.
+  - **Layer-A `synthesize_real_bug_task`**: when `test_results`
+    metric is failing AND the planner's plan doesn't touch the
+    source-under-test (mapped from failing test paths via
+    existing `infer_source_files_from_tests`), prepend a
+    synthesized priority-1 `T000` task that does. Closes the
+    rung-0 pattern where the planner emits 12 generic-project
+    subtasks instead of fixing the actual broken file.
+  - **Layer-B `banish_readme_only_subtasks`**: drop every
+    subtask whose file_hints list contains ONLY README variants
+    (`README.md`/`README.rst`/`README`/`Readme.md`), unless
+    Documentation metric is failing AND its details explicitly
+    cite README. Catches the b2v PR #24/#26/#27 root cause: 3
+    of 4 shipped PRs across all model sizes contained
+    "Update README"-style subtasks the worker then mishandled.
+    Multi-file_hint subtasks (README + code file) are kept.
+  - Plus planner-prompt **HARD RULE — README IS A CONSEQUENCE,
+    NOT A GOAL** in `prompts.py`. Closes the principle in code:
+    README updates derive from code changes, they're not a
+    primary planning target.
+  - New trace events: `plan.real_bug_synthesized`,
+    `plan.readme_banished`. Both deterministic, sub-10ms.
+
 - **G14 — URL/path grounding against fabricated link targets**
   (`gitoma/worker/url_grounding.py`): closing piece of the content-
   grounding trilogy (G11 frameworks, G12 npm refs, G13 code-block

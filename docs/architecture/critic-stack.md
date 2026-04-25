@@ -547,6 +547,62 @@ sandboxed CI envs without network access.
 - Cross-link validation (anchor `#section` actually exists in
   target file) — adds parsing complexity for marginal coverage.
 
+## Plan-time deterministic post-processors (Layer-A + Layer-B)
+
+Two LLM-free transformations applied to the plan AFTER the LLM
+planner returns and AS PART of the post-plan pipeline (sequenced
+between the existing Layer-2 test→source rewrite and G9 Occam
+filter). The principle: closing the planner's most reliable
+mistakes deterministically is cheaper than catching the resulting
+worker patches downstream with guards.
+
+### Layer-A — `synthesize_real_bug_task`
+
+**Catches**: the rung-0 pattern (memory:
+`project_backlog_planner_focus_real_bug`) where the planner emits
+12 generic-project subtasks and never touches the actual broken
+file. Even with the prompt's HARD RULE for failing tests, small
+models routinely propose docs/CI/lint subtasks instead of reading
+the failing-test paths and fixing the source.
+
+**Mechanism**: when `test_results.status == "fail"` AND failing
+test paths are extractable from `details` bullets AND none of the
+existing plan tasks have file_hints matching any source-under-test
+mapped from those tests, synthesize a priority-1 `T000` task and
+prepend. Reuses existing `infer_source_files_from_tests` from
+`test_to_source.py`. Caps at 4 subtasks per synthesized task.
+
+Fires only when the planner genuinely missed it — if any existing
+task already covers a mapped source file, no synthesis (Layer-A
+respects the planner's intent when the intent is sound).
+
+### Layer-B — `banish_readme_only_subtasks`
+
+**Catches**: the recurring b2v PR #24/#26/#27 pattern (3 of 4
+shipped PRs across model sizes) where the planner invents an
+"Update README" subtask whose only file_hint is `README.md`, then
+the worker mishandles it (deletes bash blocks, corrupts content,
+adds invented links). User principle 2026-04-25: README updates
+are a CONSEQUENCE of code changes, not a primary planning goal;
+in practice legitimate doc improvements live in `docs/`, not
+README.
+
+**Mechanism**: drop every subtask whose file_hints list contains
+ONLY README variants (`README.md`, `README.rst`, `README`,
+`Readme.md`, etc.), UNLESS the Documentation metric is failing
+AND its details explicitly cite README. Multi-file_hint subtasks
+(README + a code file) are kept — those represent legitimate
+"document this change" intent. Tasks left empty after banishment
+are also removed from the plan.
+
+Composed with Layer-A: synthesize the real-bug task, THEN drop
+hallucinated README work. Both deterministic, no LLM, fast (<10ms).
+
+**Composability with G13/G14**: the README-destruction guards
+become a SAFETY NET for the cases where a README subtask DOES
+slip through (multi-hint that legitimately includes README, or
+genuine Documentation-cited cases). Layer-B is the first line.
+
 ## Q&A self-consistency phase (orthogonal to the stack)
 
 Not a guard against worker slop — a separate post-meta gate that asks
@@ -727,3 +783,4 @@ existing ones.
 | 2026-04-24 AM | b2v PR #21 second issue | G12 (config-grounding for JS/TS configs) — closes the OTHER half of PR #21: `prettier.config.js` referenced `prettier-plugin-tailwindcss` not in npm deps. Same fingerprint as G11; 47-basename closed-set, 3 extractors (require/import/plugin-array). Live-validated against b2v fingerprint. |
 | 2026-04-25 AM | b2v PRs #24/#26/#27 | G13 (doc-preservation) — README destruction recurred in 3 of 4 shipped PRs across all model sizes (gemma-2B/4B + qwen3-8B). Two deterministic checks: code-block char preservation + literal `\n` corruption signature. Closes a class self-review caught only 1 of 4 times. |
 | 2026-04-25 AM | b2v PRs #24/#27 | G14 (URL/path grounding) — closes the content-grounding trilogy after G11/G12/G13. Two-tier external URL check (DNS → HEAD-404) catches invented `*.github.io` subdomains; relative-path filesystem check catches invented `docs/guide/code/*` paths. Carry-over links exempt. Opt-out via `GITOMA_URL_GROUNDING_OFFLINE`. |
+| 2026-04-25 PM | rung-0 backlog + b2v PR matrix | Layer-A `synthesize_real_bug_task` + Layer-B `banish_readme_only_subtasks` — deterministic plan post-processors that fire BEFORE worker apply. A: synthesize T000 when planner ignored failing tests. B: drop README-only subtasks unless Documentation metric explicitly cites README. Plus planner-prompt HARD RULE on README. Catches the planner-side root cause of 3 of 4 b2v PR README destructions. |

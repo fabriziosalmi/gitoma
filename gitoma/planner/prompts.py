@@ -151,6 +151,16 @@ file_hint). You MUST NOT plan generic-project work (README, LICENSE,
 CONTRIBUTING, docs, lint config) when there are failing tests — fix
 the broken code first, scaffolding later. If Build Integrity is also
 failing, Build wins (T001 = build fix, T002 = test fix).
+
+HARD RULE — README IS A CONSEQUENCE, NOT A GOAL: do NOT emit subtasks
+whose SOLE ``file_hints`` entry is ``README.md`` / ``README.rst`` /
+``README``. README updates derive from code changes — they are not a
+primary planning target. Most legitimate doc improvements live in
+the ``docs/`` folder, not README. The only exception: the
+"Documentation" metric is "fail" AND its ``details`` field
+explicitly cites README by name. Otherwise: skip README entirely or
+include it ONLY as a SECONDARY ``file_hints`` entry alongside the
+code file actually being changed.
 {compile_fix_block}
 
 Respond with ONLY this JSON schema (no extra text):

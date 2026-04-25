@@ -542,6 +542,28 @@ def run(
                 # Test Results metric is fail AND (b) every current
                 # file_hint sits under a tests/-like dir. Test → source
                 # mapping is per-language regex on imports.
+                # ── Layer-A: synthesize T000 if planner missed the real bug ───
+                # Deterministic pre-filter: when Test Results metric is
+                # failing AND the LLM-emitted plan doesn't touch the
+                # source-under-test, prepend a synthesized priority-1
+                # T000 task that does. Closes the rung-0 pattern where
+                # the planner emits 12 generic-project subtasks and
+                # never touches the actual broken file.
+                if plan and plan.tasks:
+                    from gitoma.planner.real_bug_filter import synthesize_real_bug_task
+                    _real_bug = synthesize_real_bug_task(plan, report, git_repo.root)
+                    if _real_bug:
+                        console.print(
+                            f"[muted]Real-bug pre-filter: synthesized T000 "
+                            f"({_real_bug['failing_test_count']} failing test(s), "
+                            f"sources: {', '.join(_real_bug['source_files'][:2])})[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _rbt
+                            _rbt().emit("plan.real_bug_synthesized", **_real_bug)
+                        except Exception:
+                            pass
+
                 if plan and plan.tasks:
                     from gitoma.planner.test_to_source import rewrite_plan_in_place
                     _occam = rewrite_plan_in_place(plan, report, git_repo.root)
@@ -553,6 +575,33 @@ def run(
                         try:
                             from gitoma.core.trace import current as _ot
                             _ot().emit("plan.occam_rewrite", **_occam)
+                        except Exception:
+                            pass
+
+                # ── Layer-B: banish README-only subtasks ────────────────────
+                # The recurring b2v PR #24/#26/#27 README destruction
+                # pattern was dominantly the result of "Update README
+                # with Documentation Links"-style subtasks the planner
+                # invented. Drop deterministically unless the
+                # Documentation metric is failing AND its details
+                # cite README explicitly. Cheaper than catching the
+                # destruction post-hoc with G13/G14.
+                if plan and plan.tasks:
+                    from gitoma.planner.real_bug_filter import banish_readme_only_subtasks
+                    _readme_banish = banish_readme_only_subtasks(plan, report)
+                    if _readme_banish:
+                        _names = [
+                            f"{d['subtask_id']}({d['file_hints'][0]})"
+                            for d in _readme_banish["dropped_subtasks"][:3]
+                        ]
+                        console.print(
+                            f"[muted]README-banish: dropped "
+                            f"{_readme_banish['drop_count']} subtask(s) "
+                            f"— {', '.join(_names)}[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _rbt2
+                            _rbt2().emit("plan.readme_banished", **_readme_banish)
                         except Exception:
                             pass
 
