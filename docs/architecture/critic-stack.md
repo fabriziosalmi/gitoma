@@ -451,6 +451,53 @@ are configs.
 
 **Wired both worker and refiner apply paths.**
 
+### G13 — Doc-preservation against fenced code-block destruction
+
+**Catches**: MODIFY operations on doc files (`.md`/`.mdx`/`.rst`/
+`.txt`) that destroy fenced code-block content. The recurring
+b2v failure mode across PRs #24/#26/#27 (and pre-#22 manual fix):
+README's bash examples either get deleted entirely, replaced
+with prose pointing to non-existent docs, or corrupted with
+literal `\n` text instead of real newlines (the qwen3-8b PR #27
+escape-sequence corruption signature).
+
+Three of four shipped PRs over 48 hours had this regression in
+some form, with self-review catching it only 1 of 4 times.
+Models from gemma-2B to qwen3-8B all produced one variant — it's
+a class of failure the LLM-judgement layer can't reliably
+distinguish from "improvement". Needed a deterministic check.
+
+**Mechanism**: `gitoma/worker/doc_preservation.py` runs two
+checks per touched doc file (skipping CREATE / DELETE / non-doc
+extensions):
+
+1. **Code-block character preservation**: count chars inside
+   ``` ```...``` ``` blocks in original vs new; flag when new
+   has < 30% of original AND original was ≥ 50 chars (the
+   minimum-interesting threshold). Conservative: legitimate
+   consolidation (50% loss) still passes.
+
+2. **Literal `\n` corruption**: any line inside a fenced block
+   containing 2+ literal `\n` text occurrences flags. Catches
+   the JSON-double-escape pattern where worker emits `\\n` in
+   patch JSON (decodes to literal 2-char `\n`) instead of real
+   newlines. Threshold of 2+ avoids false-positives on legit
+   single-`\n` (regex examples, printf format strings).
+
+Same revert+retry shape as G2/G7/G10/G11/G12. Pure-string
+implementation (no LLM, no parsing libraries beyond stdlib
+`re`). Reads `originals` dict captured by `read_modify_originals`
+— the same one G7 consumes.
+
+**Out of scope for v1** (deferred):
+- URL/path reachability (added doc URLs that don't resolve, or
+  cite local files that don't exist) — G14 candidate, requires
+  DNS or filesystem checks.
+- Prose drift (paragraphs replaced with vapid summaries) — too
+  subjective for a deterministic guard.
+
+**Wired both worker and refiner apply paths.**
+
 ## Q&A self-consistency phase (orthogonal to the stack)
 
 Not a guard against worker slop — a separate post-meta gate that asks
@@ -629,3 +676,4 @@ existing ones.
 | 2026-04-23 PM | b2v PR #19 | G10 (semantic config schema validator) — bundled schemastore.org schemas for ESLint/Prettier/package.json/tsconfig/github-workflow/dependabot/Cargo. Catches valid-JSON-but-wrong-shape configs that G2 silently passes. v0.2.0 release. |
 | 2026-04-23 PM | b2v PR #21 | G11 (content-grounding via Occam `/repo/fingerprint`) — new endpoint exposes declared deps + inferred frameworks; planner prompt + worker apply loop both consume it. Catches the React-in-Rust-repo hallucination that every prior guard misses by design. |
 | 2026-04-24 AM | b2v PR #21 second issue | G12 (config-grounding for JS/TS configs) — closes the OTHER half of PR #21: `prettier.config.js` referenced `prettier-plugin-tailwindcss` not in npm deps. Same fingerprint as G11; 47-basename closed-set, 3 extractors (require/import/plugin-array). Live-validated against b2v fingerprint. |
+| 2026-04-25 AM | b2v PRs #24/#26/#27 | G13 (doc-preservation) — README destruction recurred in 3 of 4 shipped PRs across all model sizes (gemma-2B/4B + qwen3-8B). Two deterministic checks: code-block char preservation + literal `\n` corruption signature. Closes a class self-review caught only 1 of 4 times. |

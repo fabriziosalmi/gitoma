@@ -1028,6 +1028,9 @@ def run(
                             from gitoma.worker.content_grounding import (
                                 validate_content_grounding,
                             )
+                            from gitoma.worker.doc_preservation import (
+                                validate_doc_preservation,
+                            )
                             from gitoma.worker.schema_validator import (
                                 validate_config_semantics,
                             )
@@ -1194,6 +1197,39 @@ def run(
                                                 ),
                                             )
                                             _refine_cfg_ok = False
+                                    # G13 doc-preservation on refiner output —
+                                    # same shape as G12 above. Catches the
+                                    # b2v PR #24/#26/#27 README destruction
+                                    # in the refiner path too.
+                                    _refine_doc_ok = True
+                                    if _refine_schema_ok and _refine_grounding_ok and _refine_cfg_ok:
+                                        _refine_doc = (
+                                            validate_doc_preservation(
+                                                git_repo.root,
+                                                _refine_touched,
+                                                _refine_originals,
+                                            )
+                                        )
+                                        if _refine_doc is not None:
+                                            _bad_p, _doc_msg = _refine_doc
+                                            _trace.emit(
+                                                "critic_doc_preservation.fail",
+                                                phase="refiner",
+                                                path=_bad_p,
+                                                error=_doc_msg[:300],
+                                            )
+                                            git_repo.repo.git.reset(
+                                                "--hard", _v0_sha
+                                            )
+                                            _trace.emit(
+                                                "critic_refiner.reverted",
+                                                winner="v0",
+                                                rationale=(
+                                                    "doc_preservation_failed: "
+                                                    f"{_bad_p}: {_doc_msg[:120]}"
+                                                ),
+                                            )
+                                            _refine_doc_ok = False
                                     # AST-diff guard on refiner output —
                                     # same shape as the syntax check above.
                                     # Catches the rung-3 v17/v18 pattern
@@ -1201,7 +1237,7 @@ def run(
                                     # patch that drops sibling functions
                                     # without flagging the deletion.
                                     _refine_ast = None
-                                    if _refine_schema_ok and _refine_grounding_ok and _refine_cfg_ok:
+                                    if _refine_schema_ok and _refine_grounding_ok and _refine_cfg_ok and _refine_doc_ok:
                                         _refine_ast = (
                                             validate_top_level_preservation(
                                                 git_repo.root,
@@ -1209,7 +1245,7 @@ def run(
                                                 _refine_originals,
                                             )
                                         )
-                                    if not _refine_schema_ok or not _refine_grounding_ok or not _refine_cfg_ok:
+                                    if not _refine_schema_ok or not _refine_grounding_ok or not _refine_cfg_ok or not _refine_doc_ok:
                                         pass  # earlier guard already reset; skip
                                     elif _refine_ast is not None:
                                         _bad_p, _missing = _refine_ast

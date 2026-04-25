@@ -31,6 +31,7 @@ from gitoma.worker.patcher import (
 )
 from gitoma.worker.config_grounding import validate_config_grounding
 from gitoma.worker.content_grounding import validate_content_grounding
+from gitoma.worker.doc_preservation import validate_doc_preservation
 from gitoma.worker.schema_validator import validate_config_semantics
 
 # Cap on how many critic panel runs we keep in AgentState before dropping
@@ -377,6 +378,42 @@ class WorkerAgent:
                     self._revert_touched(touched)
                     raise ValueError(
                         f"Config-grounding check failed after {max_attempts} "
+                        f"attempt(s) on {bad_path}. Last error: {msg[:200]}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
+            # G13 doc-preservation: doc files (.md/.rst/.txt/.mdx)
+            # MUST keep their fenced code blocks across modify ops.
+            # Catches the recurring b2v PR #24/#26/#27 README
+            # destruction (bash examples deleted, replaced with
+            # prose, or corrupted with literal ``\n`` text). Two
+            # deterministic checks: char-count preservation +
+            # literal-newline corruption signature.
+            doc_err = validate_doc_preservation(
+                self._git.root, touched, originals,
+            )
+            if doc_err is not None:
+                bad_path, msg = doc_err
+                err_text = (
+                    f"Doc-preservation check failed on {bad_path}: {msg} "
+                    "Re-emit the patch keeping every original ``` ```...``` ``` "
+                    "fenced code block VERBATIM. Modify only the surrounding "
+                    "prose if needed; never collapse multi-line examples or "
+                    "drop runnable commands."
+                )
+                current_trace().emit(
+                    "critic_doc_preservation.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    path=bad_path,
+                    error=msg[:300],
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"Doc-preservation check failed after {max_attempts} "
                         f"attempt(s) on {bad_path}. Last error: {msg[:200]}"
                     )
                 self._revert_touched(touched)

@@ -8,6 +8,19 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **G13 — Doc-preservation against fenced code-block destruction**
+  (`gitoma/worker/doc_preservation.py`): two deterministic checks
+  on MODIFY operations against `.md`/`.mdx`/`.rst`/`.txt` files —
+  (a) code-block char-count preservation (flag when new < 30% of
+  original AND original ≥ 50 chars), (b) literal `\n` corruption
+  detection (flag when 2+ literal `\n` text on same line inside a
+  fenced block, the JSON-double-escape signature). Catches the
+  recurring b2v PRs #24/#26/#27 README destruction that all model
+  sizes (gemma-2B/4B, qwen3-8B) produced and that self-review only
+  caught 1 of 4 times. Pure-string, no LLM, no parsing libraries.
+  Wired both worker and refiner apply paths. New trace event
+  `critic_doc_preservation.fail`.
+
 - **G12 — Config-grounding for JS/TS configs**
   (`gitoma/worker/config_grounding.py`): JS/TS config files
   (47-basename closed set: prettier, eslint, tailwind, vite,
