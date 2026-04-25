@@ -17,6 +17,7 @@ import pytest
 from gitoma.planner.llm_client import (
     _attempt_json_repair,
     _escape_bare_quotes,
+    _strip_markdown_fences,
     _strip_trailing_commas,
 )
 
@@ -106,6 +107,78 @@ def test_escape_bare_newline_in_string() -> None:
 def test_escape_idempotent_on_clean_json() -> None:
     s = '{"a": "ok", "b": [1, 2, 3]}'
     assert _escape_bare_quotes(s) == s
+
+
+# ── Markdown-fence strip ────────────────────────────────────────────────
+
+
+def test_strip_fence_with_lang_tag() -> None:
+    """The dominant shape from coder-tuned models: ```json\\n...\\n```."""
+    inp = '```json\n{"a": 1, "b": 2}\n```'
+    assert _strip_markdown_fences(inp) == '{"a": 1, "b": 2}'
+
+
+def test_strip_fence_without_lang_tag() -> None:
+    """Bare triple-backtick — common from instruct-tuned models that
+    pick up the "wrap output in fences" behaviour without a language."""
+    inp = '```\n{"a": 1}\n```'
+    assert _strip_markdown_fences(inp) == '{"a": 1}'
+
+
+def test_strip_fence_with_surrounding_whitespace() -> None:
+    """Lots of newlines around the fence — the Markdown-renderer-style
+    spacing some models adopt."""
+    inp = '\n\n  ```json\n{"a": 1}\n```  \n\n'
+    assert _strip_markdown_fences(inp) == '{"a": 1}'
+
+
+def test_strip_fence_idempotent_on_clean_json() -> None:
+    """Plain JSON without any fences — must pass through unchanged."""
+    inp = '{"a": 1}'
+    assert _strip_markdown_fences(inp) == '{"a": 1}'
+
+
+def test_strip_fence_idempotent_on_plain_prose() -> None:
+    """Random text that doesn't start with ``` — pass through."""
+    inp = 'this is not fenced'
+    assert _strip_markdown_fences(inp) == 'this is not fenced'
+
+
+def test_strip_fence_handles_yaml_lang() -> None:
+    """Coder fine-tunes sometimes wrap as ``` ```yaml ``` even when
+    asked for JSON. Strip the fence regardless of the lang tag."""
+    inp = '```yaml\nfoo: bar\n```'
+    assert _strip_markdown_fences(inp) == 'foo: bar'
+
+
+def test_strip_fence_replays_gemma_response() -> None:
+    """The exact shape verified live 2026-04-25 against
+    ``google/gemma-4-e4b`` on llmproxy: model wraps JSON in
+    ``` ```json ... ``` ``` despite a "no fences" system prompt.
+    Without the strip, ``json.loads`` raises and the worker retries."""
+    inp = '```json\n{\n  "status": "success",\n  "message": "Processing complete."\n}\n```'
+    out = _strip_markdown_fences(inp)
+    assert json.loads(out) == {
+        "status": "success",
+        "message": "Processing complete.",
+    }
+
+
+def test_strip_fence_does_not_strip_when_only_opener() -> None:
+    """A leading ``` with no matching closer — bail and return as-is.
+    Better to surface the malformed shape to the caller than to
+    half-strip and produce something subtly wrong."""
+    inp = '```json\n{"a": 1}\n'
+    assert _strip_markdown_fences(inp) == inp
+
+
+def test_strip_fence_safe_on_unexpected_first_line() -> None:
+    """The opener is ``` but the line after the fence prefix is
+    not a bare lang tag — bail to avoid corrupting an unfamiliar
+    fence-like construct."""
+    inp = '```not a lang tag with spaces\n{"a": 1}\n```'
+    # Conservative: don't touch.
+    assert _strip_markdown_fences(inp) == inp
 
 
 # ── Combined repair ─────────────────────────────────────────────────────

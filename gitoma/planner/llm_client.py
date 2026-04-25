@@ -314,12 +314,34 @@ class LLMClient:
         # the trailing ``/no_think`` as harmless prose. Per-call: makes a
         # COPY of the messages list so the caller's data is untouched.
         import os as _os
-        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING") or "").lower() in ("1", "true", "yes"):
+        _disable_thinking = (
+            _os.environ.get("LM_STUDIO_DISABLE_THINKING") or ""
+        ).lower() in ("1", "true", "yes")
+        # ``/no_think`` suffix in the message body — the Qwen3 family
+        # soft-switch. Harmless prose to other models that don't
+        # recognise it. Verified 2026-04-23 against ``qwen/qwen3-8b``:
+        # reasoning_tokens 297 → 1, content unchanged.
+        if _disable_thinking:
             messages = _append_no_think(messages)
+        # Optional second prong: ``chat_template_kwargs={"enable_thinking":
+        # false}`` via ``extra_body`` — the Jinja-template kill-switch
+        # used by GLM, Gemma, some Qwen variants, and vLLM/Together
+        # backends. NOT safe everywhere: LM Studio's OpenAI-compat shim
+        # appears to silently choke on the unknown field for medium-
+        # sized prompts (~6-8K tokens for the planner), returning 502
+        # via llmproxy or hanging the upstream request. Gated behind a
+        # SEPARATE env var so the default LM Studio path stays
+        # unbroken; opt in when targeting a backend (vLLM, Together,
+        # llmproxy with auto-disable plugin) that honors it. Verified
+        # 2026-04-24 against ``google/gemma-4-e4b`` on llmproxy SHORT
+        # prompts: reasoning_content 684 → 0.
+        _extra_body: dict | None = None
+        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING_TEMPLATE_KWARG") or "").lower() in ("1", "true", "yes"):
+            _extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
 
         for attempt in range(retries):
             try:
-                response = self._client.chat.completions.create(
+                _create_kwargs: dict = dict(
                     model=model if model else self.model,
                     messages=messages,  # type: ignore[arg-type]
                     temperature=(
@@ -329,6 +351,9 @@ class LLMClient:
                     ),
                     max_tokens=self._config.lmstudio.max_tokens,
                 )
+                if _extra_body is not None:
+                    _create_kwargs["extra_body"] = _extra_body
+                response = self._client.chat.completions.create(**_create_kwargs)
                 choice = response.choices[0]
                 content = choice.message.content
                 # Capture token usage for the caller (cost telemetry).
@@ -490,14 +515,21 @@ def _append_no_think(messages: list[dict[str, str]]) -> list[dict[str, str]]:
 def _attempt_json_repair(s: str) -> str:
     """Try to repair the most common LLM JSON authoring slop.
 
-    Two passes, both string-aware:
+    Three passes, all string-aware:
 
-      1. **Trailing-comma strip** — ``{"a": 1,}`` and ``[1, 2,]`` are
+      1. **Markdown-fence strip** — coder/instruct fine-tunes wrap
+         JSON in ``` ```json ... ``` ``` despite the prompt's
+         "no fences" instruction. Verified live 2026-04-24 against
+         ``google/gemma-4-e4b`` on llmproxy. Strip a single leading
+         ``` ```{lang}? ``` and trailing ``` ``` ``` opener-closer
+         pair. Idempotent on already-clean strings.
+
+      2. **Trailing-comma strip** — ``{"a": 1,}`` and ``[1, 2,]`` are
          legal in JS / Python but not JSON. Strip commas immediately
          followed (after whitespace) by ``}`` or ``]``, but ONLY when
          we're outside a string literal.
 
-      2. **Bare-quote escape** — ``"rationale": "the test "asserts"
+      3. **Bare-quote escape** — ``"rationale": "the test "asserts"
          something"`` parses as three concatenated strings (and fails).
          Walk every string literal: the OPENER is the first ``"`` after
          a ``:`` or ``,``; the CLOSER is the next ``"`` followed by
@@ -516,7 +548,52 @@ def _attempt_json_repair(s: str) -> str:
     quotes, the entire JSON broke and the Q&A phase had to retry +
     burn another LLM round-trip. Now repaired in-process.
     """
-    return _escape_bare_quotes(_strip_trailing_commas(s))
+    return _escape_bare_quotes(_strip_trailing_commas(_strip_markdown_fences(s)))
+
+
+def _strip_markdown_fences(s: str) -> str:
+    """Remove a single ``` ```{lang}? ... ``` ``` wrapper around the
+    payload. Handles ``json``, ``yaml``, ``toml``, etc. or no language
+    tag. Trims surrounding whitespace before checking. Returns ``s``
+    unchanged when no opener-closer pair is present.
+
+    Examples that get stripped::
+
+        ```json
+        {"a": 1}
+        ```
+
+        ```
+        {"a": 1}
+        ```
+
+        ```\\n{"a":1}\\n```
+
+    Idempotent: stripping a fence-less string is a no-op. Conservative:
+    only strips ONE wrapper layer (the rare nested case stays intact
+    so the caller's parser surfaces the real shape error).
+    """
+    body = s.strip()
+    if not body.startswith("```"):
+        return s
+    # Find the closing ```
+    if body.endswith("```"):
+        # Strip leading ``` plus optional language identifier through to newline
+        rest = body[3:]
+        nl = rest.find("\n")
+        if nl == -1:
+            # ``` foo ``` single-line form — bare fence without payload
+            inner = rest[:-3].strip()
+        else:
+            # Skip lang tag if present (alphanumeric only, no spaces)
+            lang_part = rest[:nl]
+            if lang_part.strip().isalnum() or lang_part.strip() == "":
+                inner = rest[nl + 1:-3]
+            else:
+                # Unexpected leading line — bail rather than risk corrupting
+                return s
+        return inner.strip()
+    return s
 
 
 def _strip_trailing_commas(s: str) -> str:
