@@ -1031,6 +1031,9 @@ def run(
                             from gitoma.worker.doc_preservation import (
                                 validate_doc_preservation,
                             )
+                            from gitoma.worker.url_grounding import (
+                                validate_url_grounding,
+                            )
                             from gitoma.worker.schema_validator import (
                                 validate_config_semantics,
                             )
@@ -1230,6 +1233,40 @@ def run(
                                                 ),
                                             )
                                             _refine_doc_ok = False
+                                    # G14 URL-grounding on refiner output —
+                                    # same shape as G13 above. Catches the
+                                    # b2v PR #24/#27 fabricated URL/path
+                                    # patterns when they sneak in via the
+                                    # refiner instead of the worker.
+                                    _refine_url_ok = True
+                                    if _refine_schema_ok and _refine_grounding_ok and _refine_cfg_ok and _refine_doc_ok:
+                                        _refine_url = (
+                                            validate_url_grounding(
+                                                git_repo.root,
+                                                _refine_touched,
+                                                _refine_originals,
+                                            )
+                                        )
+                                        if _refine_url is not None:
+                                            _bad_p, _url_msg = _refine_url
+                                            _trace.emit(
+                                                "critic_url_grounding.fail",
+                                                phase="refiner",
+                                                path=_bad_p,
+                                                error=_url_msg[:300],
+                                            )
+                                            git_repo.repo.git.reset(
+                                                "--hard", _v0_sha
+                                            )
+                                            _trace.emit(
+                                                "critic_refiner.reverted",
+                                                winner="v0",
+                                                rationale=(
+                                                    "url_grounding_failed: "
+                                                    f"{_bad_p}: {_url_msg[:120]}"
+                                                ),
+                                            )
+                                            _refine_url_ok = False
                                     # AST-diff guard on refiner output —
                                     # same shape as the syntax check above.
                                     # Catches the rung-3 v17/v18 pattern
@@ -1237,7 +1274,7 @@ def run(
                                     # patch that drops sibling functions
                                     # without flagging the deletion.
                                     _refine_ast = None
-                                    if _refine_schema_ok and _refine_grounding_ok and _refine_cfg_ok and _refine_doc_ok:
+                                    if _refine_schema_ok and _refine_grounding_ok and _refine_cfg_ok and _refine_doc_ok and _refine_url_ok:
                                         _refine_ast = (
                                             validate_top_level_preservation(
                                                 git_repo.root,
@@ -1245,7 +1282,7 @@ def run(
                                                 _refine_originals,
                                             )
                                         )
-                                    if not _refine_schema_ok or not _refine_grounding_ok or not _refine_cfg_ok or not _refine_doc_ok:
+                                    if not _refine_schema_ok or not _refine_grounding_ok or not _refine_cfg_ok or not _refine_doc_ok or not _refine_url_ok:
                                         pass  # earlier guard already reset; skip
                                     elif _refine_ast is not None:
                                         _bad_p, _missing = _refine_ast

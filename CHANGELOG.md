@@ -8,6 +8,21 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **G14 — URL/path grounding against fabricated link targets**
+  (`gitoma/worker/url_grounding.py`): closing piece of the content-
+  grounding trilogy (G11 frameworks, G12 npm refs, G13 code-block
+  preservation). On MODIFY of doc files (`.md`/`.mdx`/`.rst`/
+  `.txt`), validates added external URLs via two-tier DNS → HEAD
+  check (catches `*.github.io` subdomains that wildcard-DNS-
+  resolve but return HTTP 404, the b2v PR #24 case) AND added
+  Markdown link targets via filesystem existence check (catches
+  invented `docs/guide/code/*` paths, the b2v PR #27 case).
+  Carry-over URLs/paths exempt — only validates what the worker
+  added. Fail-open on transient errors; opt-out via
+  `GITOMA_URL_GROUNDING_OFFLINE=true` for sandboxed CI envs.
+  Wired both worker and refiner apply paths. New trace event
+  `critic_url_grounding.fail`.
+
 - **G13 — Doc-preservation against fenced code-block destruction**
   (`gitoma/worker/doc_preservation.py`): two deterministic checks
   on MODIFY operations against `.md`/`.mdx`/`.rst`/`.txt` files —

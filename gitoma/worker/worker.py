@@ -33,6 +33,7 @@ from gitoma.worker.config_grounding import validate_config_grounding
 from gitoma.worker.content_grounding import validate_content_grounding
 from gitoma.worker.doc_preservation import validate_doc_preservation
 from gitoma.worker.schema_validator import validate_config_semantics
+from gitoma.worker.url_grounding import validate_url_grounding
 
 # Cap on how many critic panel runs we keep in AgentState before dropping
 # the oldest. State.json must stay manageable on long runs (60+ subtasks);
@@ -414,6 +415,40 @@ class WorkerAgent:
                     self._revert_touched(touched)
                     raise ValueError(
                         f"Doc-preservation check failed after {max_attempts} "
+                        f"attempt(s) on {bad_path}. Last error: {msg[:200]}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
+            # G14 URL/path grounding: doc files (.md/.rst/.txt/.mdx)
+            # MUST not introduce links to fabricated URLs (DNS fail
+            # or HTTP 404) or non-existent relative paths. Catches
+            # the b2v PR #24 invented-github.io-hostname pattern +
+            # PR #27 invented-docs/guide/code/* paths. Carry-over
+            # links exempt; opt-out via GITOMA_URL_GROUNDING_OFFLINE.
+            url_err = validate_url_grounding(
+                self._git.root, touched, originals,
+            )
+            if url_err is not None:
+                bad_path, msg = url_err
+                err_text = (
+                    f"URL-grounding check failed on {bad_path}: {msg} "
+                    "Re-emit the patch with link targets that actually "
+                    "exist (real domains, real files in this repo) or "
+                    "drop the unsupported references."
+                )
+                current_trace().emit(
+                    "critic_url_grounding.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    path=bad_path,
+                    error=msg[:300],
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"URL-grounding check failed after {max_attempts} "
                         f"attempt(s) on {bad_path}. Last error: {msg[:200]}"
                     )
                 self._revert_touched(touched)

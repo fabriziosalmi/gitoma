@@ -498,6 +498,55 @@ implementation (no LLM, no parsing libraries beyond stdlib
 
 **Wired both worker and refiner apply paths.**
 
+### G14 — URL/path grounding against fabricated link targets
+
+**Catches**: MODIFY operations on doc files (`.md`/`.mdx`/`.rst`/
+`.txt`) that introduce links pointing at URLs/paths which don't
+exist. The closing piece of the content-grounding trilogy
+(G11 frameworks, G12 npm package refs, G13 code-block
+preservation, G14 link targets).
+
+Two real-world failure shapes G14 catches:
+
+1. **Invented external hostnames** — b2v PR #24:
+   `https://b2v.github.io/docs/architecture.md`. The
+   `b2v.github.io` subdomain has no GitHub Pages site published.
+   A naive DNS check passes (GitHub wildcard-resolves `*.github.io`)
+   but a HEAD request returns 404. G14's two-tier check (DNS →
+   HEAD) catches it.
+
+2. **Invented relative paths** — b2v PR #27:
+   `docs/guide/code/encoder.md`, `docs/guide/code/decoder.md`,
+   `docs/guide/code/utils.md`. Three Markdown links to files that
+   don't exist anywhere in the repo. Pure filesystem check
+   (relative to the doc OR relative to repo root) catches it.
+
+**Mechanism**: `gitoma/worker/url_grounding.py`. For each touched
+doc file, diff added URLs/links vs the original content (carry-
+overs are exempt — not the worker's invention). Then:
+
+- For each added `https?://` URL: DNS-resolve hostname, then
+  HEAD with status check. Definitive 404 → flag. Anything else
+  (5xx, 405, timeout, SSL) → fail-open.
+- For each added Markdown link `[text](target)`: skip if
+  `http://`, `https://`, `mailto:`, `tel:`, `<...>`, or `#anchor`.
+  Otherwise check existence relative to doc directory AND repo
+  root. Both fail → flag.
+
+**Opt-out**: `GITOMA_URL_GROUNDING_OFFLINE=true` for runs in
+sandboxed CI envs without network access.
+
+**Wired both worker and refiner apply paths.**
+
+**Out of scope for v1** (deferred):
+- Path-level HTTP 404 detection on real domains (e.g.
+  `https://github.com/<invented>/<repo>`) — would need full HTTP
+  for every URL, too slow at scale.
+- Image references (`![](src)`) — same regex would work but
+  not yet wired; defer until evidence of image hallucination.
+- Cross-link validation (anchor `#section` actually exists in
+  target file) — adds parsing complexity for marginal coverage.
+
 ## Q&A self-consistency phase (orthogonal to the stack)
 
 Not a guard against worker slop — a separate post-meta gate that asks
@@ -677,3 +726,4 @@ existing ones.
 | 2026-04-23 PM | b2v PR #21 | G11 (content-grounding via Occam `/repo/fingerprint`) — new endpoint exposes declared deps + inferred frameworks; planner prompt + worker apply loop both consume it. Catches the React-in-Rust-repo hallucination that every prior guard misses by design. |
 | 2026-04-24 AM | b2v PR #21 second issue | G12 (config-grounding for JS/TS configs) — closes the OTHER half of PR #21: `prettier.config.js` referenced `prettier-plugin-tailwindcss` not in npm deps. Same fingerprint as G11; 47-basename closed-set, 3 extractors (require/import/plugin-array). Live-validated against b2v fingerprint. |
 | 2026-04-25 AM | b2v PRs #24/#26/#27 | G13 (doc-preservation) — README destruction recurred in 3 of 4 shipped PRs across all model sizes (gemma-2B/4B + qwen3-8B). Two deterministic checks: code-block char preservation + literal `\n` corruption signature. Closes a class self-review caught only 1 of 4 times. |
+| 2026-04-25 AM | b2v PRs #24/#27 | G14 (URL/path grounding) — closes the content-grounding trilogy after G11/G12/G13. Two-tier external URL check (DNS → HEAD-404) catches invented `*.github.io` subdomains; relative-path filesystem check catches invented `docs/guide/code/*` paths. Carry-over links exempt. Opt-out via `GITOMA_URL_GROUNDING_OFFLINE`. |
