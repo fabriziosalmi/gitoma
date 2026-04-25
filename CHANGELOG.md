@@ -4,7 +4,21 @@ All notable changes to gitoma are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning is
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-04-25
+
+The "planner-time discipline" release. Three new guards (G12, G13, G14)
+extend the critic stack to cover npm-config grounding + doc preservation
++ URL/path reachability — the recurring hallucination shapes that
+survived v0.3.0 in real-world b2v PRs #21/#24/#26/#27. The headline
+addition is a pair of LLM-free planner-time deterministic
+post-processors (Layer-A + Layer-B) that close the planner-side root
+cause: "Update README"-style subtasks are now banished BEFORE the
+worker ever sees them, and missing real-bug T000 tasks are synthesized
+when the planner ignored failing tests.
+
+Replay matrix on b2v across qwen3-8b / gemma-4-e4b / gemma-4-e2b
+confirmed 3 of 3 PRs ship clean (vs 0 of 3 morning baseline) with
+README untouched and zero hallucinated link targets.
 
 ### Added
 
@@ -76,22 +90,64 @@ All notable changes to gitoma are documented in this file. Format follows
   while `package.json` only declared `vitepress`. G11 caught the
   doc hallucination; G12 catches the symmetric config one.
   Wired both worker and refiner apply paths. Live-validated
-  against the b2v fingerprint via `/repo/fingerprint`.
+  against the b2v fingerprint via `/repo/fingerprint`. First
+  live fire on b2v PR #28 replay (qwen3-8b, 2026-04-25 PM):
+  caught package-ref mismatch in `prettier.config.js`.
+
+- **Markdown fence-strip + opt-in chat_template_kwargs**
+  (`gitoma/planner/llm_client.py`): `_strip_markdown_fences`
+  added as the first pass of `_attempt_json_repair` — strips a
+  single ` ```{lang}? ... ``` ` wrapper before running existing
+  trailing-comma + bare-quote repair. Coder/instruct fine-tunes
+  (gemma-4-e4b, qwen2.5-coder-14b, llama3.1-8b-leetcoder)
+  routinely wrap JSON in fences despite "no markdown" system
+  prompts; without this, `json.loads` raised and the worker
+  burned 3 retry attempts. Idempotent on already-clean strings.
+  Plus opt-in `LM_STUDIO_DISABLE_THINKING_TEMPLATE_KWARG` env
+  var that sends `extra_body={"chat_template_kwargs":
+  {"enable_thinking": false}}` on the OpenAI call — the Jinja-
+  template kill-switch for GLM/Gemma/some-Qwen variants and
+  vLLM/Together backends. Gated separately from the existing
+  `LM_STUDIO_DISABLE_THINKING` (`/no_think` suffix) because LM
+  Studio's OpenAI-compat shim chokes on the unknown `chat_
+  template_kwargs` field for medium prompts.
 
 ### Trace events
 
-- `critic_config_grounding.fail` — G12 fired (carries `phase` =
+- `plan.real_bug_synthesized` — Layer-A synthesized a T000 task
+- `plan.readme_banished` — Layer-B dropped README-only subtask(s)
+- `critic_doc_preservation.fail` — G13 fired (carries `phase` =
   `worker` or `refiner`)
+- `critic_url_grounding.fail` — G14 fired (carries `phase`)
+- `critic_config_grounding.fail` — G12 fired (carries `phase`)
+
+### Environment knobs (new)
+
+- `GITOMA_URL_GROUNDING_OFFLINE=true` — skip G14 DNS/HEAD
+  checks (sandboxed CI envs)
+- `LM_STUDIO_DISABLE_THINKING_TEMPLATE_KWARG=true` — opt-in
+  `chat_template_kwargs` injection for backends that accept it
 
 ### Tests
 
-- 859 passing (was 822 at v0.3.0). +37 new tests in
-  `test_config_grounding.py`: PR #21 replay, extractor coverage
-  for 7 import/require shapes, normaliser table for scoped /
-  sub-path / relative / empty inputs, builtin-skip table for
-  modern `node:` prefix, silent-pass paths (no fingerprint, no
-  `package.json`, non-config `.js`), first-violation
-  short-circuit, sanity tests for the basename + builtin sets.
+- 950 passing (was 822 at v0.3.0). +128 new tests across:
+  - `test_config_grounding.py` (37) — G12
+  - `test_llm_json_repair.py` (+9 fence-strip cases)
+  - `test_doc_preservation.py` (20) — G13
+  - `test_url_grounding.py` (42) — G14
+  - `test_real_bug_filter.py` (20) — Layer A+B
+
+### Replay validation (b2v, 3 models, post-ship)
+
+| Model | Morning baseline | Tonight (post-ship) |
+|-------|------------------|---------------------|
+| qwen3-8b | PR #27 closed (README destroyed, `\n` literal) | PR #28 clean — Layer-B + G12 + G14 fired live |
+| gemma-4-e4b | PR #26 closed (bash blocks deleted) | PR #29 clean — Layer-B + G14 |
+| gemma-4-e2b | PR #25 borderline | PR #30 perfect (4/4 subtasks, G9 dropped 6) |
+
+3 of 3 PRs shipped with README untouched (vs 0 of 3 in morning
+baseline). G14 + G12 had their first live fires ever. Empirical
+validation for the architectural pivot.
 
 ## [0.3.0] — 2026-04-23
 

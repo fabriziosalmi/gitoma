@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitoma"
-version = "0.3.0"
+version = "0.4.0"
 description = "AI-powered GitHub repository improvement agent — analyzes, plans, commits, and opens PRs autonomously"
 readme = "README.md"
 requires-python = ">=3.12"
