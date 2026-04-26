@@ -8,6 +8,32 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **G15 sibling-config reconciliation guard**
+  (`gitoma/worker/sibling_config.py`): worker-side check that
+  rejects patches creating / modifying a JS/TS quality config
+  (`.editorconfig`, `.prettierrc*`, `.eslintrc*`, `package.json`
+  with embedded `prettier` / `eslintConfig`) when the new config
+  contradicts sibling configs already present in the repo.
+  **Closes the b2v PR #32 failure mode** that started this entire
+  architectural arc — `gitoma quality` shipped a `.prettierrc`
+  with `tabWidth=2 / semi=false / singleQuote=true` blind to
+  the existing `.editorconfig` (`indent_size=4`) and `.eslintrc`
+  (`semi: ["error", "always"]`, `quotes: ["error", "double"]`).
+  Pure deterministic check (no LLM); reconciliation matrix
+  covers 4 conflict shapes: `indent_size↔tabWidth`,
+  `end_of_line↔endOfLine`, ESLint `semi` ↔ Prettier `semi`,
+  ESLint `quotes` ↔ Prettier `singleQuote`. Comparators bail
+  to "no conflict" when EITHER side is absent (operator omitted
+  on purpose) or when ESLint rule shape isn't recognized — never
+  false-positives. Wired between G14 URL grounding and Ψ-full
+  in the worker apply pipeline; on conflict, reverts + retries
+  with feedback listing every conflict so the LLM can fix all
+  in one round. New trace event `critic_sibling_config.fail`
+  with `conflict_count` + touched files. Out of scope for v1
+  (deferred): Python config family (Ruff vs Black vs isort vs
+  mypy), Go, conflict-severity weighting, suggesting fixes,
+  tsconfig.json reconciliation.
+
 - **Test Gen v1 — 5th critic, autogenerates tests for shipped
   patches** (`gitoma/critic/test_gen.py`,
   `gitoma/critic/test_gen_prompts.py`): closes the missing

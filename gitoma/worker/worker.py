@@ -487,6 +487,37 @@ class WorkerAgent:
                 compile_error_feedback = err_text
                 continue
 
+            # G15 sibling-config reconciliation: when the patch
+            # creates / modifies a JS/TS quality-config file
+            # (.editorconfig / .prettierrc* / .eslintrc*), check
+            # that the new config doesn't disagree with sibling
+            # configs already present in the repo. Closes the b2v
+            # PR #32 lazy-config failure mode (Prettier shipped
+            # blind to existing .editorconfig + .eslintrc).
+            from gitoma.worker.sibling_config import check_sibling_config
+            sibling_result = check_sibling_config(
+                self._git.root, touched, originals,
+            )
+            if sibling_result is not None:
+                err_text = sibling_result.render_for_llm()
+                current_trace().emit(
+                    "critic_sibling_config.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(sibling_result.conflicts),
+                    files=sorted({c.touched_file for c in sibling_result.conflicts}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"Sibling-config reconciliation failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(sibling_result.conflicts)} conflict(s) detected."
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
             # AST-diff guard: every top-level def the original had,
             # the new content must still have. Catches the rung-3
             # v17/v18 failure mode (worker emitted a "modify" patch
