@@ -435,11 +435,18 @@ def run(
         # ────────────────────────────────────────────────────────────────────────
         _cpg_index = None
         if (os.environ.get("GITOMA_CPG_LITE") or "").strip().lower() == "on":
-            _has_python = any(
-                lang.lower() == "python"
+            # Check the repo against ALL languages CPG-lite supports
+            # (Python, TypeScript, JavaScript, Rust, Go) — not just
+            # Python. Bug caught by end-to-end bench (b2v is Rust+TS
+            # +JS only and was silently skipping CPG build).
+            _CPG_LANGUAGES = {
+                "python", "typescript", "javascript", "rust", "go",
+            }
+            _has_indexable = any(
+                lang.lower() in _CPG_LANGUAGES
                 for lang in (git_repo.detect_languages() or [])
             )
-            if _has_python:
+            if _has_indexable:
                 try:
                     import time as _t
                     from gitoma.cpg import build_index as _build_cpg
@@ -448,7 +455,7 @@ def run(
                     _cpg_ms = int((_t.perf_counter() - _cpg_t0) * 1000)
                     console.print(
                         f"[muted]CPG-lite: indexed "
-                        f"{_cpg_index.file_count()} Python files, "
+                        f"{_cpg_index.file_count()} indexable files, "
                         f"{_cpg_index.symbol_count()} symbols "
                         f"({_cpg_ms}ms)[/muted]"
                     )
