@@ -26,6 +26,7 @@ from gitoma.cpg._base import Reference, RefKind, Symbol, SymbolKind
 from gitoma.cpg.python_indexer import index_python_file
 from gitoma.cpg.queries import CPGIndex
 from gitoma.cpg.storage import Storage
+from gitoma.cpg.typescript_indexer import index_typescript_file
 
 __all__ = [
     "Reference",
@@ -36,10 +37,22 @@ __all__ = [
     "build_index",
     "DEFAULT_MAX_FILES",
     "DEFAULT_SKIP_DIRS",
+    "INDEXED_SUFFIXES",
 ]
 
 
 DEFAULT_MAX_FILES = 200
+
+# File extensions ↔ indexer dispatch table. Keep in sync with
+# ``gitoma.cpg.blast_radius.INDEXED_EXTENSIONS`` so a file we index
+# can also produce a BLAST RADIUS section. v0 = .py only;
+# v0.5-slim added .ts + .tsx via tree-sitter; future v0.5 adds
+# .js + .rs.
+INDEXED_SUFFIXES: dict[str, str] = {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+}
 
 DEFAULT_SKIP_DIRS: frozenset[str] = frozenset({
     ".git",
@@ -84,25 +97,28 @@ def build_index(
     """
     storage = Storage()
     indexed = 0
-    for abs_path, rel in _iter_python_files(root, skip_dirs):
+    for abs_path, rel, suffix in _iter_indexable_files(root, skip_dirs):
         if indexed >= max_files:
             break
-        index_python_file(abs_path, rel, storage)
+        if suffix == ".py":
+            index_python_file(abs_path, rel, storage)
+        elif suffix in (".ts", ".tsx"):
+            index_typescript_file(abs_path, rel, storage)
         indexed += 1
     storage.commit()
     return CPGIndex(storage)
 
 
-def _iter_python_files(
+def _iter_indexable_files(
     root: Path, skip_dirs: frozenset[str],
 ):
-    """Yield ``(abs_path, rel_path)`` for every ``*.py`` under ``root``,
-    pruning any directory whose basename is in ``skip_dirs``.
+    """Yield ``(abs_path, rel_path, suffix)`` for every file under
+    ``root`` whose suffix is in :data:`INDEXED_SUFFIXES`, pruning
+    any directory whose basename is in ``skip_dirs``.
 
-    The traversal is a manual ``os.walk``-shaped recursion (rather
-    than ``rglob``) so we can prune entire subtrees without first
-    walking into them — important when ``.venv/`` or ``node_modules/``
-    lives under ``root``.
+    Manual recursion (rather than ``rglob``) so we can prune entire
+    subtrees without descending — important when ``.venv/`` or
+    ``node_modules/`` lives under ``root``.
     """
     root = root.resolve()
 
@@ -116,8 +132,8 @@ def _iter_python_files(
                 if entry.name in skip_dirs or entry.name.startswith("."):
                     continue
                 yield from _walk(entry)
-            elif entry.is_file() and entry.suffix == ".py":
+            elif entry.is_file() and entry.suffix in INDEXED_SUFFIXES:
                 rel = entry.relative_to(root).as_posix()
-                yield entry, rel
+                yield entry, rel, entry.suffix
 
     yield from _walk(root)

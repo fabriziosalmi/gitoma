@@ -35,7 +35,8 @@ CREATE TABLE symbols (
     name TEXT NOT NULL,
     qualified_name TEXT NOT NULL,
     parent_id INTEGER,
-    is_public INTEGER NOT NULL
+    is_public INTEGER NOT NULL,
+    language TEXT NOT NULL DEFAULT 'python'
 );
 CREATE TABLE refs (
     symbol_id INTEGER,
@@ -93,13 +94,15 @@ class Storage:
         cur = self._conn.execute(
             """
             INSERT INTO symbols
-                (file, line, col, kind, name, qualified_name, parent_id, is_public)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (file, line, col, kind, name, qualified_name,
+                 parent_id, is_public, language)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sym.file, sym.line, sym.col, sym.kind.value,
                 sym.name, sym.qualified_name, sym.parent_id,
                 1 if sym.is_public else 0,
+                sym.language,
             ),
         )
         return int(cur.lastrowid or 0)
@@ -236,6 +239,7 @@ def _row_to_symbol(row: sqlite3.Row) -> Symbol:
         qualified_name=str(row["qualified_name"]),
         parent_id=int(row["parent_id"]) if row["parent_id"] is not None else None,
         is_public=bool(row["is_public"]),
+        language=str(row["language"]),
     )
 
 

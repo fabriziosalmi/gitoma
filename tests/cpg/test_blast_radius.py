@@ -99,3 +99,40 @@ def test_render_skips_non_python_paths_silently(tmp_path: Path) -> None:
 def test_render_handles_empty_input_list(tmp_path: Path) -> None:
     idx = _build(tmp_path, {"a.py": "def foo(): pass\n"})
     assert render_blast_radius_block([], idx) == ""
+
+
+# ── v0.5-slim: TypeScript coverage ─────────────────────────────────
+
+
+def test_render_recognises_ts_files(tmp_path: Path) -> None:
+    """A .ts file with public symbols should produce a section just
+    like a .py file would. Verifies blast_radius doesn't filter
+    out TypeScript paths."""
+    from gitoma.cpg.storage import Storage
+    from gitoma.cpg.typescript_indexer import index_typescript_file
+    from gitoma.cpg.queries import CPGIndex
+    a = tmp_path / "a.ts"
+    a.write_text(
+        "export function helper(): void {}\n"
+        "export interface User { id: number; }\n"
+    )
+    s = Storage()
+    index_typescript_file(a, "a.ts", s)
+    idx = CPGIndex(s)
+    block = render_blast_radius_block(["a.ts"], idx)
+    assert "BLAST RADIUS" in block
+    assert "helper" in block
+    assert "User" in block  # interface should also surface
+
+
+def test_render_recognises_tsx_files(tmp_path: Path) -> None:
+    from gitoma.cpg.storage import Storage
+    from gitoma.cpg.typescript_indexer import index_typescript_file
+    from gitoma.cpg.queries import CPGIndex
+    f = tmp_path / "Comp.tsx"
+    f.write_text("export function Button(): void {}\n")
+    s = Storage()
+    index_typescript_file(f, "Comp.tsx", s)
+    idx = CPGIndex(s)
+    block = render_blast_radius_block(["Comp.tsx"], idx)
+    assert "Button" in block

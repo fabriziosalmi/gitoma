@@ -8,6 +8,34 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **CPG-lite v0.5-slim — TypeScript indexer** (`gitoma/cpg/typescript_indexer.py`):
+  extends the v0 Python-only CPG to TypeScript via `tree-sitter` +
+  `tree-sitter-typescript`. Same Symbol/Reference/Import row shapes
+  as Python (additive `language` column on the storage table; v0
+  rows default to `"python"`, TS rows carry `"typescript"`). Two
+  new SymbolKind values (`INTERFACE`, `TYPE_ALIAS`) for TS
+  declarations with no Python analogue. Coverage: function /
+  class / method / interface / type-alias declarations, named +
+  default + namespace imports, calls + member access + `new X(...)`
+  constructor refs, `extends` + `implements` heritage clauses.
+  Indexer dispatches `.ts` → `language_typescript()` grammar,
+  `.tsx` → `language_tsx()` grammar so JSX files parse cleanly.
+  Resolver gained TS path-based import handling: `./other` /
+  `../utils/helper` resolve relative to the importing file's
+  directory through the canonical Node module-resolution lite-set
+  (`<base>.ts`, `<base>.tsx`, `<base>/index.ts`, `<base>/index.tsx`).
+  Bare specifiers (`react`, `@/components/Button`) stay
+  unresolved — needs `tsconfig.json paths` config which is v0.5
+  expansion. `build_index()` now walks `.py` + `.ts` + `.tsx` in
+  one pass with the right per-extension dispatch; `BLAST RADIUS`
+  block in the worker prompt fires on TS file_hints exactly as it
+  does on Python. Bench artifact at
+  `tests/bench/cpg_lite_v05_slim/index_demo_output.txt` (b2v live
+  build: 3 .ts files / 14 symbols / 50 refs / 17ms). Out of scope
+  for slim (deferred to v0.5 / v0.5-expansion): plain JavaScript
+  (`.js`/`.mjs`/`.cjs`), Rust, JSX-as-references, type-level
+  references, TS namespaces, tsconfig path resolution.
+
 - **CPG-lite v0 — Python symbol+reference index** (`gitoma/cpg/`):
   first concrete cut on the horizon CPG 2.0 path. Pure stdlib `ast`
   parser + in-memory SQLite, mono-language (Python only), no caching

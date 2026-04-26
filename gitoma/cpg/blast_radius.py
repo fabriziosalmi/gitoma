@@ -24,7 +24,11 @@ from __future__ import annotations
 from gitoma.cpg._base import RefKind, SymbolKind
 from gitoma.cpg.queries import CPGIndex
 
-__all__ = ["render_blast_radius_block", "MAX_CALLERS_PER_SYMBOL"]
+__all__ = [
+    "render_blast_radius_block",
+    "MAX_CALLERS_PER_SYMBOL",
+    "INDEXED_EXTENSIONS",
+]
 
 
 MAX_CALLERS_PER_SYMBOL = 5
@@ -32,9 +36,24 @@ MAX_CALLERS_PER_SYMBOL = 5
 predictable on heavily-used symbols (``LLMClient`` has 40+ callers
 in gitoma; listing all of them would dwarf the patch context)."""
 
+
+INDEXED_EXTENSIONS: frozenset[str] = frozenset({
+    ".py",     # CPG-lite v0
+    ".ts",     # CPG-lite v0.5-slim
+    ".tsx",    # CPG-lite v0.5-slim
+})
+"""File extensions the renderer recognises as indexable. Anything
+outside this set produces no BLAST RADIUS section. Future v0.5 / v1
+expansions add ``.js``, ``.mjs``, ``.cjs``, ``.rs`` here."""
+
+
 _RELEVANT_KINDS = frozenset({
     SymbolKind.FUNCTION, SymbolKind.CLASS, SymbolKind.METHOD,
     SymbolKind.ASSIGNMENT,
+    # v0.5-slim: TS interfaces + type aliases are load-bearing
+    # cross-file types — including them lets the worker see when
+    # changing a User interface affects every file that imports it.
+    SymbolKind.INTERFACE, SymbolKind.TYPE_ALIAS,
 })
 
 
@@ -53,12 +72,15 @@ def render_blast_radius_block(
             Non-Python entries are silently skipped.
         index: the CPGIndex built once at run start.
     """
-    py_files = [p for p in file_paths if p.endswith(".py")]
-    if not py_files:
+    indexable = [
+        p for p in file_paths
+        if any(p.endswith(ext) for ext in INDEXED_EXTENSIONS)
+    ]
+    if not indexable:
         return ""
 
     sections: list[str] = []
-    for file in py_files:
+    for file in indexable:
         symbols = [
             s for s in index.get_symbols_in_file(file)
             if s.kind in _RELEVANT_KINDS and s.is_public

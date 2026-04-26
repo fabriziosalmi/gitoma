@@ -29,6 +29,9 @@ def test_symbol_kind_values_are_strings_for_sqlite_storage() -> None:
     assert SymbolKind.MODULE.value == "module"
     assert SymbolKind.ASSIGNMENT.value == "assignment"
     assert SymbolKind.IMPORT.value == "import"
+    # v0.5-slim additions for TypeScript declarations.
+    assert SymbolKind.INTERFACE.value == "interface"
+    assert SymbolKind.TYPE_ALIAS.value == "type_alias"
 
 
 def test_ref_kind_values_are_strings() -> None:
@@ -79,6 +82,24 @@ def test_symbol_equality_value_based() -> None:
     b = _mk_symbol()
     assert a == b
     assert hash(a) == hash(b)
+
+
+def test_symbol_language_defaults_to_python_for_back_compat() -> None:
+    """v0 callers don't pass ``language``; default = ``"python"``
+    so the v0.5-slim schema change is backward-compatible."""
+    sym = _mk_symbol()
+    assert sym.language == "python"
+
+
+def test_symbol_language_can_be_overridden_for_typescript() -> None:
+    sym = Symbol(
+        id=0, file="x.ts", line=1, col=0,
+        kind=SymbolKind.INTERFACE, name="User",
+        qualified_name="x.User", parent_id=None, is_public=True,
+        language="typescript",
+    )
+    assert sym.language == "typescript"
+    assert sym.kind is SymbolKind.INTERFACE
 
 
 def test_symbol_with_parent_id_chains_to_class() -> None:

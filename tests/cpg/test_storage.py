@@ -117,6 +117,32 @@ def test_parent_id_persists_for_method() -> None:
     assert method.parent_id == cls_id
 
 
+def test_language_defaults_to_python_for_back_compat() -> None:
+    """v0 callers don't pass ``language``; the schema default
+    keeps existing tests working unchanged."""
+    s = Storage()
+    sid = s.insert_symbol(_mk_sym("foo"))
+    got = s.get_symbol_by_id(sid)
+    assert got is not None
+    assert got.language == "python"
+
+
+def test_language_round_trips_for_typescript() -> None:
+    """v0.5-slim TS records pass ``language="typescript"`` and
+    must come back unchanged through SQLite."""
+    s = Storage()
+    sid = s.insert_symbol(Symbol(
+        id=0, file="x.ts", line=1, col=0,
+        kind=SymbolKind.INTERFACE, name="User",
+        qualified_name="x.User", parent_id=None,
+        is_public=True, language="typescript",
+    ))
+    got = s.get_symbol_by_id(sid)
+    assert got is not None
+    assert got.language == "typescript"
+    assert got.kind is SymbolKind.INTERFACE
+
+
 def test_is_public_round_trips_as_bool() -> None:
     """SQLite stores INTEGER but the helper must hand callers a real
     Python bool — downstream code uses it in conditionals."""

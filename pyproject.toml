@@ -43,6 +43,14 @@ dependencies = [
     # Also lifts the soft-import in RepoBrief / syntax check paths
     # — yaml was opt-in before, now guaranteed.
     "PyYAML>=6.0",
+    # CPG-lite v0.5-slim — TypeScript indexer needs tree-sitter +
+    # the precompiled tree-sitter-typescript grammar. Both are
+    # opt-in at runtime: import is local to typescript_indexer.py
+    # and build_index() degrades gracefully when the dep is
+    # missing (.ts files just aren't indexed). Pinned to current
+    # major to avoid a surprise grammar break on a 0.x bump.
+    "tree-sitter>=0.25,<1.0",
+    "tree-sitter-typescript>=0.23,<1.0",
 ]
 
 [project.scripts]

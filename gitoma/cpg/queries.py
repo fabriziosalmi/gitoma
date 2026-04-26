@@ -171,6 +171,15 @@ class CPGIndex:
                 ]
                 if len(module_matches) == 1:
                     return module_matches[0].id
+                # TS path-based imports (./other, ../utils/helper):
+                # resolve relative to the importing file's directory,
+                # then test candidate paths with TS suffixes.
+                if module_name.startswith(("./", "../")):
+                    ts_match = _resolve_ts_path_match(
+                        candidates, file, module_name,
+                    )
+                    if ts_match is not None:
+                        return ts_match.id
 
         # 3. Global fallback — exactly one definition anywhere.
         global_defs = [
@@ -186,4 +195,57 @@ class CPGIndex:
 _DEFINING_KINDS = frozenset({
     SymbolKind.FUNCTION, SymbolKind.CLASS,
     SymbolKind.METHOD, SymbolKind.ASSIGNMENT,
+    # v0.5-slim: TS interfaces + type aliases ARE definitions for
+    # resolution purposes — an import of an interface name should
+    # resolve to its declaration.
+    SymbolKind.INTERFACE, SymbolKind.TYPE_ALIAS,
 })
+
+
+def _resolve_ts_relative_path(
+    importing_file: str, module_name: str,
+) -> list[str]:
+    """Return the list of candidate file paths a TS relative import
+    of ``module_name`` from ``importing_file`` could resolve to.
+
+    Mirrors Node's module resolution lite-version:
+      * ``./foo`` → ``foo.ts`` / ``foo.tsx`` / ``foo/index.ts`` /
+        ``foo/index.tsx`` in the importing file's directory.
+      * ``../foo`` → same, one directory up.
+      * Multi-segment ``./components/Button`` honours each segment.
+    """
+    from pathlib import PurePosixPath
+    base = PurePosixPath(importing_file).parent
+    target = (base / module_name).as_posix()
+    # Normalise ``./`` and ``../`` segments without touching the FS.
+    parts: list[str] = []
+    for seg in target.split("/"):
+        if seg == "" or seg == ".":
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    base_path = "/".join(parts)
+    return [
+        f"{base_path}.ts",
+        f"{base_path}.tsx",
+        f"{base_path}/index.ts",
+        f"{base_path}/index.tsx",
+    ]
+
+
+# Bound to CPGIndex below — defined at module level so unit tests
+# can exercise the path math without instantiating an index.
+def _resolve_ts_path_match(
+    candidates: list[Symbol], importing_file: str, module_name: str,
+) -> Symbol | None:
+    """Pick the candidate Symbol whose file matches one of the
+    canonical TS resolution paths. Returns ``None`` when zero or
+    >1 match (ambiguity = unresolved, same as Python rule)."""
+    targets = _resolve_ts_relative_path(importing_file, module_name)
+    matches = [c for c in candidates if c.file in targets]
+    if len(matches) == 1:
+        return matches[0]
+    return None

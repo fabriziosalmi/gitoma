@@ -1,0 +1,62 @@
+CPG-lite v0.5-slim — bench artifact (b2v multi-language)
+================================================================
+
+Repo root:        /tmp/b2v_bench
+Files indexed:    3
+Symbols emitted:  14
+References:       50
+Build time:       17ms
+
+TypeScript files discovered: 3
+  - src/decoder.test.ts
+  - src/utils.test.ts
+  - src/encoder.test.ts
+
+Each section below shows the BLAST RADIUS the worker
+would see for a subtask touching that TS file.
+
+================================================================
+
+### TARGET: src/decoder.test.ts
+
+== BLAST RADIUS (CPG-lite) ==
+The CPG-lite index found callers / consumers of symbols defined in the files you are about to modify. Treat any signature change to a listed symbol as a cross-file edit: either preserve the signature OR also update every caller below. Removing or renaming a listed symbol without updating its callers WILL break the build.
+
+Modifying src/decoder.test.ts touches the following defined symbols:
+  decoder() — assignment (src/decoder.test.ts:4)
+    no cross-file callers in indexed scope.
+  encodedData() — assignment (src/decoder.test.ts:11)
+    no cross-file callers in indexed scope.
+  decodedText() — assignment (src/decoder.test.ts:12)
+    no cross-file callers in indexed scope.
+  invalidData() — assignment (src/decoder.test.ts:19)
+    no cross-file callers in indexed scope.
+  emptyResult() — assignment (src/decoder.test.ts:25)
+    no cross-file callers in indexed scope.
+  input() — assignment (src/decoder.test.ts:32)
+    no cross-file callers in indexed scope.
+  output() — assignment (src/decoder.test.ts:33)
+    no cross-file callers in indexed scope.
+
+----------------------------------------------------------------
+
+### TARGET: src/utils.test.ts
+
+(no BLAST RADIUS — file empty / private-only / no public exports)
+
+----------------------------------------------------------------
+
+### TARGET: src/encoder.test.ts
+
+== BLAST RADIUS (CPG-lite) ==
+The CPG-lite index found callers / consumers of symbols defined in the files you are about to modify. Treat any signature change to a listed symbol as a cross-file edit: either preserve the signature OR also update every caller below. Removing or renaming a listed symbol without updating its callers WILL break the build.
+
+Modifying src/encoder.test.ts touches the following defined symbols:
+  encoder() — assignment (src/encoder.test.ts:11)
+    no cross-file callers in indexed scope.
+  originalText() — assignment (src/encoder.test.ts:12)
+    no cross-file callers in indexed scope.
+  encodedData() — assignment (src/encoder.test.ts:14)
+    no cross-file callers in indexed scope.
+
+----------------------------------------------------------------

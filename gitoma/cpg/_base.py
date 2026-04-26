@@ -23,14 +23,20 @@ __all__ = ["SymbolKind", "RefKind", "Symbol", "Reference", "compose_qualified_na
 
 class SymbolKind(str, Enum):
     """The kind of a Symbol record. String-valued so SQLite stores
-    the human-readable form (better debuggability than enum integers)."""
+    the human-readable form (better debuggability than enum integers).
 
-    FUNCTION = "function"      # top-level def
-    METHOD = "method"          # def inside a class
+    v0.5-slim added INTERFACE + TYPE_ALIAS for TypeScript declarations
+    that have no Python equivalent. Both are additive — Python code
+    paths are unaffected."""
+
+    FUNCTION = "function"      # top-level def / function_declaration
+    METHOD = "method"          # def inside a class / method_definition
     CLASS = "class"
     MODULE = "module"          # the file itself, root of the qualified name
-    ASSIGNMENT = "assignment"  # module-level Name = ... (constants, aliases)
+    ASSIGNMENT = "assignment"  # module-level Name = ... / lexical const|let
     IMPORT = "import"          # bound name from `import` / `from ... import`
+    INTERFACE = "interface"    # TS `interface X { ... }` (no Python analogue)
+    TYPE_ALIAS = "type_alias"  # TS `type X = ...` (no Python analogue)
 
 
 class RefKind(str, Enum):
@@ -54,6 +60,10 @@ class Symbol:
     ``parent_id`` chains methods → classes → modules. ``is_public``
     is the leading-underscore heuristic; consumers should treat it
     as advisory, not authoritative.
+
+    ``language`` defaults to ``"python"`` for back-compat with v0
+    code that didn't pass it. v0.5-slim TS records pass
+    ``language="typescript"``.
     """
 
     id: int
@@ -65,6 +75,7 @@ class Symbol:
     qualified_name: str   # "package.module.Class.method"
     parent_id: int | None
     is_public: bool
+    language: str = "python"
 
 
 @dataclass(frozen=True)
