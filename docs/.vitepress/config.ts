@@ -114,6 +114,7 @@ export default defineConfig({
           items: [
             { text: 'Overview', link: '/architecture/overview' },
             { text: 'Pipeline + state machine', link: '/architecture/pipeline' },
+            { text: 'Pipeline map (printable)', link: '/architecture/pipeline-map' },
             { text: 'Critic stack', link: '/architecture/critic-stack' },
             { text: 'Security + threat model', link: '/architecture/security' },
             { text: 'Contributing', link: '/architecture/contributing' },
