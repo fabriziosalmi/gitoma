@@ -603,6 +603,67 @@ become a SAFETY NET for the cases where a README subtask DOES
 slip through (multi-hint that legitimately includes README, or
 genuine Documentation-cited cases). Layer-B is the first line.
 
+## Ψ-lite — universal fitness function (Γ + Ω components)
+
+**Catches**: patches that survive every binary structural guard
+(G1-G14, BuildAnalyzer, G8 test regression) but score low on
+quality heuristics. Validated empirically: morning's PR #27
+README (literal `\n` corruption + invented `b2v.github.io` URLs)
+passed every guard except G14 (which only fired on the URL part);
+Ψ-lite would have blocked the entire patch with `Ω=0.60` slop
+score → `Ψ=0.40 < 0.5` threshold.
+
+**Mechanism**: pure-math, no LLM, no network. Two component
+scores per touched file, aggregated `min` across files:
+
+- **Γ (grounding)**: fraction of "evidence tokens" (framework
+  mentions in docs via G11's pattern map, package refs in JS
+  configs via G12's extractor) that are GROUNDED in the
+  fingerprint's declared deps + frameworks. Source files return
+  1.0 (no Γ signal in Ψ-lite — CPG-lite would add it). Returns
+  1.0 when no evidence tokens to score (presume innocent).
+
+- **Ω (slop)**: heuristic count of known-bad surface patterns,
+  normalised 0-1:
+  - Literal `\n` text inside fenced code blocks (each occurrence
+    contributes; 3+ on a line = 0.5 cap per block)
+  - Triple-blank-line runs (each = 0.05, capped 0.3)
+  - Trailing whitespace fraction (capped 0.2)
+  - Source file (`.py/.rs/.ts` etc.) wrapped in markdown fence
+    (0.6 — strong signal of "model returned wrong format")
+  - Near-empty post-modify on source file (0.4)
+
+Final score: `Ψ = α·Γ - λ·Ω`. Defaults `α=1.0, λ=1.0,
+threshold=0.5` — semantically "grounding and slop equally
+weighted, patch must score at least half". Aggregated `min`
+across touched files (worst file dominates).
+
+**Position in pipeline**: BETWEEN structural guards (G2/G7/G10/
+G11/G12/G13/G14, BuildAnalyzer, G8 test regression) and LLM
+critics (panel, devil, Q&A). On low Ψ → revert+retry without
+burning critic LLM tokens. Saves cost on borderline patches.
+
+**Calibration data** (b2v PRs measured 2026-04-26 AM):
+- PR #28/#29/#30 (clean post-stack PRs): Ψ ∈ [0.935, 1.000]
+- PR #27 README (morning destroyed): Ψ = 0.400 → would BLOCK
+- Synthetic React-in-Rust hallucination: Ψ = 0.000 → would BLOCK
+
+**Opt-in via `GITOMA_PSI_LITE=on`** (default off — feature is new
+enough that we want operator consent before changing the gate
+behavior). Threshold/weights tunable via
+`GITOMA_PSI_LITE_THRESHOLD`, `GITOMA_PSI_ALPHA`, `GITOMA_PSI_LAMBDA`.
+Trace events: `psi_lite.scored` (always when enabled),
+`critic_psi_lite.fail` (on block).
+
+**What Ψ-lite is NOT**:
+- It's NOT a replacement for the structural guards — they catch
+  hard binary failures (broken syntax, dropped functions, fake
+  URLs). Ψ-lite catches gradient quality issues.
+- It's NOT the full horizon Ψ (which adds Φ semantic-fitness +
+  ΔI information-gain via CPG). Lite version is Γ + Ω only.
+- It's NOT wired to the refiner apply path (only worker apply
+  for v1). Refiner gets Ψ telemetry but no gate yet.
+
 ## Q&A self-consistency phase (orthogonal to the stack)
 
 Not a guard against worker slop — a separate post-meta gate that asks
@@ -784,3 +845,4 @@ existing ones.
 | 2026-04-25 AM | b2v PRs #24/#26/#27 | G13 (doc-preservation) — README destruction recurred in 3 of 4 shipped PRs across all model sizes (gemma-2B/4B + qwen3-8B). Two deterministic checks: code-block char preservation + literal `\n` corruption signature. Closes a class self-review caught only 1 of 4 times. |
 | 2026-04-25 AM | b2v PRs #24/#27 | G14 (URL/path grounding) — closes the content-grounding trilogy after G11/G12/G13. Two-tier external URL check (DNS → HEAD-404) catches invented `*.github.io` subdomains; relative-path filesystem check catches invented `docs/guide/code/*` paths. Carry-over links exempt. Opt-out via `GITOMA_URL_GROUNDING_OFFLINE`. |
 | 2026-04-25 PM | rung-0 backlog + b2v PR matrix | Layer-A `synthesize_real_bug_task` + Layer-B `banish_readme_only_subtasks` — deterministic plan post-processors that fire BEFORE worker apply. A: synthesize T000 when planner ignored failing tests. B: drop README-only subtasks unless Documentation metric explicitly cites README. Plus planner-prompt HARD RULE on README. Catches the planner-side root cause of 3 of 4 b2v PR README destructions. |
+| 2026-04-26 AM | b2v bench replay + horizon-Ψ memory | Ψ-lite (`gitoma/worker/psi_score.py`) — pure-math Γ (grounding fraction) + Ω (slop heuristics) → `Ψ = α·Γ - λ·Ω`. Scalar gate between structural guards and LLM critics. Opt-in via `GITOMA_PSI_LITE=on`. Calibrated against PR #27 (README destroyed: Ψ=0.40 → BLOCK) vs PR #28/#29/#30 clean (Ψ ≥ 0.935 → PASS). |

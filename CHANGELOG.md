@@ -4,6 +4,37 @@ All notable changes to gitoma are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning is
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Ψ-lite — universal fitness function (Γ + Ω components)**
+  (`gitoma/worker/psi_score.py`): scalar quality gate between
+  structural guards and LLM critics. `Ψ = α·Γ - λ·Ω` where Γ is
+  the grounding fraction (mentioned framework/package refs that
+  appear in fingerprint deps, reusing G11/G12 extraction logic)
+  and Ω is the slop penalty (heuristic count of literal-`\n`
+  in code blocks, triple-blank-line runs, trailing whitespace,
+  source-file-wrapped-in-markdown-fence, near-empty source).
+  Aggregated `min` across touched files (worst dominates).
+  Defaults `α=1.0, λ=1.0, threshold=0.5`. **Opt-in via
+  `GITOMA_PSI_LITE=on`**; threshold/weights tunable via
+  `GITOMA_PSI_LITE_THRESHOLD`, `GITOMA_PSI_ALPHA`,
+  `GITOMA_PSI_LAMBDA`. Calibrated empirically against the b2v
+  PR matrix: PR #27 README (literal `\n` corruption) scores
+  Ψ=0.40 (would block), clean PRs #28/#29/#30 score Ψ ≥ 0.935.
+  New trace events: `psi_lite.scored` (always when enabled),
+  `critic_psi_lite.fail` (on block). Wired into worker apply
+  path post-G8; refiner not yet (telemetry only).
+
+### Tests
+
+- 976 passing (was 950 at v0.4.0). +26 in `test_psi_score.py`:
+  Γ for grounded/hallucinated/mixed/source-neutral/no-fingerprint;
+  Ω for clean/literal-`\n`/triple-blanks/source-wrapped/near-empty/
+  clamped-at-1; full Ψ aggregation; env-driven gate
+  on/off/threshold/weights/invalid-fallback.
+
 ## [0.4.0] — 2026-04-25
 
 The "planner-time discipline" release. Three new guards (G12, G13, G14)

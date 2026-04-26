@@ -554,6 +554,57 @@ class WorkerAgent:
                     compile_error_feedback = regression_err
                     continue
 
+                # Ψ-lite gate: last quality check before commit. Pure-
+                # math scoring (Γ grounding + Ω slop) — composes WITH
+                # the structural guards above as the scalar layer that
+                # catches "passed every binary check but is meh".
+                # Opt-in via GITOMA_PSI_LITE=on; silent pass otherwise.
+                # Always emit telemetry when the score IS computed
+                # (even on pass) so we can tune thresholds from data.
+                from gitoma.worker.psi_score import (
+                    compute_psi_lite, evaluate_psi_gate, _is_enabled as _psi_enabled,
+                )
+                if _psi_enabled():
+                    psi_score, psi_breakdown = compute_psi_lite(
+                        self._git.root, touched, self._repo_fingerprint,
+                    )
+                    if psi_breakdown:
+                        current_trace().emit(
+                            "psi_lite.scored",
+                            subtask_id=subtask.id,
+                            attempt=attempt,
+                            psi=psi_score,
+                            weakest_file=psi_breakdown.get("weakest_file", ""),
+                        )
+                    psi_block = evaluate_psi_gate(
+                        self._git.root, touched, self._repo_fingerprint,
+                    )
+                    if psi_block is not None:
+                        bad_path, msg, _br = psi_block
+                        err_text = (
+                            f"Ψ-lite gate failed on {bad_path}: {msg} "
+                            "Re-emit a patch with content that grounds "
+                            "against the repo's actual deps and avoids "
+                            "the listed slop patterns."
+                        )
+                        current_trace().emit(
+                            "critic_psi_lite.fail",
+                            subtask_id=subtask.id,
+                            attempt=attempt,
+                            path=bad_path,
+                            psi=psi_score,
+                            error=msg[:300],
+                        )
+                        if attempt >= max_attempts:
+                            self._revert_touched(touched)
+                            raise ValueError(
+                                f"Ψ-lite gate failed after {max_attempts} "
+                                f"attempt(s) on {bad_path}. Last Ψ={psi_score:.2f}"
+                            )
+                        self._revert_touched(touched)
+                        compile_error_feedback = err_text
+                        continue
+
                 if attempt > 1:
                     current_trace().emit(
                         "critic_build_retry.success",
