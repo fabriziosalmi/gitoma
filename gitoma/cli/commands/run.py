@@ -449,6 +449,33 @@ def run(
                 from gitoma.planner.planner import PlannerAgent
                 from gitoma.planner.llm_client import LLMError
 
+                # Vertical-mode scope filter: when GITOMA_SCOPE=docs is
+                # set (by the `gitoma docs` command), filter the audit
+                # to doc-relevant metrics ONLY before the planner sees
+                # it. This prevents the planner from proposing tasks
+                # for failing Build/Test/Security/etc. metrics that
+                # are out-of-scope for the docs vertical (avoids the
+                # lws dry-run failure mode where a security false-
+                # positive caused T001 to attempt edits to lws.py).
+                from gitoma.planner.scope_filter import (
+                    active_scope as _active_scope,
+                    filter_metrics_to_doc_scope as _filter_metrics_docs,
+                )
+                _scope = _active_scope()
+                if _scope == "docs":
+                    _scope_summary = _filter_metrics_docs(report)
+                    if _scope_summary:
+                        console.print(
+                            f"[muted]Scope=docs: kept "
+                            f"{_scope_summary['metrics_kept']}, "
+                            f"dropped {_scope_summary['metrics_dropped']}[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _st
+                            _st().emit("scope.metrics_filtered", **_scope_summary)
+                        except Exception:
+                            pass
+
                 console.print(
                     f"[muted]Asking {config.lmstudio.model} to generate improvement plan…[/muted]"
                 )
@@ -602,6 +629,33 @@ def run(
                         try:
                             from gitoma.core.trace import current as _rbt2
                             _rbt2().emit("plan.readme_banished", **_readme_banish)
+                        except Exception:
+                            pass
+
+                # ── Vertical scope filter: docs-only mode ────────────────────
+                # When GITOMA_SCOPE=docs (set by `gitoma docs`), drop every
+                # subtask whose file_hints contain any non-doc path. Stricter
+                # than Layer-B (which only drops README-only): here a
+                # subtask hinting BOTH a doc and a source file is OUT —
+                # under the docs vertical, source touches are out of scope.
+                if plan and plan.tasks and _scope == "docs":
+                    from gitoma.planner.scope_filter import (
+                        filter_plan_to_doc_scope as _filter_plan_docs,
+                    )
+                    _scope_plan_summary = _filter_plan_docs(plan)
+                    if _scope_plan_summary:
+                        _names = [
+                            f"{d['subtask_id']}({','.join(d['file_hints'][:1])})"
+                            for d in _scope_plan_summary["dropped_subtasks"][:4]
+                        ]
+                        console.print(
+                            f"[muted]Scope=docs: dropped "
+                            f"{_scope_plan_summary['drop_count']} subtask(s) "
+                            f"— {', '.join(_names)}[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _sft
+                            _sft().emit("scope.plan_filtered", **_scope_plan_summary)
                         except Exception:
                             pass
 
