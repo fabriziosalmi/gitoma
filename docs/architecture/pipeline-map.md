@@ -138,27 +138,29 @@ per gitoma run; everything else fail-open.
 
 ```mermaid
 flowchart TB
-  subgraph Occam[Occam Observer process - Go]
-    Gateway[HTTP Gateway port 9999<br/>FastAPI-equivalent in Go]
+  subgraph Occam["Occam Observer process - Go"]
+    Gateway["HTTP Gateway port 9999<br/>FastAPI-equivalent in Go"]
 
-    subgraph Handlers[Coordination handlers]
-      H1[/repo/fingerprint<br/>parse Cargo.toml package.json<br/>pyproject.toml go.mod<br/>infer frameworks from deps]
-      H2[/repo/agent-log<br/>SELECT from observations<br/>filtered by since + limit + run_id]
-      H3[/observation POST<br/>INSERT into observations<br/>closed-set outcome + failure_modes]
-      H4[/repo/context<br/>git ls-files languages<br/>+ git log churn<br/>+ stable files]
-      H5[/repo/blame /repo/churn<br/>git wrappers]
-      H6[/file/imports /file/exports<br/>Python AST analyzer]
-      H7[/claim<br/>multi-agent file lock]
+    subgraph Handlers["Coordination handlers"]
+      H1["GET /repo/fingerprint<br/>parse Cargo.toml package.json<br/>pyproject.toml go.mod<br/>infer frameworks from deps"]
+      H2["GET /repo/agent-log<br/>SELECT from observations<br/>filtered by since + limit + run_id"]
+      H3["POST /observation<br/>INSERT into observations<br/>closed-set outcome + failure_modes"]
+      H4["GET /repo/context<br/>git ls-files languages<br/>+ git log churn<br/>+ stable files"]
+      H5["GET /repo/blame and churn<br/>git wrappers"]
+      H6["GET /file/imports and exports<br/>Python AST analyzer"]
+      H7["claim endpoints<br/>multi-agent file lock"]
     end
 
-    subgraph Storage[Persistence]
-      DB[(SQLite WAL<br/>observations table<br/>claims table)]
-      State[/tmp/occam_state.json<br/>+ snapshots.db<br/>filesystem snapshots]
+    subgraph Storage["Persistence"]
+      DB[("SQLite WAL<br/>observations table<br/>claims table")]
+      State["occam_state.json<br/>+ snapshots.db<br/>filesystem snapshots"]
     end
 
-    subgraph Engine[telemetry_observer.sh]
-      Watcher[bash engine<br/>fswatch or inotify<br/>debounced file watcher]
+    subgraph Engine["telemetry_observer.sh"]
+      Watcher["bash engine<br/>fswatch or inotify<br/>debounced file watcher"]
     end
+
+    Filesystem[("target repo<br/>read-only")]
 
     Gateway --> H1
     Gateway --> H2
@@ -170,9 +172,9 @@ flowchart TB
 
     H2 -->|read| DB
     H3 -->|write| DB
-    H7 -->|read+write| DB
+    H7 -->|read and write| DB
 
-    H1 -->|read| Filesystem[(target repo<br/>read-only)]
+    H1 -->|read| Filesystem
     H4 -->|git CLI| Filesystem
     H5 -->|git CLI| Filesystem
     H6 -->|read| Filesystem
@@ -181,7 +183,7 @@ flowchart TB
     Gateway -->|spawns| Watcher
   end
 
-  Client[gitoma client<br/>OccamClient.py] -->|HTTP| Gateway
+  Client["gitoma client<br/>OccamClient.py"] -->|HTTP| Gateway
 ```
 
 ### Per-run gitoma ↔ Occam wire (sequence)
