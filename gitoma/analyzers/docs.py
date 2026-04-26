@@ -75,14 +75,70 @@ class DocsAnalyzer(BaseAnalyzer):
         else:
             suggestions.append("Add a docs/ directory or GitHub Wiki for project documentation")
 
-        # ── MkDocs / Sphinx / Docusaurus ───────────────────────────────────
-        doc_tool = self.file_exists("mkdocs.yml", "mkdocs.yaml", "conf.py", "docusaurus.config.js")
-        if doc_tool:
+        # ── Doc tool detection (broad set) ─────────────────────────────────
+        # CRITICAL: detect ALL common tools, not just MkDocs/Sphinx/
+        # Docusaurus. The lws case (2026-04-26) showed that when a
+        # repo has Jekyll on Pages but the analyzer doesn't know,
+        # the suggestion "Consider adding MkDocs" makes the planner
+        # propose creating a parallel doc system on top of the
+        # existing one. The planner has NO idea what's already
+        # there unless this analyzer surfaces it.
+        detected_tools: list[str] = []
+        for filename, tool_name in (
+            # MkDocs
+            ("mkdocs.yml", "MkDocs"),
+            ("mkdocs.yaml", "MkDocs"),
+            # Sphinx
+            ("docs/conf.py", "Sphinx"),
+            ("conf.py", "Sphinx"),
+            # Docusaurus
+            ("docusaurus.config.js", "Docusaurus"),
+            ("docusaurus.config.ts", "Docusaurus"),
+            ("docusaurus.config.mjs", "Docusaurus"),
+            # VitePress
+            ("docs/.vitepress/config.js", "VitePress"),
+            ("docs/.vitepress/config.ts", "VitePress"),
+            ("docs/.vitepress/config.mjs", "VitePress"),
+            (".vitepress/config.js", "VitePress"),
+            (".vitepress/config.ts", "VitePress"),
+            # Jekyll (GitHub Pages default)
+            ("docs/_config.yml", "Jekyll"),
+            ("_config.yml", "Jekyll"),
+            ("_config.yaml", "Jekyll"),
+            # Hugo
+            ("hugo.toml", "Hugo"),
+            ("hugo.yaml", "Hugo"),
+            ("config/_default/hugo.toml", "Hugo"),
+            # GitBook
+            ("book.json", "GitBook"),
+            (".gitbook.yaml", "GitBook"),
+            ("book.yaml", "GitBook"),
+            # Astro / Starlight
+            ("astro.config.mjs", "Astro"),
+            ("astro.config.ts", "Astro"),
+            # Nextra (Next-based docs)
+            ("theme.config.js", "Nextra"),
+            ("theme.config.tsx", "Nextra"),
+        ):
+            if (self.root / filename).exists() and tool_name not in detected_tools:
+                detected_tools.append(tool_name)
+        if detected_tools:
             score += 0.15
-            details_parts.append(f"doc tool: {doc_tool}")
+            details_parts.append(f"doc tool: {', '.join(detected_tools)}")
+            # When a tool exists, surface it loudly so the planner
+            # CANNOT propose installing a parallel one. The HARD RULE
+            # in the planner prompt + Layer-B + scope filter all
+            # benefit from this signal being explicit in details.
+            suggestions.append(
+                f"Existing doc tooling detected: {', '.join(detected_tools)}. "
+                f"Improvements MUST go INTO this tool's content/config — "
+                f"do NOT propose adding a parallel doc system "
+                f"(MkDocs/Sphinx/etc. on top of an existing site)."
+            )
         else:
             suggestions.append(
-                "Consider adding MkDocs (mkdocs.yml) or Sphinx for auto-generated docs"
+                "Consider adding MkDocs (mkdocs.yml), Sphinx, or VitePress "
+                "for auto-generated docs"
             )
 
         # ── Go / Rust / JS docs ────────────────────────────────────────────
