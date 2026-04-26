@@ -6,6 +6,28 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-26
+
+The "structural visibility" release. CPG-lite ships across 5
+languages (Python / TypeScript / JavaScript / Rust / Go), feeding
+the planner via Skeletal-signature view, the worker via BLAST
+RADIUS prompt block, and the scalar gate via Ψ-full's Φ + ΔI
+components. Three new structural critics close failure modes the
+previous stack missed: G15 sibling-config reconciliation (closes
+the b2v PR #32 lazy-config arc), G18 abandoned-helper, G19
+echo-chamber. Test Gen v1 lands as the 5th critic, autogenerating
+tests for shipped patches in the project's existing framework.
+Vertical mode refactored into a declarative registry (Castelletto
+Taglio A) — adding a vertical now costs ONE FILE.
+
+11 commits over one focused session: 950 → 1481 tests passing
+(+531 from net-new functionality). All new components are opt-in
+via env (`GITOMA_CPG_LITE`, `GITOMA_PSI_FULL`, `GITOMA_TEST_GEN`,
+`GITOMA_G18_ABANDONED`, `GITOMA_G19_ECHO_CHAMBER`) so existing
+benches and runs reproduce unchanged. Recommended:
+`LM_STUDIO_TIMEOUT=300` when running with the full stack on
+qwen3-8b-class models.
+
 ### Added
 
 - **G18 + G19 orphan-symbol detection**
