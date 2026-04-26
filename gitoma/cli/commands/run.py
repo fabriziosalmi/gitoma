@@ -850,6 +850,55 @@ def run(
             _compile_fix_mode = any(
                 m.name == "build" and m.status == "fail" for m in report.metrics
             )
+            # CPG-lite v0 — opt-in Python symbol+reference index.
+            # When GITOMA_CPG_LITE=on AND the repo has Python sources,
+            # build the index ONCE here so each subtask in PHASE 3 can
+            # query it (BLAST RADIUS prompt block in worker.py). Build
+            # failures are silent: log + continue without an index
+            # (graceful degradation, the worker treats None as "no
+            # CPG signal" without erroring).
+            _cpg_index = None
+            if (os.environ.get("GITOMA_CPG_LITE") or "").strip().lower() == "on":
+                _has_python = any(
+                    lang.lower() == "python"
+                    for lang in (git_repo.detect_languages() or [])
+                )
+                if _has_python:
+                    try:
+                        import time as _t
+                        from gitoma.cpg import build_index as _build_cpg
+                        _cpg_t0 = _t.perf_counter()
+                        _cpg_index = _build_cpg(git_repo.root)
+                        _cpg_ms = int((_t.perf_counter() - _cpg_t0) * 1000)
+                        console.print(
+                            f"[muted]CPG-lite: indexed "
+                            f"{_cpg_index.file_count()} Python files, "
+                            f"{_cpg_index.symbol_count()} symbols "
+                            f"({_cpg_ms}ms)[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _ct
+                            _ct().emit(
+                                "cpg.index_built",
+                                file_count=_cpg_index.file_count(),
+                                symbol_count=_cpg_index.symbol_count(),
+                                reference_count=_cpg_index.reference_count(),
+                                build_ms=_cpg_ms,
+                            )
+                        except Exception:
+                            pass
+                    except Exception as _exc:  # noqa: BLE001 — defensive
+                        console.print(
+                            f"[muted]CPG-lite: build failed "
+                            f"({type(_exc).__name__}); continuing without "
+                            f"BLAST RADIUS signal[/muted]"
+                        )
+                        try:
+                            from gitoma.core.trace import current as _ct2
+                            _ct2().exception("cpg.index_build_failed", _exc)
+                        except Exception:
+                            pass
+
             worker = WorkerAgent(
                 llm=llm,
                 git_repo=git_repo,
@@ -857,6 +906,7 @@ def run(
                 state=state,
                 compile_fix_mode=_compile_fix_mode,
                 repo_fingerprint=_repo_fp,
+                cpg_index=_cpg_index,
             )
 
             from gitoma.planner.task import SubTask, Task

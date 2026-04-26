@@ -1,0 +1,131 @@
+CPG-lite v0 — bench artifact (auto-applicazione su gitoma)
+================================================================
+
+Repo root:        /Users/fab/Documents/git/gitoma
+Files indexed:    187
+Symbols emitted:  4243
+References:       32051
+Build time:       1366ms
+
+Targets sampled below were chosen as load-bearing modules:
+planner LLM client, CPG storage, vertical config, run CLI.
+Each section shows what BLAST RADIUS the worker would see
+if the planner sent it a subtask touching that file.
+
+================================================================
+
+### TARGET: gitoma/planner/llm_client.py
+
+== BLAST RADIUS (CPG-lite) ==
+The CPG-lite index found callers / consumers of symbols defined in the files you are about to modify. Treat any signature change to a listed symbol as a cross-file edit: either preserve the signature OR also update every caller below. Removing or renaming a listed symbol without updating its callers WILL break the build.
+
+Modifying gitoma/planner/llm_client.py touches the following defined symbols:
+  HealthLevel() — class (gitoma/planner/llm_client.py:22)
+    called from gitoma/cli/_helpers.py:611, tests/e2e/test_api.py:63, tests/test_llm_health.py:5
+  HealthCheckResult() — class (gitoma/planner/llm_client.py:29)
+    called from tests/e2e/test_api.py:63, tests/e2e/test_api.py:64, tests/test_llm_health.py:5, tests/test_llm_health.py:48, tests/test_llm_health.py:52
+  ok() — method (gitoma/planner/llm_client.py:37)
+    no cross-file callers in indexed scope.
+  failed() — method (gitoma/planner/llm_client.py:41)
+    no cross-file callers in indexed scope.
+  check_lmstudio() — function (gitoma/planner/llm_client.py:49)
+    called from gitoma/api/routers.py:52, gitoma/cli/_helpers.py:611, gitoma/cli/_helpers.py:618, gitoma/cli/commands/doctor.py:96, gitoma/cli/commands/doctor.py:98
+  LLMError() — class (gitoma/planner/llm_client.py:207)
+    called from gitoma/cli/commands/run.py:450, gitoma/review/self_critic.py:37, tests/test_self_critic.py:210, tests/test_self_critic.py:213
+  LLMTruncatedError() — class (gitoma/planner/llm_client.py:211)
+    called from tests/test_swiss_watch.py:158
+  LLMClient() — class (gitoma/planner/llm_client.py:223)
+    called from gitoma/cli/_helpers.py:31, gitoma/cli/_helpers.py:611, gitoma/cli/_helpers.py:626, gitoma/cli/commands/analyze.py:30, gitoma/cli/commands/config_cmd.py:22 (+37 more)
+  model() — method (gitoma/planner/llm_client.py:260)
+    no cross-file callers in indexed scope.
+  health_check() — method (gitoma/planner/llm_client.py:265)
+    no cross-file callers in indexed scope.
+  chat() — method (gitoma/planner/llm_client.py:269)
+    no cross-file callers in indexed scope.
+  chat_json() — method (gitoma/planner/llm_client.py:422)
+    no cross-file callers in indexed scope.
+
+----------------------------------------------------------------
+
+### TARGET: gitoma/cpg/storage.py
+
+== BLAST RADIUS (CPG-lite) ==
+The CPG-lite index found callers / consumers of symbols defined in the files you are about to modify. Treat any signature change to a listed symbol as a cross-file edit: either preserve the signature OR also update every caller below. Removing or renaming a listed symbol without updating its callers WILL break the build.
+
+Modifying gitoma/cpg/storage.py touches the following defined symbols:
+  Storage() — class (gitoma/cpg/storage.py:65)
+    called from gitoma/cpg/__init__.py:28, gitoma/cpg/__init__.py:85, gitoma/cpg/python_indexer.py:41, gitoma/cpg/queries.py:34, tests/cpg/test_python_indexer.py:18 (+38 more)
+  insert_symbol() — method (gitoma/cpg/storage.py:89)
+    called from gitoma/cpg/python_indexer.py:105, gitoma/cpg/python_indexer.py:147, gitoma/cpg/python_indexer.py:171, gitoma/cpg/python_indexer.py:198, gitoma/cpg/python_indexer.py:223 (+20 more)
+  insert_reference() — method (gitoma/cpg/storage.py:107)
+    called from gitoma/cpg/python_indexer.py:243, gitoma/cpg/python_indexer.py:264, gitoma/cpg/python_indexer.py:272, gitoma/cpg/python_indexer.py:288, gitoma/cpg/python_indexer.py:296 (+9 more)
+  insert_import() — method (gitoma/cpg/storage.py:121)
+    called from gitoma/cpg/python_indexer.py:217, gitoma/cpg/python_indexer.py:240, tests/cpg/test_storage.py:178, tests/cpg/test_storage.py:179, tests/cpg/test_storage.py:180 (+3 more)
+  get_symbol_by_id() — method (gitoma/cpg/storage.py:134)
+    called from tests/cpg/test_storage.py:73, tests/cpg/test_storage.py:83, tests/cpg/test_storage.py:115, tests/cpg/test_storage.py:126, tests/cpg/test_storage.py:127
+  get_symbols_by_name() — method (gitoma/cpg/storage.py:140)
+    called from gitoma/cpg/queries.py:56, gitoma/cpg/queries.py:145, gitoma/cpg/queries.py:159, gitoma/cpg/queries.py:177, tests/cpg/test_python_indexer.py:275 (+1 more)
+  get_symbols_in_file() — method (gitoma/cpg/storage.py:146)
+    no cross-file callers in indexed scope.
+  get_refs_to() — method (gitoma/cpg/storage.py:153)
+    called from gitoma/cpg/queries.py:68, tests/cpg/test_storage.py:140, tests/cpg/test_storage.py:161
+  get_refs_in_file() — method (gitoma/cpg/storage.py:160)
+    called from tests/cpg/test_python_indexer.py:124, tests/cpg/test_python_indexer.py:190, tests/cpg/test_python_indexer.py:211, tests/cpg/test_python_indexer.py:221, tests/cpg/test_python_indexer.py:235 (+2 more)
+  iter_unresolved_refs() — method (gitoma/cpg/storage.py:166)
+    called from gitoma/cpg/queries.py:136, tests/cpg/test_storage.py:153, tests/cpg/test_storage.py:160
+  update_ref_symbol_id() — method (gitoma/cpg/storage.py:174)
+    called from gitoma/cpg/queries.py:139, tests/cpg/test_storage.py:159
+  get_imports_for_file() — method (gitoma/cpg/storage.py:180)
+    called from gitoma/cpg/queries.py:153, tests/cpg/test_python_indexer.py:168, tests/cpg/test_python_indexer.py:176, tests/cpg/test_python_indexer.py:184, tests/cpg/test_python_indexer.py:199 (+2 more)
+  files_importing() — method (gitoma/cpg/storage.py:190)
+    called from gitoma/cpg/queries.py:85, tests/cpg/test_storage.py:196
+  symbol_count() — method (gitoma/cpg/storage.py:204)
+    no cross-file callers in indexed scope.
+  reference_count() — method (gitoma/cpg/storage.py:209)
+    no cross-file callers in indexed scope.
+  file_count() — method (gitoma/cpg/storage.py:214)
+    no cross-file callers in indexed scope.
+  commit() — method (gitoma/cpg/storage.py:219)
+    no cross-file callers in indexed scope.
+  close() — method (gitoma/cpg/storage.py:224)
+    called from gitoma/api/web.py:300, gitoma/api/web.py:312, gitoma/core/config.py:352, gitoma/core/state.py:293, gitoma/core/state.py:296 (+7 more)
+
+----------------------------------------------------------------
+
+### TARGET: gitoma/verticals/_base.py
+
+== BLAST RADIUS (CPG-lite) ==
+The CPG-lite index found callers / consumers of symbols defined in the files you are about to modify. Treat any signature change to a listed symbol as a cross-file edit: either preserve the signature OR also update every caller below. Removing or renaming a listed symbol without updating its callers WILL break the build.
+
+Modifying gitoma/verticals/_base.py touches the following defined symbols:
+  VerticalFileScope() — class (gitoma/verticals/_base.py:30)
+    called from gitoma/verticals/__init__.py:17, gitoma/verticals/docs.py:20, gitoma/verticals/docs.py:28, gitoma/verticals/quality.py:22, gitoma/verticals/quality.py:30 (+13 more)
+  is_in_scope() — method (gitoma/verticals/_base.py:50)
+    called from tests/test_verticals_base.py:19, tests/test_verticals_base.py:20, tests/test_verticals_base.py:21, tests/test_verticals_base.py:26, tests/test_verticals_base.py:31 (+11 more)
+  Vertical() — class (gitoma/verticals/_base.py:76)
+    called from gitoma/cli/commands/_vertical.py:24, gitoma/planner/scope_filter.py:35, gitoma/verticals/__init__.py:17, gitoma/verticals/docs.py:20, gitoma/verticals/docs.py:25 (+7 more)
+  is_path_in_scope() — method (gitoma/verticals/_base.py:107)
+    called from gitoma/planner/scope_filter.py:125, gitoma/planner/scope_filter.py:164, tests/test_verticals_base.py:99, tests/test_verticals_base.py:100, tests/test_verticals_docs.py:78 (+3 more)
+
+----------------------------------------------------------------
+
+### TARGET: gitoma/cli/commands/run.py
+
+== BLAST RADIUS (CPG-lite) ==
+The CPG-lite index found callers / consumers of symbols defined in the files you are about to modify. Treat any signature change to a listed symbol as a cross-file edit: either preserve the signature OR also update every caller below. Removing or renaming a listed symbol without updating its callers WILL break the build.
+
+Modifying gitoma/cli/commands/run.py touches the following defined symbols:
+  run() — function (gitoma/cli/commands/run.py:152)
+    no cross-file callers in indexed scope.
+  on_progress() — function (gitoma/cli/commands/run.py:398)
+    no cross-file callers in indexed scope.
+  on_task_start() — function (gitoma/cli/commands/run.py:914)
+    called from gitoma/worker/worker.py:125
+  on_subtask_start() — function (gitoma/cli/commands/run.py:922)
+    called from gitoma/worker/worker.py:135
+  on_subtask_done() — function (gitoma/cli/commands/run.py:965)
+    called from gitoma/worker/worker.py:145
+  on_subtask_error() — function (gitoma/cli/commands/run.py:983)
+    called from gitoma/worker/worker.py:152
+
+----------------------------------------------------------------

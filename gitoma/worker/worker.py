@@ -53,6 +53,7 @@ class WorkerAgent:
         *,
         compile_fix_mode: bool = False,
         repo_fingerprint: dict[str, Any] | None = None,
+        cpg_index: Any = None,
     ) -> None:
         self._llm = llm
         self._git = git_repo
@@ -90,6 +91,13 @@ class WorkerAgent:
         # repo). ``None`` when Occam is disabled / unreachable, in
         # which case G11 silently passes.
         self._repo_fingerprint: dict[str, Any] | None = repo_fingerprint
+        # CPG-lite v0 index — when non-None, the worker injects a
+        # BLAST RADIUS block into the user prompt for every Python
+        # file_hint, so the LLM sees who calls the symbols it's about
+        # to modify. ``None`` (default) → silent skip; behavior
+        # identical to pre-v0. Opt-in via ``GITOMA_CPG_LITE=on`` set
+        # in the run pipeline before PHASE 3.
+        self._cpg_index = cpg_index
 
     def execute(
         self,
@@ -176,6 +184,29 @@ class WorkerAgent:
         if antislop_block:
             system_prompt = system_prompt + "\n\n" + antislop_block
 
+        # CPG-lite v0 BLAST RADIUS — when the index is loaded and
+        # the subtask touches Python files, render a compact "who
+        # calls what you're about to modify" block. Empty string
+        # when no Python in file_hints OR no relevant symbols
+        # found; truthiness checked before injection to avoid an
+        # empty header that the LLM would just ignore.
+        blast_block: str | None = None
+        if self._cpg_index is not None and subtask.file_hints:
+            try:
+                from gitoma.cpg.blast_radius import render_blast_radius_block
+                rendered = render_blast_radius_block(
+                    list(subtask.file_hints), self._cpg_index,
+                )
+                if rendered:
+                    blast_block = rendered
+            except Exception as exc:  # noqa: BLE001 — defensive
+                # CPG failures must NOT kill the worker. Log + continue
+                # without the block (graceful degradation).
+                try:
+                    current_trace().exception("cpg.blast_radius_failed", exc)
+                except Exception:
+                    pass
+
         messages = [
             {"role": "system", "content": system_prompt},
             {
@@ -188,6 +219,7 @@ class WorkerAgent:
                     repo_name=self._git.name,
                     current_files=current_files,
                     file_tree=file_tree,
+                    extra_context_block=blast_block,
                 ),
             },
         ]

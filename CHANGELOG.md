@@ -8,6 +8,33 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **CPG-lite v0 — Python symbol+reference index** (`gitoma/cpg/`):
+  first concrete cut on the horizon CPG 2.0 path. Pure stdlib `ast`
+  parser + in-memory SQLite, mono-language (Python only), no caching
+  across runs. New public surface: `from gitoma.cpg import
+  build_index, CPGIndex` exposing `get_symbol`, `find_references`,
+  `callers_of`, `who_imports`, `call_graph_for`. Wired into the
+  worker (`gitoma/worker/worker.py`) so when the index is loaded and
+  a subtask touches a `.py` file, a deterministic
+  `== BLAST RADIUS (CPG-lite) ==` block is injected into the worker
+  user prompt right after the file contents — citing the cross-file
+  callers of every public symbol the patch is about to modify, with
+  a per-symbol cap of 5 callers (+ "+N more" marker for hot
+  symbols). The block exists to close the failure mode demonstrated
+  by b2v PR #32 (worker generated `.prettierrc` blind to existing
+  `.editorconfig` / `.eslintrc`) at the structural level — the LLM
+  now sees what its patch will impact before emitting it.
+  **Opt-in via `GITOMA_CPG_LITE=on`**; default off until the v0.5
+  multi-language extension lands. Trace events:
+  `cpg.index_built` (always when on), `cpg.blast_radius_failed`
+  (defensive). Auto-applicazione bench on gitoma's own source:
+  187 files / 4243 symbols / 32051 refs indexed in ~1.4s; bench
+  artifact in `tests/bench/cpg_lite_v0/index_demo_output.txt`.
+  Known limitations (documented + intentional): star imports
+  opaque, dynamic attribute access invisible, no CFG/PDG yet,
+  single-language. Honest A/B vs LLM deferred to v0.1 (needs
+  sample size + cross-run cache).
+
 - **Castelletto Taglio A — vertical-as-config refactor**
   (`gitoma/verticals/`): turns vertical mode (`gitoma docs`,
   `gitoma quality`, …) from ad-hoc env-var checks scattered

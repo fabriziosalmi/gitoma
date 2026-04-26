@@ -235,6 +235,7 @@ def worker_user_prompt(
     current_files: dict[str, str],
     file_tree: list[str],
     compile_error_feedback: str | None = None,
+    extra_context_block: str | None = None,
 ) -> str:
     langs = ", ".join(languages) if languages else "Unknown"
 
@@ -388,6 +389,15 @@ suggestion.
      more is risk without reward.
 """
 
+    # Extra deterministic context block (e.g. BLAST RADIUS from
+    # CPG-lite). Injected AFTER the files section so the LLM sees it
+    # right before the file tree + instructions — high recency for a
+    # narrowing constraint, while staying separate from the file
+    # contents themselves.
+    extra_block = ""
+    if extra_context_block:
+        extra_block = f"\n{extra_context_block}\n"
+
     return f"""Repository: {repo_name}
 Languages: {langs}
 
@@ -397,7 +407,7 @@ Files to touch: {', '.join(file_hints) if file_hints else 'determine appropriate
 {boundaries_section}
 {retry_section}
 {files_section}
-
+{extra_block}
 == FILE TREE ==
 {tree_sample}
 
