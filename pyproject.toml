@@ -51,6 +51,13 @@ dependencies = [
     # major to avoid a surprise grammar break on a 0.x bump.
     "tree-sitter>=0.25,<1.0",
     "tree-sitter-typescript>=0.23,<1.0",
+    # CPG-lite v0.5-expansion — JavaScript + Rust grammars. Same
+    # opt-in / runtime-tolerant pattern as TS: import is local to
+    # the per-language indexer module; build_index() degrades
+    # gracefully when the dep is missing (.js/.rs files just aren't
+    # indexed). Pinned to current major to avoid grammar surprises.
+    "tree-sitter-javascript>=0.25,<1.0",
+    "tree-sitter-rust>=0.24,<1.0",
 ]
 
 [project.scripts]

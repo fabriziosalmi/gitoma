@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from gitoma.cpg._base import SymbolKind
+from gitoma.cpg.javascript_indexer import index_javascript_file
 from gitoma.cpg.python_indexer import index_python_file
+from gitoma.cpg.rust_indexer import index_rust_file
 from gitoma.cpg.storage import Storage
 from gitoma.cpg.typescript_indexer import index_typescript_file
 
@@ -39,7 +41,11 @@ MAX_REINDEX_FILES = 5
 Beyond cap, files contribute ΔI=1.0 + a trace warning."""
 
 
-_INDEXABLE_EXTS = (".py", ".ts", ".tsx")
+_INDEXABLE_EXTS = (
+    ".py",                             # v0
+    ".ts", ".tsx",                     # v0.5-slim
+    ".js", ".mjs", ".cjs", ".rs",      # v0.5-expansion
+)
 
 
 def _delete_allowed() -> bool:
@@ -66,6 +72,10 @@ def _index_text_to_storage(rel_path: str, content: str) -> Storage:
             index_python_file(tmp_path, rel_path, storage)
         elif rel_path.endswith((".ts", ".tsx")):
             index_typescript_file(tmp_path, rel_path, storage)
+        elif rel_path.endswith((".js", ".mjs", ".cjs")):
+            index_javascript_file(tmp_path, rel_path, storage)
+        elif rel_path.endswith(".rs"):
+            index_rust_file(tmp_path, rel_path, storage)
     finally:
         try:
             tmp_path.unlink()

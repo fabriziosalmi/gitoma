@@ -36,7 +36,11 @@ worked-example rationale + the corrected math (initial 0.15
 draft was 290-caller territory — too rare to ever fire)."""
 
 
-_INDEXABLE_EXTS = (".py", ".ts", ".tsx")
+_INDEXABLE_EXTS = (
+    ".py",                             # v0
+    ".ts", ".tsx",                     # v0.5-slim
+    ".js", ".mjs", ".cjs", ".rs",      # v0.5-expansion
+)
 
 
 def compute_phi(

@@ -41,10 +41,15 @@ INDEXED_EXTENSIONS: frozenset[str] = frozenset({
     ".py",     # CPG-lite v0
     ".ts",     # CPG-lite v0.5-slim
     ".tsx",    # CPG-lite v0.5-slim
+    ".js",     # CPG-lite v0.5-expansion
+    ".mjs",    # CPG-lite v0.5-expansion
+    ".cjs",    # CPG-lite v0.5-expansion
+    ".rs",     # CPG-lite v0.5-expansion
 })
-"""File extensions the renderer recognises as indexable. Anything
-outside this set produces no BLAST RADIUS section. Future v0.5 / v1
-expansions add ``.js``, ``.mjs``, ``.cjs``, ``.rs`` here."""
+"""File extensions the renderer recognises as indexable. Kept in
+sync with ``gitoma.cpg.INDEXED_SUFFIXES`` so a file we index can
+also produce a BLAST RADIUS section. Future expansions (Go, Java,
+Kotlin, Swift, …) add their suffixes here."""
 
 
 _RELEVANT_KINDS = frozenset({

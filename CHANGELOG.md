@@ -8,6 +8,37 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **CPG-lite v0.5-expansion — JavaScript + Rust indexers**
+  (`gitoma/cpg/javascript_indexer.py`, `gitoma/cpg/rust_indexer.py`):
+  drops in two more tree-sitter grammars on top of v0.5-slim TS,
+  using the same Symbol/Reference data shape. **JavaScript**
+  (.js / .mjs / .cjs) is structurally identical to TS minus type
+  annotations + interfaces + type aliases. **Rust** (.rs) has its
+  own grammar shape: `struct_item` + `enum_item` map to
+  SymbolKind.CLASS, `trait_item` to INTERFACE, `impl_item` is
+  NOT a Symbol but its function_items become METHOD with
+  parent_id = the target type's Symbol (best-effort same-file
+  lookup). `function_signature_item` (trait method declarations)
+  also captured. Visibility from the `visibility_modifier`
+  named child (presence of `pub` keyword) — the Python/TS
+  leading-underscore heuristic is NOT applied to Rust. `use`
+  declarations parsed into Import rows including the
+  brace-list shape (`crate::types::{User, Repo as DataRepo}`)
+  via a small textual parser. `INDEXED_SUFFIXES` now covers
+  `.py`, `.ts`, `.tsx`, `.js`, `.mjs`, `.cjs`, `.rs`. Filter
+  constants in `blast_radius.py` + `psi_phi.py` +
+  `psi_delta_i.py` updated; ΔI re-indexes JS/Rust files
+  via the new dispatch. b2v live bench: 8 files (vs 3 in
+  v0.5-slim) / 85 symbols across rust+typescript+javascript /
+  build 39ms — BLAST RADIUS for `src/decoder.rs` now shows
+  cross-language callers from TS test files. Bench artifact at
+  `tests/bench/cpg_lite_v05_expansion/index_demo_output.txt`.
+  Out of scope (deferred): Go, Java, Kotlin, Swift, C/C++,
+  C# (mechanical follow-ups, ~1 session each); Rust macros,
+  enum variant enumeration, generic-bound parsing in impl;
+  CommonJS `require()` import recording; tsconfig path
+  resolution.
+
 - **Skeletal Representation v1 — signature view in planner prompt**
   (`gitoma/cpg/skeletal.py`): compresses the CPG-lite index into a
   per-file signature view (`def process_request(req: dict) -> str`,

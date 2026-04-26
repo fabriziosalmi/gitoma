@@ -129,3 +129,95 @@ def test_mixed_repo_skipdirs_apply_to_both_languages(tmp_path: Path) -> None:
     assert idx.get_symbol("realTs") != []
     assert idx.get_symbol("fake") == []
     assert idx.get_symbol("fake_py") == []
+
+
+# ── v0.5-expansion: 4-language coexistence ─────────────────────────
+
+
+def test_four_language_repo_indexes_all(tmp_path: Path) -> None:
+    """Single build_index call walks .py + .ts + .js + .rs files
+    in one pass, dispatches per extension, all show up in the
+    resulting index with correct language tags."""
+    _populate(tmp_path, {
+        "src/handler.py": "def py_handler(): pass\n",
+        "frontend/api.ts": "export function tsApi(): void {}\n",
+        "frontend/util.js": "export function jsUtil() {}\n",
+        "backend/main.rs": "pub fn rust_main() {}\n",
+    })
+    idx = build_index(tmp_path)
+    assert idx.file_count() == 4
+    py = next(s for s in idx.get_symbol("py_handler")
+              if s.kind is SymbolKind.FUNCTION)
+    ts = next(s for s in idx.get_symbol("tsApi")
+              if s.kind is SymbolKind.FUNCTION)
+    js = next(s for s in idx.get_symbol("jsUtil")
+              if s.kind is SymbolKind.FUNCTION)
+    rs = next(s for s in idx.get_symbol("rust_main")
+              if s.kind is SymbolKind.FUNCTION)
+    assert py.language == "python"
+    assert ts.language == "typescript"
+    assert js.language == "javascript"
+    assert rs.language == "rust"
+
+
+def test_four_language_skipdirs_cover_all(tmp_path: Path) -> None:
+    """Every language's tooling-skip dir (target/ for Rust,
+    node_modules/ for JS+TS, .venv/ for Python) is honored in
+    one walk."""
+    _populate(tmp_path, {
+        "src/keep.py": "def keep_py(): pass\n",
+        "src/keep.ts": "export function keepTs(): void {}\n",
+        "src/keep.js": "export function keepJs() {}\n",
+        "src/keep.rs": "pub fn keep_rs() {}\n",
+        "node_modules/fake.js": "export function nm_fake() {}\n",
+        "target/release/fake.rs": "pub fn target_fake() {}\n",
+        ".venv/lib/fake.py": "def venv_fake(): pass\n",
+        "build/fake.ts": "export function build_fake(): void {}\n",
+    })
+    idx = build_index(tmp_path)
+    for kept in ("keep_py", "keepTs", "keepJs", "keep_rs"):
+        assert idx.get_symbol(kept) != [], f"{kept} should be indexed"
+    for skipped in ("nm_fake", "target_fake", "venv_fake", "build_fake"):
+        assert idx.get_symbol(skipped) == [], (
+            f"{skipped} should NOT be indexed (skip-dir)"
+        )
+
+
+def test_blast_radius_works_across_four_languages(tmp_path: Path) -> None:
+    """A single render_blast_radius_block call across .py + .ts +
+    .js + .rs files produces sections for all four."""
+    from gitoma.cpg.blast_radius import render_blast_radius_block
+    _populate(tmp_path, {
+        "lib.py": "def py_helper(): pass\n",
+        "lib.ts": "export function tsHelper(): void {}\n",
+        "lib.js": "export function jsHelper() {}\n",
+        "lib.rs": "pub fn rust_helper() {}\n",
+    })
+    idx = build_index(tmp_path)
+    block = render_blast_radius_block(
+        ["lib.py", "lib.ts", "lib.js", "lib.rs"], idx,
+    )
+    for fn in ("py_helper", "tsHelper", "jsHelper", "rust_helper"):
+        assert fn in block
+
+
+def test_skeleton_works_across_four_languages(tmp_path: Path) -> None:
+    """The skeletal renderer is kind-agnostic; with v0.5-expansion
+    in place it produces a section per file across all 4 languages."""
+    from gitoma.cpg.skeletal import render_skeleton
+    _populate(tmp_path, {
+        "lib.py": "def py_helper(x: int) -> str: return ''\n",
+        "lib.ts": "export function tsHelper(): void {}\n",
+        "lib.js": "export function jsHelper() {}\n",
+        "lib.rs": "pub fn rust_helper(n: u32) -> u32 { n }\n",
+    })
+    idx = build_index(tmp_path)
+    out = render_skeleton(idx)
+    # Each file appears
+    for f in ("lib.py", "lib.ts", "lib.js", "lib.rs"):
+        assert f"## {f}" in out, f"missing section for {f}"
+    # Signature text from each language survived
+    assert "py_helper(x: int) -> str" in out
+    assert "tsHelper(): void" in out
+    assert "jsHelper()" in out
+    assert "rust_helper(n: u32) -> u32" in out

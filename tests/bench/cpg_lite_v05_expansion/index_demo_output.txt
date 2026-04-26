@@ -1,0 +1,42 @@
+CPG-lite v0.5-expansion — bench artifact (b2v multi-language)
+================================================================
+
+Repo root:        /tmp/b2v_bench
+Files indexed:    8
+Symbols emitted:  85
+References:       795
+Build time:       39ms
+
+Symbols per language:
+  rust              70
+  typescript        14
+  javascript         1
+
+Files per language:
+  javascript     (1 files)
+    - jest.config.js
+  rust           (4 files)
+    - src/decoder.rs
+    - src/encoder.rs
+    - src/main.rs
+    - src/utils.rs
+  typescript     (3 files)
+    - src/decoder.test.ts
+    - src/encoder.test.ts
+    - src/utils.test.ts
+
+================================================================
+Sample BLAST RADIUS for a Rust source file (first 1):
+----------------------------------------------------------------
+
+== BLAST RADIUS (CPG-lite) ==
+The CPG-lite index found callers / consumers of symbols defined in the files you are about to modify. Treat any signature change to a listed symbol as a cross-file edit: either preserve the signature OR also update every caller below. Removing or renaming a listed symbol without updating its callers WILL break the build.
+
+Modifying src/decoder.rs touches the following defined symbols:
+  Decoder() — class (src/decoder.rs:10)
+    called from src/decoder.test.ts:1, src/decoder.test.ts:4, src/main.rs:8
+  new() — method (src/decoder.rs:16)
+    no cross-file callers in indexed scope.
+  run() — method (src/decoder.rs:23)
+    no cross-file callers in indexed scope.
+

@@ -23,8 +23,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from gitoma.cpg._base import Reference, RefKind, Symbol, SymbolKind
+from gitoma.cpg.javascript_indexer import index_javascript_file
 from gitoma.cpg.python_indexer import index_python_file
 from gitoma.cpg.queries import CPGIndex
+from gitoma.cpg.rust_indexer import index_rust_file
 from gitoma.cpg.storage import Storage
 from gitoma.cpg.typescript_indexer import index_typescript_file
 
@@ -45,13 +47,19 @@ DEFAULT_MAX_FILES = 200
 
 # File extensions ↔ indexer dispatch table. Keep in sync with
 # ``gitoma.cpg.blast_radius.INDEXED_EXTENSIONS`` so a file we index
-# can also produce a BLAST RADIUS section. v0 = .py only;
-# v0.5-slim added .ts + .tsx via tree-sitter; future v0.5 adds
-# .js + .rs.
+# can also produce a BLAST RADIUS section.
+#   v0           .py only (stdlib `ast`)
+#   v0.5-slim    .ts + .tsx via tree-sitter
+#   v0.5-expansion .js + .mjs + .cjs (tree-sitter-javascript) + .rs
+#                  (tree-sitter-rust)
 INDEXED_SUFFIXES: dict[str, str] = {
     ".py": "python",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".rs": "rust",
 }
 
 DEFAULT_SKIP_DIRS: frozenset[str] = frozenset({
@@ -104,6 +112,10 @@ def build_index(
             index_python_file(abs_path, rel, storage)
         elif suffix in (".ts", ".tsx"):
             index_typescript_file(abs_path, rel, storage)
+        elif suffix in (".js", ".mjs", ".cjs"):
+            index_javascript_file(abs_path, rel, storage)
+        elif suffix == ".rs":
+            index_rust_file(abs_path, rel, storage)
         indexed += 1
     storage.commit()
     return CPGIndex(storage)
