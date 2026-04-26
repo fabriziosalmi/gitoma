@@ -51,7 +51,7 @@ export default defineConfig({
         activeMatch: '/architecture/',
       },
       {
-        text: 'v0.1',
+        text: 'v0.4',
         items: [
           {
             text: 'Changelog',
