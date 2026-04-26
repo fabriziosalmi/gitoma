@@ -42,6 +42,7 @@ def planner_user_prompt(
     prior_runs_context: str | None = None,
     repo_fingerprint_context: str | None = None,
     vertical_addendum: str | None = None,
+    skeleton_context: str | None = None,
 ) -> str:
     metrics_summary = "\n".join(
         f"- {m.display_name}: score={m.score:.2f} status={m.status} | {m.details}"
@@ -97,6 +98,19 @@ def planner_user_prompt(
     build_integrity_fail = any(
         m.name == "build" and m.status == "fail" for m in report.metrics
     )
+    # Skeletal Representation v1 — compressed per-file signature view
+    # built from CPG-lite. Augments the bare FILE TREE with structural
+    # detail (what each file actually defines, with signatures), so
+    # the planner can emit file_hints that target the RIGHT file
+    # instead of guessing from the path. Empty when CPG isn't loaded
+    # / GITOMA_CPG_SKELETAL=off / no public symbols across the repo.
+    skeleton_block = ""
+    if skeleton_context:
+        skeleton_block = (
+            "\n== REPO SKELETON (CPG-lite — public symbols + signatures) ==\n"
+            f"{skeleton_context}\n"
+        )
+
     # Vertical addendum — declarative narrowing prompt from the active
     # Vertical record (Castelletto Taglio A). When `gitoma docs` is the
     # entry point, this block tells the LLM to emit ONLY doc-file
@@ -139,6 +153,7 @@ Overall score: {report.overall_score:.2f}/1.0
 
 == FILE TREE (sample) ==
 {tree_sample}
+{skeleton_block}
 
 == TASK ==
 Create an improvement plan ONLY for metrics with status "fail" or "warn".

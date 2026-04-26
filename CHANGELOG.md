@@ -8,6 +8,37 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **Skeletal Representation v1 — signature view in planner prompt**
+  (`gitoma/cpg/skeletal.py`): compresses the CPG-lite index into a
+  per-file signature view (`def process_request(req: dict) -> str`,
+  `class RequestHandler:` with methods nested) and injects it into
+  the planner prompt right after the FILE TREE section. Planner
+  now sees what each file ACTUALLY DEFINES (with full Python /
+  TypeScript signatures), not just that it exists — drops the
+  hallucinated-symbol-reference failure mode at the source.
+  Token-budgeted (`DEFAULT_MAX_CHARS = 20000` ≈ 5000 tokens) with
+  alphabetical file ordering + truncation marker showing omitted
+  count. Schema additions: `Symbol.signature: str` (back-compat
+  default `""`) + matching SQLite `signature TEXT NOT NULL DEFAULT
+  ''` column. Both indexers populate signatures: Python via
+  `ast.unparse(node.args)` + return annotation; TypeScript via
+  tree-sitter `parameters` + `return_type` named fields. Both
+  capped at 200 chars per signature. CPG-lite build was MOVED
+  from PHASE 3 to BEFORE PHASE 2 so the planner can consume the
+  index for the skeleton (worker still uses it for BLAST RADIUS
+  via the same instance — single build per run). Opt-out via
+  `GITOMA_CPG_SKELETAL=off` (independent of `GITOMA_CPG_LITE`)
+  or budget tuning via `GITOMA_CPG_SKELETAL_BUDGET=<chars>`.
+  New trace events `cpg.skeletal_rendered` (with chars + budget),
+  `cpg.skeletal_render_failed` (defensive). Auto-applicazione
+  bench on gitoma's own source: 201 files / 4572 symbols indexed,
+  skeleton renders in 13ms; at 20000-char budget 64 files fit
+  + 117 omitted with marker (operator can bump budget). Bench
+  artifact at `tests/bench/skeletal_v1/render_demo_output.txt`.
+  Out of scope for v1: docstring inclusion, inheritance chain
+  rendering, custom file ranking beyond alphabetical, type-level
+  reasoning beyond the captured signature text.
+
 - **Ψ-full v1 — Φ + ΔI on top of CPG-lite** (`gitoma/worker/psi_phi.py`,
   `gitoma/worker/psi_delta_i.py`): adds two new components to the
   scalar quality gate. Ψ = αΓ + βΦ + γΔI − λΩ. **Φ** is caller-impact-

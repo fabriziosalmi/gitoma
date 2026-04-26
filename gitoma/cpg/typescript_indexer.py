@@ -60,6 +60,10 @@ __all__ = [
 
 TS_LANGUAGE = "typescript"
 
+_MAX_SIGNATURE_CHARS = 200
+"""Match python_indexer's cap; protects the planner prompt from
+runaway TS type-annotation blowup."""
+
 
 # ── Lazy-cached parsers (one per grammar) ──────────────────────────
 # tree-sitter and tree-sitter-typescript are RUNTIME-OPTIONAL deps.
@@ -221,6 +225,21 @@ class _TSVisitor:
     def _parent_id(self) -> int | None:
         return self._scope_stack[-1][1] if self._scope_stack else None
 
+    def _signature_for(self, node: Any) -> str:
+        """Build a compact signature from tree-sitter ``parameters`` +
+        ``return_type`` fields. Empty when neither is present (e.g. a
+        constructor without a return-type annotation). Whitespace is
+        collapsed; capped at ``_MAX_SIGNATURE_CHARS``."""
+        params = node.child_by_field_name("parameters")
+        ret = node.child_by_field_name("return_type")
+        params_text = self._text(params) if params is not None else ""
+        ret_text = self._text(ret) if ret is not None else ""
+        sig = f"{params_text}{ret_text}"
+        sig = " ".join(sig.split())
+        if len(sig) > _MAX_SIGNATURE_CHARS:
+            sig = sig[: _MAX_SIGNATURE_CHARS - 3] + "..."
+        return sig
+
     # ── Export statement: peel and recurse ────────────────────────
 
     def _visit_export_statement(self, node: Any) -> None:
@@ -329,6 +348,7 @@ class _TSVisitor:
             parent_id=self._parent_id(),
             is_public=not name.startswith("_"),
             language=TS_LANGUAGE,
+            signature=self._signature_for(node),
         ))
         self.symbol_count += 1
         # Recurse into body to catch nested calls / name loads.
@@ -417,6 +437,7 @@ class _TSVisitor:
             parent_id=self._parent_id(),
             is_public=not name.startswith("_"),
             language=TS_LANGUAGE,
+            signature=self._signature_for(node),
         ))
         self.symbol_count += 1
         body = node.child_by_field_name("body")

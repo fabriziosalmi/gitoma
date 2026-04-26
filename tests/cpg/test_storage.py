@@ -127,6 +127,32 @@ def test_language_defaults_to_python_for_back_compat() -> None:
     assert got.language == "python"
 
 
+def test_signature_defaults_to_empty_for_back_compat() -> None:
+    """Skeletal v1 added the signature column; existing v0 callers
+    that don't pass it must still work."""
+    s = Storage()
+    sid = s.insert_symbol(_mk_sym("foo"))
+    got = s.get_symbol_by_id(sid)
+    assert got is not None
+    assert got.signature == ""
+
+
+def test_signature_round_trips() -> None:
+    """Signature text persists through SQLite — including special
+    characters like parentheses / brackets / arrows."""
+    s = Storage()
+    sig = "(req: dict, *, timeout: float = 5.0) -> tuple[int, str]"
+    sid = s.insert_symbol(Symbol(
+        id=0, file="x.py", line=1, col=0,
+        kind=SymbolKind.FUNCTION, name="run",
+        qualified_name="x.run", parent_id=None,
+        is_public=True, signature=sig,
+    ))
+    got = s.get_symbol_by_id(sid)
+    assert got is not None
+    assert got.signature == sig
+
+
 def test_language_round_trips_for_typescript() -> None:
     """v0.5-slim TS records pass ``language="typescript"`` and
     must come back unchanged through SQLite."""

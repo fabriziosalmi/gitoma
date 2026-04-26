@@ -91,6 +91,24 @@ def test_symbol_language_defaults_to_python_for_back_compat() -> None:
     assert sym.language == "python"
 
 
+def test_symbol_signature_defaults_to_empty_string() -> None:
+    """Skeletal v1 added Symbol.signature; existing v0/v0.5 callers
+    don't pass it and must still work."""
+    sym = _mk_symbol()
+    assert sym.signature == ""
+
+
+def test_symbol_signature_round_trips() -> None:
+    sym = Symbol(
+        id=0, file="x.py", line=1, col=0,
+        kind=SymbolKind.FUNCTION, name="foo",
+        qualified_name="x.foo", parent_id=None,
+        is_public=True,
+        signature="(req: dict) -> str",
+    )
+    assert sym.signature == "(req: dict) -> str"
+
+
 def test_symbol_language_can_be_overridden_for_typescript() -> None:
     sym = Symbol(
         id=0, file="x.ts", line=1, col=0,

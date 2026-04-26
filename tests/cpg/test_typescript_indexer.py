@@ -122,6 +122,57 @@ def test_underscore_function_marked_private(tmp_path: Path) -> None:
 # ── Classes + methods ─────────────────────────────────────────────
 
 
+def test_function_signature_captured(tmp_path: Path) -> None:
+    """Skeletal v1: TS function signature text is captured (params +
+    return type, TS-native style)."""
+    abs_path, rel = _write(tmp_path, "f.ts",
+                           "export function helper(x: number, y?: string): boolean {\n"
+                           "  return true;\n"
+                           "}\n")
+    s = Storage()
+    index_typescript_file(abs_path, rel, s)
+    func = next(sym for sym in s.get_symbols_in_file(rel)
+                if sym.kind is SymbolKind.FUNCTION)
+    assert "x: number" in func.signature
+    assert "y?: string" in func.signature
+    assert ": boolean" in func.signature
+
+
+def test_method_signature_captured(tmp_path: Path) -> None:
+    abs_path, rel = _write(tmp_path, "r.ts",
+                           "export class Repo {\n"
+                           "  find(id: number): User | null { return null; }\n"
+                           "}\n")
+    s = Storage()
+    index_typescript_file(abs_path, rel, s)
+    method = next(sym for sym in s.get_symbols_in_file(rel)
+                  if sym.kind is SymbolKind.METHOD)
+    assert "id: number" in method.signature
+    assert ": User | null" in method.signature
+
+
+def test_function_signature_no_args_no_return(tmp_path: Path) -> None:
+    abs_path, rel = _write(tmp_path, "f.ts",
+                           "export function tick() { }\n")
+    s = Storage()
+    index_typescript_file(abs_path, rel, s)
+    func = next(sym for sym in s.get_symbols_in_file(rel)
+                if sym.kind is SymbolKind.FUNCTION)
+    assert func.signature == "()"
+
+
+def test_class_signature_empty_by_design(tmp_path: Path) -> None:
+    """Same convention as Python indexer — class-level signature is
+    the kind itself."""
+    abs_path, rel = _write(tmp_path, "c.ts",
+                           "export class Worker {}\n")
+    s = Storage()
+    index_typescript_file(abs_path, rel, s)
+    cls = next(sym for sym in s.get_symbols_in_file(rel)
+               if sym.kind is SymbolKind.CLASS)
+    assert cls.signature == ""
+
+
 def test_class_with_methods(tmp_path: Path) -> None:
     src = (
         "export class Repo {\n"

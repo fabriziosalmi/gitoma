@@ -1,0 +1,58 @@
+Skeletal Representation v1 — bench artifact
+================================================================
+
+Repo root:           /Users/fab/Documents/git/gitoma
+Files indexed:       201
+Symbols emitted:     4572
+References:          35521
+Index build time:    1587ms
+Skeleton render time: 13ms
+
+Skeleton chars:      20075 / 20000 budget
+Skeleton lines:      448
+Files in skeleton:   64
+Truncated:           True
+
+================================================================
+HEAD (first 20 lines):
+----------------------------------------------------------------
+## gitoma/analyzers/base.py
+ScoreStatus = ...
+SCORE_THRESHOLDS = ...
+def score_to_status(score: float) -> ScoreStatus
+def score_to_bar(score: float, width: int=8) -> str
+class MetricResult
+  from_score(cls, name: str, display_name: str, score: float, details: str, suggestions: list[str] | None=None, weight: float=1.0) -> 'MetricResult'
+  to_dict(self) -> dict[str, Any]
+  from_dict(cls, d: dict[str, Any]) -> 'MetricResult'
+class MetricReport
+  overall_score(self) -> float
+  failing(self) -> list[MetricResult]
+  warning(self) -> list[MetricResult]
+  passing(self) -> list[MetricResult]
+  to_dict(self) -> dict[str, Any]
+  from_dict(cls, d: dict[str, Any]) -> 'MetricReport'
+class BaseAnalyzer
+  analyze(self) -> MetricResult
+  file_exists(self, *paths: str) -> str | None
+  glob_count(self, pattern: str) -> int
+
+================================================================
+TAIL (last 15 lines):
+----------------------------------------------------------------
+DEFAULT_THRESHOLD = ...
+def resolve_threshold() -> int
+def filter_plan_by_failure_history(plan: TaskPlan, failed_hints_count: dict[str, int], threshold: int=DEFAULT_THRESHOLD) -> dict[str, Any]
+## gitoma/planner/planner.py
+class PlannerAgent
+  plan(self, report: MetricReport, file_tree: list[str], repo_brief: RepoBrief | None=None, prior_runs_context: str | None=None, repo_fingerprint_context: str | None=None, vertical_addendum: str | None=N...
+## gitoma/planner/real_bug_filter.py
+def synthesize_real_bug_task(plan: TaskPlan, report: MetricReport, repo_root: Path) -> dict[str, Any] | None
+def banish_readme_only_subtasks(plan: TaskPlan, report: MetricReport) -> dict[str, Any] | None
+## gitoma/planner/test_to_source.py
+def infer_source_files_from_tests(test_paths: list[str], repo_root: Path) -> list[str]
+def rewrite_plan_in_place(plan, report, repo_root: Path) -> dict | None
+def is_test_only_targeting(file_hints: list[str]) -> bool
+
+## (117 file(s) omitted under 20000-char skeleton budget — 1347 additional symbols not shown)
+

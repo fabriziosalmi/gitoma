@@ -84,6 +84,65 @@ def test_indexer_marks_underscore_function_private(tmp_path: Path) -> None:
     assert funcs[0].is_public is False
 
 
+def test_indexer_captures_function_signature(tmp_path: Path) -> None:
+    """Skeletal v1: function signature text is captured on Symbol."""
+    abs_path, rel = _write(tmp_path, "f.py",
+                           "def helper(x: int, y: str = 'a') -> bool:\n"
+                           "    return True\n")
+    s = Storage()
+    index_python_file(abs_path, rel, s)
+    func = next(sym for sym in s.get_symbols_in_file(rel)
+                if sym.kind is SymbolKind.FUNCTION)
+    assert func.signature == "(x: int, y: str='a') -> bool"
+
+
+def test_indexer_captures_signature_for_no_arg_no_return(tmp_path: Path) -> None:
+    abs_path, rel = _write(tmp_path, "f.py", "def helper(): pass\n")
+    s = Storage()
+    index_python_file(abs_path, rel, s)
+    func = next(sym for sym in s.get_symbols_in_file(rel)
+                if sym.kind is SymbolKind.FUNCTION)
+    assert func.signature == "()"
+
+
+def test_indexer_captures_signature_for_method(tmp_path: Path) -> None:
+    src = (
+        "class Worker:\n"
+        "    def run(self, request: Request) -> Response:\n"
+        "        return Response()\n"
+    )
+    abs_path, rel = _write(tmp_path, "w.py", src)
+    s = Storage()
+    index_python_file(abs_path, rel, s)
+    method = next(sym for sym in s.get_symbols_in_file(rel)
+                  if sym.kind is SymbolKind.METHOD)
+    assert "self" in method.signature
+    assert "request: Request" in method.signature
+    assert "-> Response" in method.signature
+
+
+def test_indexer_captures_signature_for_async_function(tmp_path: Path) -> None:
+    abs_path, rel = _write(tmp_path, "f.py",
+                           "async def fetch(url: str) -> bytes:\n"
+                           "    return b''\n")
+    s = Storage()
+    index_python_file(abs_path, rel, s)
+    func = next(sym for sym in s.get_symbols_in_file(rel)
+                if sym.kind is SymbolKind.FUNCTION)
+    assert func.signature == "(url: str) -> bytes"
+
+
+def test_class_signature_is_empty_by_design(tmp_path: Path) -> None:
+    """v1: only function/method signatures are captured. Class /
+    interface / type alias signatures are the kind itself."""
+    abs_path, rel = _write(tmp_path, "c.py", "class Worker: pass\n")
+    s = Storage()
+    index_python_file(abs_path, rel, s)
+    cls = next(sym for sym in s.get_symbols_in_file(rel)
+               if sym.kind is SymbolKind.CLASS)
+    assert cls.signature == ""
+
+
 def test_indexer_handles_async_function(tmp_path: Path) -> None:
     abs_path, rel = _write(tmp_path, "m.py", "async def fetch(): pass\n")
     s = Storage()

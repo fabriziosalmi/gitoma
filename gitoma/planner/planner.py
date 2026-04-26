@@ -25,6 +25,7 @@ class PlannerAgent:
         prior_runs_context: str | None = None,
         repo_fingerprint_context: str | None = None,
         vertical_addendum: str | None = None,
+        skeleton_context: str | None = None,
     ) -> TaskPlan:
         """
         Generate a TaskPlan from a MetricReport.
@@ -56,6 +57,7 @@ class PlannerAgent:
                     prior_runs_context=prior_runs_context,
                     repo_fingerprint_context=repo_fingerprint_context,
                     vertical_addendum=vertical_addendum,
+                    skeleton_context=skeleton_context,
                 ),
             },
         ]

@@ -43,6 +43,40 @@ from gitoma.cpg.storage import Storage
 __all__ = ["index_python_file", "module_qualified_name_for"]
 
 
+_MAX_SIGNATURE_CHARS = 200
+"""Cap on captured signature text — protects the planner prompt
+from blowup on functions with very long type annotations
+(union types, generics nested 5 levels deep, etc.)."""
+
+
+def _format_python_signature(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str:
+    """Return a compact one-line signature text for a Python function.
+
+    Uses ``ast.unparse`` on args + return annotation. Falls back to
+    ``"(...)"`` on parser errors. Capped at ``_MAX_SIGNATURE_CHARS``
+    with a trailing ellipsis when truncated.
+    """
+    try:
+        args_text = ast.unparse(node.args)
+    except Exception:
+        return "(...)"
+    parts = [f"({args_text})"]
+    if node.returns is not None:
+        try:
+            parts.append(f" -> {ast.unparse(node.returns)}")
+        except Exception:
+            pass
+    sig = "".join(parts)
+    # Collapse internal newlines (annotations like Union[A, B] can
+    # span lines after unparsing some grammar shapes).
+    sig = " ".join(sig.split())
+    if len(sig) > _MAX_SIGNATURE_CHARS:
+        sig = sig[: _MAX_SIGNATURE_CHARS - 3] + "..."
+    return sig
+
+
 def module_qualified_name_for(rel_path: str) -> str:
     """Convert a repo-relative path like ``gitoma/cpg/queries.py`` to
     the qualified module name ``gitoma.cpg.queries``. Strips the
@@ -144,10 +178,12 @@ class _Visitor:
         qname = compose_qualified_name(
             tuple(part for part, _ in self._scope_stack) + (node.name,),
         )
+        signature = _format_python_signature(node)
         sid = self._storage.insert_symbol(Symbol(
             id=0, file=self._rel_path, line=node.lineno, col=node.col_offset,
             kind=kind, name=node.name, qualified_name=qname,
             parent_id=parent_id, is_public=not node.name.startswith("_"),
+            signature=signature,
         ))
         self.symbol_count += 1
         # Decorators are refs in the enclosing scope, not nested.

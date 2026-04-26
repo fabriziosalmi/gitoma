@@ -427,6 +427,55 @@ def run(
             return
 
         # ────────────────────────────────────────────────────────────────────────
+        # CPG-lite: build BEFORE PHASE 2 so both planner (Skeletal v1)
+        # and worker (BLAST RADIUS) consume the same index. Was inside
+        # PHASE 3 in v0; moved here in Skeletal v1 to expose the
+        # signature view to the planner. Build failures are silent;
+        # both consumers degrade to "no CPG signal" gracefully.
+        # ────────────────────────────────────────────────────────────────────────
+        _cpg_index = None
+        if (os.environ.get("GITOMA_CPG_LITE") or "").strip().lower() == "on":
+            _has_python = any(
+                lang.lower() == "python"
+                for lang in (git_repo.detect_languages() or [])
+            )
+            if _has_python:
+                try:
+                    import time as _t
+                    from gitoma.cpg import build_index as _build_cpg
+                    _cpg_t0 = _t.perf_counter()
+                    _cpg_index = _build_cpg(git_repo.root)
+                    _cpg_ms = int((_t.perf_counter() - _cpg_t0) * 1000)
+                    console.print(
+                        f"[muted]CPG-lite: indexed "
+                        f"{_cpg_index.file_count()} Python files, "
+                        f"{_cpg_index.symbol_count()} symbols "
+                        f"({_cpg_ms}ms)[/muted]"
+                    )
+                    try:
+                        from gitoma.core.trace import current as _ct
+                        _ct().emit(
+                            "cpg.index_built",
+                            file_count=_cpg_index.file_count(),
+                            symbol_count=_cpg_index.symbol_count(),
+                            reference_count=_cpg_index.reference_count(),
+                            build_ms=_cpg_ms,
+                        )
+                    except Exception:
+                        pass
+                except Exception as _exc:  # noqa: BLE001 — defensive
+                    console.print(
+                        f"[muted]CPG-lite: build failed "
+                        f"({type(_exc).__name__}); continuing without "
+                        f"BLAST RADIUS / Skeletal signal[/muted]"
+                    )
+                    try:
+                        from gitoma.core.trace import current as _ct2
+                        _ct2().exception("cpg.index_build_failed", _exc)
+                    except Exception:
+                        pass
+
+        # ────────────────────────────────────────────────────────────────────────
         # PHASE 2 — PLAN
         # ────────────────────────────────────────────────────────────────────────
         # Resume gate on PLANNING: skip only if we can actually rehydrate.
@@ -540,6 +589,57 @@ def run(
                                 f"{', '.join(_fws[:3]) or '(none)'}[/muted]"
                             )
 
+                # Skeletal v1: compressed per-file signature view from
+                # the CPG-lite index. Off by default OR when CPG isn't
+                # built — falls back to file-tree-only behavior. Opt-out
+                # independently via GITOMA_CPG_SKELETAL=off (so the
+                # operator can keep CPG on for BLAST RADIUS but skip
+                # the skeleton's prompt cost).
+                _skeleton_block: str | None = None
+                _skel_off = (
+                    os.environ.get("GITOMA_CPG_SKELETAL") or ""
+                ).strip().lower() == "off"
+                if _cpg_index is not None and not _skel_off:
+                    try:
+                        from gitoma.cpg.skeletal import (
+                            DEFAULT_MAX_CHARS as _SKEL_DEFAULT_MAX,
+                            render_skeleton,
+                        )
+                        _skel_budget = _SKEL_DEFAULT_MAX
+                        _budget_raw = os.environ.get(
+                            "GITOMA_CPG_SKELETAL_BUDGET", "",
+                        )
+                        if _budget_raw:
+                            try:
+                                _skel_budget = max(0, int(_budget_raw))
+                            except ValueError:
+                                pass
+                        _rendered = render_skeleton(_cpg_index, _skel_budget)
+                        if _rendered:
+                            _skeleton_block = _rendered
+                            console.print(
+                                f"[muted]Skeletal: injected "
+                                f"{len(_rendered)} chars into planner "
+                                f"prompt[/muted]"
+                            )
+                            try:
+                                from gitoma.core.trace import current as _ctsk
+                                _ctsk().emit(
+                                    "cpg.skeletal_rendered",
+                                    chars=len(_rendered),
+                                    budget=_skel_budget,
+                                )
+                            except Exception:
+                                pass
+                    except Exception as _exc:  # noqa: BLE001 — defensive
+                        try:
+                            from gitoma.core.trace import current as _ctsk2
+                            _ctsk2().exception(
+                                "cpg.skeletal_render_failed", _exc,
+                            )
+                        except Exception:
+                            pass
+
                 try:
                     plan = planner.plan(
                         report, file_tree,
@@ -549,6 +649,7 @@ def run(
                         vertical_addendum=(
                             _vertical.prompt_addendum if _vertical else None
                         ),
+                        skeleton_context=_skeleton_block,
                     )
                 except LLMError as e:
                     # LLM-specific error — give actionable hint
@@ -850,55 +951,11 @@ def run(
             _compile_fix_mode = any(
                 m.name == "build" and m.status == "fail" for m in report.metrics
             )
-            # CPG-lite v0 — opt-in Python symbol+reference index.
-            # When GITOMA_CPG_LITE=on AND the repo has Python sources,
-            # build the index ONCE here so each subtask in PHASE 3 can
-            # query it (BLAST RADIUS prompt block in worker.py). Build
-            # failures are silent: log + continue without an index
-            # (graceful degradation, the worker treats None as "no
-            # CPG signal" without erroring).
-            _cpg_index = None
-            if (os.environ.get("GITOMA_CPG_LITE") or "").strip().lower() == "on":
-                _has_python = any(
-                    lang.lower() == "python"
-                    for lang in (git_repo.detect_languages() or [])
-                )
-                if _has_python:
-                    try:
-                        import time as _t
-                        from gitoma.cpg import build_index as _build_cpg
-                        _cpg_t0 = _t.perf_counter()
-                        _cpg_index = _build_cpg(git_repo.root)
-                        _cpg_ms = int((_t.perf_counter() - _cpg_t0) * 1000)
-                        console.print(
-                            f"[muted]CPG-lite: indexed "
-                            f"{_cpg_index.file_count()} Python files, "
-                            f"{_cpg_index.symbol_count()} symbols "
-                            f"({_cpg_ms}ms)[/muted]"
-                        )
-                        try:
-                            from gitoma.core.trace import current as _ct
-                            _ct().emit(
-                                "cpg.index_built",
-                                file_count=_cpg_index.file_count(),
-                                symbol_count=_cpg_index.symbol_count(),
-                                reference_count=_cpg_index.reference_count(),
-                                build_ms=_cpg_ms,
-                            )
-                        except Exception:
-                            pass
-                    except Exception as _exc:  # noqa: BLE001 — defensive
-                        console.print(
-                            f"[muted]CPG-lite: build failed "
-                            f"({type(_exc).__name__}); continuing without "
-                            f"BLAST RADIUS signal[/muted]"
-                        )
-                        try:
-                            from gitoma.core.trace import current as _ct2
-                            _ct2().exception("cpg.index_build_failed", _exc)
-                        except Exception:
-                            pass
-
+            # CPG-lite index: built once before PHASE 2 (above) and
+            # passed through to the worker here. ``_cpg_index`` may
+            # be None when the env opt-in isn't set OR the repo has
+            # no Python — the worker treats None as "no CPG signal"
+            # and silently skips BLAST RADIUS injection.
             worker = WorkerAgent(
                 llm=llm,
                 git_repo=git_repo,

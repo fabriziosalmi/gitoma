@@ -76,6 +76,14 @@ class Symbol:
     parent_id: int | None
     is_public: bool
     language: str = "python"
+    # Skeletal v1: compressed signature text used by the planner-
+    # prompt skeleton renderer. Empty for kinds where the kind itself
+    # IS the signature (CLASS, MODULE, ASSIGNMENT, IMPORT, INTERFACE,
+    # TYPE_ALIAS) and for indexers that haven't been extended yet
+    # (back-compat default). Populated as
+    # ``"(req: dict) -> str"`` for Python functions / methods,
+    # ``"(url: string): Promise<string>"`` for TS, etc.
+    signature: str = ""
 
 
 @dataclass(frozen=True)
