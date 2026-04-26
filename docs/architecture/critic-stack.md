@@ -304,8 +304,8 @@ any syntax validation.
 builtin `compile()`. `run.py`'s refiner block invokes the helper
 after `apply_patches`. On failure: emit `critic_syntax_check.fail`
 with `phase="refiner"`, hard-reset the worktree to v0, emit
-`critic_refiner.reverted` with rationale `syntax_check_failed:
-<path>: <error>`, and skip meta-eval entirely (a broken patch can
+`critic_refiner.reverted` with rationale
+`syntax_check_failed: PATH: ERROR`, and skip meta-eval entirely (a broken patch can
 never be a refinement, no judge needed).
 
 **Evidence**: rung-3 v16 — refiner changed a Python triple-quote
@@ -540,7 +540,7 @@ sandboxed CI envs without network access.
 
 **Out of scope for v1** (deferred):
 - Path-level HTTP 404 detection on real domains (e.g.
-  `https://github.com/<invented>/<repo>`) — would need full HTTP
+  `https://github.com/INVENTED/REPO`) — would need full HTTP
   for every URL, too slow at scale.
 - Image references (`![](src)`) — same regex would work but
   not yet wired; defer until evidence of image hallucination.
@@ -677,7 +677,7 @@ BuildAnalyzer + test pass. Touched today only for visibility:
   `## ⚠️ Q&A self-consistency phase CRASHED` block with the first
   line of the crash reason and "Treat this PR as ungated"
   language.
-- See [Q&A workflow](./qa-workflow.md) (TBD) for the full phase.
+- See `qa-workflow.md` (TBD — page not yet authored) for the full phase.
 
 ## In-process JSON repair (orthogonal)
 
