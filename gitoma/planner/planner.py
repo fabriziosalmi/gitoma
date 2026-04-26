@@ -24,6 +24,7 @@ class PlannerAgent:
         repo_brief: RepoBrief | None = None,
         prior_runs_context: str | None = None,
         repo_fingerprint_context: str | None = None,
+        vertical_addendum: str | None = None,
     ) -> TaskPlan:
         """
         Generate a TaskPlan from a MetricReport.
@@ -35,6 +36,12 @@ class PlannerAgent:
                 (title, stack, build/test commands, CI tools, …) — when
                 provided, it is injected at the top of the planner prompt
                 so every LLM call has shared ground truth about the project
+            vertical_addendum: optional one-paragraph narrowing rule
+                from the active Vertical record (e.g. "VERTICAL=docs
+                ACTIVE. You may only emit subtasks whose file_hints are
+                documentation files."). Injected right before the JSON
+                schema instruction so it acts as the highest-recency
+                constraint the LLM sees.
 
         Returns:
             TaskPlan with prioritized tasks and subtasks
@@ -48,6 +55,7 @@ class PlannerAgent:
                     repo_brief=repo_brief,
                     prior_runs_context=prior_runs_context,
                     repo_fingerprint_context=repo_fingerprint_context,
+                    vertical_addendum=vertical_addendum,
                 ),
             },
         ]

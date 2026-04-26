@@ -449,24 +449,27 @@ def run(
                 from gitoma.planner.planner import PlannerAgent
                 from gitoma.planner.llm_client import LLMError
 
-                # Vertical-mode scope filter: when GITOMA_SCOPE=docs is
-                # set (by the `gitoma docs` command), filter the audit
-                # to doc-relevant metrics ONLY before the planner sees
-                # it. This prevents the planner from proposing tasks
-                # for failing Build/Test/Security/etc. metrics that
-                # are out-of-scope for the docs vertical (avoids the
-                # lws dry-run failure mode where a security false-
-                # positive caused T001 to attempt edits to lws.py).
+                # Vertical-mode scope filter (Castelletto Taglio A):
+                # when GITOMA_SCOPE=<name> is set (by `gitoma docs`,
+                # `gitoma quality`, …) and the name matches a registered
+                # Vertical, filter the audit to that vertical's allow-
+                # listed metrics ONLY before the planner sees it. This
+                # prevents the planner from proposing tasks for failing
+                # Build/Test/Security metrics that are out-of-scope for
+                # a narrowed vertical (avoids the lws dry-run failure
+                # mode where a security false-positive caused T001 to
+                # attempt edits to lws.py while the operator wanted a
+                # docs-only PR).
                 from gitoma.planner.scope_filter import (
-                    active_scope as _active_scope,
-                    filter_metrics_to_doc_scope as _filter_metrics_docs,
+                    active_vertical as _active_vertical,
+                    filter_metrics_by_vertical as _filter_metrics_by_v,
                 )
-                _scope = _active_scope()
-                if _scope == "docs":
-                    _scope_summary = _filter_metrics_docs(report)
+                _vertical = _active_vertical()
+                if _vertical is not None:
+                    _scope_summary = _filter_metrics_by_v(report, _vertical)
                     if _scope_summary:
                         console.print(
-                            f"[muted]Scope=docs: kept "
+                            f"[muted]Scope={_vertical.name}: kept "
                             f"{_scope_summary['metrics_kept']}, "
                             f"dropped {_scope_summary['metrics_dropped']}[/muted]"
                         )
@@ -543,6 +546,9 @@ def run(
                         repo_brief=repo_brief,
                         prior_runs_context=_prior_runs or None,
                         repo_fingerprint_context=_fingerprint_block or None,
+                        vertical_addendum=(
+                            _vertical.prompt_addendum if _vertical else None
+                        ),
                     )
                 except LLMError as e:
                     # LLM-specific error — give actionable hint
@@ -632,24 +638,26 @@ def run(
                         except Exception:
                             pass
 
-                # ── Vertical scope filter: docs-only mode ────────────────────
-                # When GITOMA_SCOPE=docs (set by `gitoma docs`), drop every
-                # subtask whose file_hints contain any non-doc path. Stricter
-                # than Layer-B (which only drops README-only): here a
-                # subtask hinting BOTH a doc and a source file is OUT —
-                # under the docs vertical, source touches are out of scope.
-                if plan and plan.tasks and _scope == "docs":
+                # ── Vertical scope filter: registry-driven ────────────────────
+                # When a vertical is active (set by `gitoma docs`,
+                # `gitoma quality`, …), drop every subtask whose
+                # file_hints contain any path outside the vertical's
+                # allow-list. Stricter than Layer-B (which only drops
+                # README-only): here a subtask hinting BOTH an in-scope
+                # and an out-of-scope file is OUT — under a narrowed
+                # vertical, mixed-hint = boundary cross = drop.
+                if plan and plan.tasks and _vertical is not None:
                     from gitoma.planner.scope_filter import (
-                        filter_plan_to_doc_scope as _filter_plan_docs,
+                        filter_plan_by_vertical as _filter_plan_by_v,
                     )
-                    _scope_plan_summary = _filter_plan_docs(plan)
+                    _scope_plan_summary = _filter_plan_by_v(plan, _vertical)
                     if _scope_plan_summary:
                         _names = [
                             f"{d['subtask_id']}({','.join(d['file_hints'][:1])})"
                             for d in _scope_plan_summary["dropped_subtasks"][:4]
                         ]
                         console.print(
-                            f"[muted]Scope=docs: dropped "
+                            f"[muted]Scope={_vertical.name}: dropped "
                             f"{_scope_plan_summary['drop_count']} subtask(s) "
                             f"— {', '.join(_names)}[/muted]"
                         )

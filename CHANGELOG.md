@@ -8,6 +8,36 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **Castelletto Taglio A — vertical-as-config refactor**
+  (`gitoma/verticals/`): turns vertical mode (`gitoma docs`,
+  `gitoma quality`, …) from ad-hoc env-var checks scattered
+  across the planner / CLI into a single declarative `Vertical`
+  dataclass per concern. New `gitoma/verticals/__init__.py`
+  registry is the single source of truth — adding a vertical now
+  costs **1 file** with NO edits to `run.py`, `scope_filter.py`,
+  `prompts.py`, or `cli/commands/_vertical.py`. The CLI factory
+  (`gitoma/cli/commands/_vertical.py`) generates per-vertical
+  Typer commands by iterating the registry; the audit-side and
+  plan-side scope filters consume the registry; the planner
+  prompt receives the vertical's `prompt_addendum` as a
+  HARD-RULE block injected right before the JSON schema
+  instruction (highest-recency narrowing constraint). Legacy
+  `is_doc_path` / `filter_metrics_to_doc_scope` /
+  `filter_plan_to_doc_scope` / `DOC_*` constants kept as thin
+  shims for callers and tests written before the refactor.
+- **`gitoma quality` — second vertical** (lint / format /
+  type-check config files only): registered as the architectural
+  acceptance test for Taglio A — `gitoma quality --help`
+  appearing without any wiring edit proves the "1 file = 1
+  vertical" property. Allows ~30 common config basenames
+  (`.prettierrc*`, `.eslintrc*`, `biome.json`, `tsconfig.json`,
+  `.ruff.toml`, `setup.cfg`, `mypy.ini`, `.pylintrc`,
+  `.editorconfig`, `.pre-commit-config.yaml`, `.golangci.yml`,
+  `rustfmt.toml`, `clippy.toml`, …); narrows the audit to the
+  `code_quality` metric only. Excludes `pyproject.toml`
+  intentionally — `[tool.*]` sub-section logic is deferred to a
+  future Taglio.
+
 - **Ψ-lite — universal fitness function (Γ + Ω components)**
   (`gitoma/worker/psi_score.py`): scalar quality gate between
   structural guards and LLM critics. `Ψ = α·Γ - λ·Ω` where Γ is

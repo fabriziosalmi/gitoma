@@ -41,6 +41,7 @@ def planner_user_prompt(
     repo_brief: RepoBrief | None = None,
     prior_runs_context: str | None = None,
     repo_fingerprint_context: str | None = None,
+    vertical_addendum: str | None = None,
 ) -> str:
     metrics_summary = "\n".join(
         f"- {m.display_name}: score={m.score:.2f} status={m.status} | {m.details}"
@@ -96,6 +97,20 @@ def planner_user_prompt(
     build_integrity_fail = any(
         m.name == "build" and m.status == "fail" for m in report.metrics
     )
+    # Vertical addendum — declarative narrowing prompt from the active
+    # Vertical record (Castelletto Taglio A). When `gitoma docs` is the
+    # entry point, this block tells the LLM to emit ONLY doc-file
+    # subtasks; future verticals follow the same shape. Empty string
+    # when running full-pass `gitoma run`. Placed RIGHT BEFORE the
+    # JSON-schema instruction so it is the last narrowing rule the
+    # LLM sees before generating output (highest recency, highest
+    # weight).
+    vertical_block = ""
+    if vertical_addendum:
+        vertical_block = (
+            f"\nHARD RULE — VERTICAL SCOPE: {vertical_addendum}\n"
+        )
+
     compile_fix_block = ""
     if build_integrity_fail:
         manifests = ", ".join(f"`{m}`" for m in _BUILD_MANIFESTS)
@@ -161,7 +176,7 @@ the ``docs/`` folder, not README. The only exception: the
 explicitly cites README by name. Otherwise: skip README entirely or
 include it ONLY as a SECONDARY ``file_hints`` entry alongside the
 code file actually being changed.
-{compile_fix_block}
+{compile_fix_block}{vertical_block}
 
 Respond with ONLY this JSON schema (no extra text):
 {{
