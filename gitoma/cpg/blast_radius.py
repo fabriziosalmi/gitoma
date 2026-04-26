@@ -45,6 +45,7 @@ INDEXED_EXTENSIONS: frozenset[str] = frozenset({
     ".mjs",    # CPG-lite v0.5-expansion
     ".cjs",    # CPG-lite v0.5-expansion
     ".rs",     # CPG-lite v0.5-expansion
+    ".go",     # CPG-lite v0.5-expansion-go
 })
 """File extensions the renderer recognises as indexable. Kept in
 sync with ``gitoma.cpg.INDEXED_SUFFIXES`` so a file we index can

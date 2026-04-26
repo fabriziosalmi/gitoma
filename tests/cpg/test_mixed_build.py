@@ -221,3 +221,65 @@ def test_skeleton_works_across_four_languages(tmp_path: Path) -> None:
     assert "tsHelper(): void" in out
     assert "jsHelper()" in out
     assert "rust_helper(n: u32) -> u32" in out
+
+
+# ── v0.5-expansion-go: 5-language coexistence ─────────────────────
+
+
+def test_five_language_repo_indexes_all(tmp_path: Path) -> None:
+    """Single build_index walks .py + .ts + .js + .rs + .go in one
+    pass, dispatches per extension, all 5 show up tagged correctly."""
+    _populate(tmp_path, {
+        "src/handler.py": "def py_handler(): pass\n",
+        "frontend/api.ts": "export function tsApi(): void {}\n",
+        "frontend/util.js": "export function jsUtil() {}\n",
+        "backend/main.rs": "pub fn rust_main() {}\n",
+        "service/main.go": "package main\nfunc GoMain() {}\n",
+    })
+    idx = build_index(tmp_path)
+    assert idx.file_count() == 5
+    by_lang = {}
+    for name in ("py_handler", "tsApi", "jsUtil", "rust_main", "GoMain"):
+        sym = next(s for s in idx.get_symbol(name)
+                   if s.kind is SymbolKind.FUNCTION)
+        by_lang[sym.language] = sym
+    assert set(by_lang.keys()) == {
+        "python", "typescript", "javascript", "rust", "go",
+    }
+
+
+def test_five_language_blast_radius(tmp_path: Path) -> None:
+    """BLAST RADIUS renders sections for files of all 5 languages."""
+    from gitoma.cpg.blast_radius import render_blast_radius_block
+    _populate(tmp_path, {
+        "lib.py": "def py_helper(): pass\n",
+        "lib.ts": "export function tsHelper(): void {}\n",
+        "lib.js": "export function jsHelper() {}\n",
+        "lib.rs": "pub fn rust_helper() {}\n",
+        "lib.go": "package lib\nfunc GoHelper() {}\n",
+    })
+    idx = build_index(tmp_path)
+    block = render_blast_radius_block(
+        ["lib.py", "lib.ts", "lib.js", "lib.rs", "lib.go"], idx,
+    )
+    for fn in ("py_helper", "tsHelper", "jsHelper", "rust_helper", "GoHelper"):
+        assert fn in block
+
+
+def test_five_language_skeleton_with_signatures(tmp_path: Path) -> None:
+    """Skeletal renderer with Go signatures alongside the others."""
+    from gitoma.cpg.skeletal import render_skeleton
+    _populate(tmp_path, {
+        "go_lib.go": (
+            "package x\n"
+            "func GoFn(n int, s string) (bool, error) { return false, nil }\n"
+            "type Repo struct{}\n"
+            "func (r *Repo) Find(id int) error { return nil }\n"
+        ),
+    })
+    idx = build_index(tmp_path)
+    out = render_skeleton(idx)
+    assert "## go_lib.go" in out
+    assert "GoFn(n int, s string) (bool, error)" in out
+    assert "class Repo" in out
+    assert "Find(id int) error" in out

@@ -58,6 +58,8 @@ dependencies = [
     # indexed). Pinned to current major to avoid grammar surprises.
     "tree-sitter-javascript>=0.25,<1.0",
     "tree-sitter-rust>=0.24,<1.0",
+    # CPG-lite Go indexer. Pinned to current major.
+    "tree-sitter-go>=0.25,<1.0",
 ]
 
 [project.scripts]

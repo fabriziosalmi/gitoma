@@ -8,6 +8,34 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **CPG-lite Go indexer** (`gitoma/cpg/go_indexer.py`): adds `.go`
+  to the indexed-suffix set, completing the mainstream-backend
+  language coverage (Python + TS + JS + Rust + Go). Two Go-
+  specific quirks: **visibility via capital-letter naming** (no
+  `pub` keyword — name starting with ASCII uppercase = exported;
+  the Python/TS underscore convention is NOT applied) and
+  **methods declared via receiver functions outside the type
+  block** (`func (r *Repo) Find()`) — same pattern as Rust
+  impl_item, with `parent_id` chained best-effort to the
+  receiver type's Symbol via same-file lookup. Generic receivers
+  (`*Repo[T]`) have their generics stripped before lookup.
+  `type_declaration` body's type_specs map to CLASS (struct) /
+  INTERFACE (interface_type) / TYPE_ALIAS (everything else);
+  parenthesized `type ( … )` blocks flatten to one symbol per
+  spec. Same for `const ( … )` / `var ( … )`. Imports parse
+  bare and aliased shapes (`import "fmt"`, `import log
+  "github.com/sirupsen/logrus"`); bare imports bind the last
+  path segment as the local name. Selector calls
+  (`fmt.Println(...)`) record `Println` as the called name. `init()`
+  / `main()` end up `is_public=False` (lowercase rule); the
+  BLAST RADIUS still surfaces them when touched. Mixed-build
+  test extends to 5 languages — `.py + .ts + .js + .rs + .go` in
+  one `build_index()` call all coexist with correct language
+  tags + cross-language renderable BLAST RADIUS / Skeletal.
+  Out of scope: embedded fields as separate Symbols, go.mod /
+  go.work resolution, build tags (`// +build`), generic
+  type-parameter parsing.
+
 - **CPG-lite v0.5-expansion — JavaScript + Rust indexers**
   (`gitoma/cpg/javascript_indexer.py`, `gitoma/cpg/rust_indexer.py`):
   drops in two more tree-sitter grammars on top of v0.5-slim TS,

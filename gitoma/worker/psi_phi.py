@@ -40,6 +40,7 @@ _INDEXABLE_EXTS = (
     ".py",                             # v0
     ".ts", ".tsx",                     # v0.5-slim
     ".js", ".mjs", ".cjs", ".rs",      # v0.5-expansion
+    ".go",                             # v0.5-expansion-go
 )
 
 

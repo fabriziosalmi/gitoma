@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from gitoma.cpg._base import SymbolKind
+from gitoma.cpg.go_indexer import index_go_file
 from gitoma.cpg.javascript_indexer import index_javascript_file
 from gitoma.cpg.python_indexer import index_python_file
 from gitoma.cpg.rust_indexer import index_rust_file
@@ -45,6 +46,7 @@ _INDEXABLE_EXTS = (
     ".py",                             # v0
     ".ts", ".tsx",                     # v0.5-slim
     ".js", ".mjs", ".cjs", ".rs",      # v0.5-expansion
+    ".go",                             # v0.5-expansion-go
 )
 
 
@@ -76,6 +78,8 @@ def _index_text_to_storage(rel_path: str, content: str) -> Storage:
             index_javascript_file(tmp_path, rel_path, storage)
         elif rel_path.endswith(".rs"):
             index_rust_file(tmp_path, rel_path, storage)
+        elif rel_path.endswith(".go"):
+            index_go_file(tmp_path, rel_path, storage)
     finally:
         try:
             tmp_path.unlink()
