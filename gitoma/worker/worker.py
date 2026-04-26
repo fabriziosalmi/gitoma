@@ -518,6 +518,62 @@ class WorkerAgent:
                 compile_error_feedback = err_text
                 continue
 
+            # G18 + G19 orphan-symbol detection (both opt-in via
+            # GITOMA_G18_ABANDONED / GITOMA_G19_ECHO_CHAMBER).
+            # G18 = patch removed last in-file callers of a kept
+            # symbol; G19 = new symbols only called from patch-
+            # added code. Both run independently; either fails
+            # → revert + retry with feedback.
+            from gitoma.worker.orphan_check import (
+                check_g18_abandoned_helpers,
+                check_g19_echo_chamber,
+            )
+            g18_result = check_g18_abandoned_helpers(
+                self._git.root, touched, originals,
+            )
+            if g18_result is not None:
+                err_text = g18_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g18_abandoned.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(g18_result.conflicts),
+                    symbols=sorted({c.symbol_name for c in g18_result.conflicts}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G18 abandoned-helper check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(g18_result.conflicts)} symbol(s) abandoned."
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+            g19_result = check_g19_echo_chamber(
+                self._git.root, touched, originals,
+                cpg_index=self._cpg_index,
+            )
+            if g19_result is not None:
+                err_text = g19_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g19_echo.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(g19_result.conflicts),
+                    symbols=sorted({c.symbol_name for c in g19_result.conflicts}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G19 echo-chamber check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(g19_result.conflicts)} symbol(s) echo."
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
             # AST-diff guard: every top-level def the original had,
             # the new content must still have. Catches the rung-3
             # v17/v18 failure mode (worker emitted a "modify" patch

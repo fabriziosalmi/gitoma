@@ -8,6 +8,33 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **G18 + G19 orphan-symbol detection**
+  (`gitoma/worker/orphan_check.py`): two CPG-based structural
+  critics batched in one module. **G18 abandoned-helper**: a
+  symbol the patch KEPT in a touched file but whose last in-file
+  callers were deleted by the patch. Single-file scope in v1
+  (cross-file abandons deferred). **G19 echo-chamber**: NEW
+  public symbols added by the patch whose only callers come
+  from patch-added code (the symbol's own newly-populated file
+  or other files with no pre-existing public symbols). Repo-wide
+  scope using the AFTER `cpg_index` built before PHASE 2.
+  File-level v1 heuristic for G19 (callers are classified by
+  FILE not by enclosing symbol — position-based caller-symbol
+  resolution would require a Reference schema extension and is
+  deferred). G19 explicitly skips 0-caller symbols (G16 territory,
+  not echo-chamber). Both **opt-in via env**:
+  `GITOMA_G18_ABANDONED=on` / `GITOMA_G19_ECHO_CHAMBER=on`.
+  Default OFF — false-positive risk on libraries / new entry
+  points needs operator judgment first. Wired between G15 and
+  Ψ-full in the worker apply pipeline; both run independently;
+  failures revert + retry with detailed feedback. New trace
+  events `critic_g18_abandoned.fail` + `critic_g19_echo.fail`.
+  Multi-language: works on Python / TypeScript / JavaScript /
+  Rust / Go (anywhere CPG-lite indexes). Out of scope: G18
+  cross-file scope, position-based G19 caller-symbol resolution
+  (vs file-based v1), test-file-as-caller filtering (test refs
+  count as legitimate external callers in v1).
+
 - **G15 sibling-config reconciliation guard**
   (`gitoma/worker/sibling_config.py`): worker-side check that
   rejects patches creating / modifying a JS/TS quality config
