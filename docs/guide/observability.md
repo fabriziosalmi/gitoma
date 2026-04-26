@@ -91,7 +91,7 @@ octocat/a           DONE        —       never       done
 octocat/b           PR_OPEN     —       12m ago     idle
 acme/c              WORKING     1234    15m ago     ORPHANED
 
-⚠  1 orphaned run(s) detected.
+[!]  1 orphaned run(s) detected.
   → Reset with: gitoma reset https://github.com/acme/c
 ```
 

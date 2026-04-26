@@ -7,8 +7,13 @@ gitoma/
 ├── cli/              Typer app — one file per command, thin entry points.
 ├── core/             Cross-cutting primitives (config, state, repo, trace, GitHub client).
 ├── analyzers/        Metric scanners. One per metric. Pluggable via a registry.
-├── planner/          LLM client + TaskPlan model + prompt assembly.
-├── worker/           Patch applier, committer, worker agent.
+├── context/          Repo brief + Occam Observer client (fingerprint, agent-log, observation POST).
+├── planner/          LLM client + TaskPlan model + prompt assembly + plan-time post-processors
+│                     (real_bug_filter, occam_filter, test_to_source).
+├── worker/           Patch applier, committer, worker agent + 14-guard apply pipeline
+│                     (schema_validator, content_grounding, config_grounding, doc_preservation,
+│                      url_grounding, psi_score, ...).
+├── critic/           Multi-persona panel + devil + refiner + Q&A self-consistency.
 ├── pr/               GitHub PR creation + templating.
 ├── review/           Copilot watcher, integrator, reflexion dual-agent, self-critic.
 ├── api/              FastAPI server (REST + web cockpit router + SSE).
@@ -29,9 +34,13 @@ gitoma/
 
 **GitRepo** (`core/repo.py`) — thin wrapper over GitPython. Owns the clone temp dir, authed remote URL, and push/commit semantics.
 
-**LLMClient** (`planner/llm_client.py`) — OpenAI-compatible client with `chat` and `chat_json` methods and a three-level health check (`check_lmstudio` returns OK/WARN/FAIL with actionable details).
+**LLMClient** (`planner/llm_client.py`) — OpenAI-compatible client with `chat` and `chat_json` methods, a three-level health check (`check_lmstudio` returns OK/WARN/FAIL with actionable details), and four in-process repair passes (`_attempt_json_repair`: markdown-fence strip, trailing-comma strip, bare-quote escape, bare-newline escape) that recover 4B–14B-class model JSON slop without a re-prompt round-trip.
 
 **Analyzer registry** (`analyzers/registry.py`) — every metric is a subclass of `Analyzer`. Registration is by class; the CLI iterates them. Adding a metric is one file.
+
+**Critic stack** (`worker/*` + `planner/real_bug_filter.py`) — 14 composable guards (G1–G14), two planner-time post-processors (Layer-A real-bug task synthesis, Layer-B README banishment), and an opt-in scalar Ψ-lite quality gate. Every guard was added in response to a specific live bench failure on the [gitoma-bench-ladder](https://github.com/fabriziosalmi/gitoma-bench-ladder) repo. See [critic stack](./critic-stack) for the full chronology with bench evidence per guard.
+
+**Occam Observer integration** (`context/occam_client.py`) — optional companion gateway ([fabriziosalmi/occam-observer](https://github.com/fabriziosalmi/occam-observer)) provides a `/repo/fingerprint` snapshot (declared deps, frameworks, manifests, entrypoints) injected into the planner prompt as ground truth and consumed by the worker-side content-grounding guards. Also accepts `POST /observation` after every subtask to build a cross-run failure log that feeds the G9 deterministic post-plan filter. Feature is fail-open — runs without Occam work unchanged.
 
 ## Shape of a run
 
@@ -64,7 +73,7 @@ The three share everything below them: the CLI is the authoritative layer, the R
 
 ## Test matrix
 
-250+ tests across unit, integration, and end-to-end layers.
+970+ tests across unit, integration, and end-to-end layers. Notable groups:
 
 | Layer | Tests |
 |---|---|
@@ -76,6 +85,15 @@ The three share everything below them: the CLI is the authoritative layer, the R
 | `tests/test_mcp_write_tools.py` | MCP contract + size caps + idempotency |
 | `tests/test_api_industrial.py` | REST hardening (SSE heartbeat, backpressure, env scrub, error_id) |
 | `tests/test_ui_industrial.py` | HTML semantics, CSS contract, JS architecture, CLI glyph/banner |
+| `tests/test_schema_validator.py` | G10 — bundled schemastore.org JSON-Schema validation |
+| `tests/test_content_grounding.py` | G11 — doc framework grounding against fingerprint |
+| `tests/test_config_grounding.py` | G12 — JS/TS config npm-package grounding |
+| `tests/test_doc_preservation.py` | G13 — fenced code-block preservation in docs |
+| `tests/test_url_grounding.py` | G14 — URL/path reachability for added doc links |
+| `tests/test_real_bug_filter.py` | Layer-A/B planner-time post-processors |
+| `tests/test_psi_score.py` | Ψ-lite Γ + Ω scoring + env-driven gate |
+| `tests/test_occam_client.py` | Occam Observer HTTP client + fingerprint formatter |
+| `tests/test_llm_json_repair.py` | LLM-side fence-strip + trailing-comma + bare-quote repair |
 | `tests/e2e/*` | Full-server tests with `TestClient`, subprocess SIGKILL → orphan detection |
 
 Every PR must pass all tests + ruff + mypy strict.

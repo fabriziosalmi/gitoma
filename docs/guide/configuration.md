@@ -33,7 +33,7 @@ Every line shows the value and its source. Example output:
 `gitoma config set` warns before writing if a higher-priority source already has the key:
 
 ```
-⚠  Your new GITHUB_TOKEN will be overridden at load time by:
+[!]  Your new GITHUB_TOKEN will be overridden at load time by:
    → $ENV
    Remove that source first, or edit it directly. Writing to config.toml anyway.
 ```

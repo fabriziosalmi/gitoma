@@ -17,23 +17,21 @@ hero:
       link: https://github.com/fabriziosalmi/gitoma
 
 features:
-  - icon: 🧠
-    title: Local-first LLM
+  - title: Self-correcting guard stack
+    details: 14 composable guards (G1–G14) catch specific classes of LLM patch slop — broken syntax, dropped functions, hallucinated frameworks/URLs/configs, README destruction. Plus two planner-time post-processors (Layer-A real-bug task synthesis, Layer-B README banishment) and an opt-in scalar Ψ-lite quality gate. Every guard was added in response to a specific live bench failure.
+  - title: Local-first LLM
     details: Plans and writes patches with a model running on your machine — LM Studio, Ollama, or any OpenAI-compatible endpoint. No SaaS, no egress, no surprises on the bill.
-  - icon: ⚙️
-    title: Full pipeline, resumable
+  - title: Grounded by Occam Observer
+    details: Optional integration with the companion Occam Observer gateway. Per-run fingerprint snapshot (declared deps, frameworks, manifests) is injected into the planner prompt as ground truth and consumed by the worker-side content-grounding guards. Pre-empts hallucinations at plan time.
+  - title: Full pipeline, resumable
     details: Analyze → Plan → Execute → PR → Self-Review. Every phase persists state; a crash or kill is one `--resume` away from picking up at the last committed subtask.
-  - icon: 📡
-    title: Live web cockpit
+  - title: Live web cockpit
     details: A read-only dashboard streams every phase over WebSocket, with keyboard shortcuts, command palette, and SSE live logs — no build step, no external deps.
-  - icon: 🔌
-    title: REST + MCP
+  - title: REST + MCP
     details: Everything the CLI does is a Bearer-protected REST endpoint. A built-in MCP server also exposes GitHub context + write tools to Claude Desktop and any MCP client.
-  - icon: 🛡
-    title: Hardened by default
+  - title: Hardened by default
     details: Constant-time auth, process-group isolation, credential redaction, WCAG AA contrast, CSP headers, focus trap in dialogs, prefers-reduced-motion. Audited surface end-to-end.
-  - icon: 🔭
-    title: Structured observability
+  - title: Structured observability
     details: Each run writes a JSONL trace under `~/.gitoma/logs/`. `gitoma logs --follow` tails it live; the cockpit renders phases, heartbeat, and orphan detection without polling the agent.
 ---
 

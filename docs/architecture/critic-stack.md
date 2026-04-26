@@ -674,7 +674,7 @@ BuildAnalyzer + test pass. Touched today only for visibility:
   Q&A phase that crashed mid-flight produced an empty PR-body
   section that looked identical to a successful Q&A pass.
   Reviewer had no flag. The crash branch now emits a
-  `## ⚠️ Q&A self-consistency phase CRASHED` block with the first
+  `## [!] Q&A self-consistency phase CRASHED` block with the first
   line of the crash reason and "Treat this PR as ungated"
   language.
 - See `qa-workflow.md` (TBD — page not yet authored) for the full phase.
@@ -700,28 +700,28 @@ model. Idempotent on already-valid JSON.
 
 | Run | Worker | patch | tests | Notes |
 |-----|--------|-------|-------|-------|
-| v3 | gemma | ✅ | ❌ | 1-tuple bug `(name)` instead of `(name,)` |
-| v11 | qwen8b | ✅ | ❌ | Correct fix + `pyproject.toml` collateral (G1 not yet shipped) |
-| v12 | qwen8b | ❌ | ❌ | Silent JSON-emit failures (G3 not yet shipped) |
-| v13 | qwen8b | ✅ | ❌ | Parameterised but psycopg2 over-scope (G4 not yet shipped) |
-| v14 | qwen8b | ✅ | ❌ | sqlite3 kept BUT helpers deleted (G5 not yet shipped) |
-| **v15** | qwen8b | ✅ | **✅** | **4/4 GREEN — first fully passing rung-3 PR (partly lucky)** |
-| v16 | qwen8b | ✅ | ❌ | Refiner corrupted `"""` → `""` (G6 not yet shipped) |
-| v17 | qwen8b | ✅ | ❌ | Refiner gap CLOSED, but T002 ate test fixtures |
-| v18 | qwen8b | ✅ | ❌ | Same test-file rule-4 violation as v17 (2/2 — systematic) |
-| v19 | qwen8b | ✅ | ❌ | Helpers preserved, but `>` in SQL string → runtime OperationalError |
-| v20 | qwen8b | ✅ | 3/4 | `row_factory` dropped from `get_conn` body |
-| v21 | qwen8b | ✅ | 3/4 | Same row_factory loss — stochastic repeat (G7 silent — no AST violation) |
-| **v22** | qwen8b | ✅ | **✅** | **4/4 GREEN — ENGINEERED (G7 + G8-worker both fired live + recovered via retry)** |
-| v23 | qwen8b | ✅ | ❌ | Mac first run with Occam; CRITIC_PANEL_DEVIL=false (no .env) → devil/refiner/Q&A silent; 14 observations POSTed to Occam |
-| v24 | qwen8b | ✅ | ❌ | Occam read+write live (planner injected 15 prior entries); refiner injected `>` into init_schema SQL string — G8 gap on refiner path |
-| **v25** | qwen8b | ✅ | **✅** | **4/4 GREEN — G8-on-refiner caught the v24 regression live (`phase=refiner` fired, reverted to v0)** |
-| **v26b** | qwen8b | ✅ | **✅** | **4/4 GREEN — G9 partial fire (narrow window missed CI pattern) + G8-on-refiner catch** |
-| **v27** | qwen8b | ✅ | **✅** | **4/4 GREEN — G9 full coverage (7d/200 window) dropped 2/12 subtasks at plan time + G8-on-refiner. Only 1 worker fail (transient). Cleanest run yet.** |
+| v3 | gemma | Y | N | 1-tuple bug `(name)` instead of `(name,)` |
+| v11 | qwen8b | Y | N | Correct fix + `pyproject.toml` collateral (G1 not yet shipped) |
+| v12 | qwen8b | N | N | Silent JSON-emit failures (G3 not yet shipped) |
+| v13 | qwen8b | Y | N | Parameterised but psycopg2 over-scope (G4 not yet shipped) |
+| v14 | qwen8b | Y | N | sqlite3 kept BUT helpers deleted (G5 not yet shipped) |
+| **v15** | qwen8b | Y | **Y** | **4/4 GREEN — first fully passing rung-3 PR (partly lucky)** |
+| v16 | qwen8b | Y | N | Refiner corrupted `"""` → `""` (G6 not yet shipped) |
+| v17 | qwen8b | Y | N | Refiner gap CLOSED, but T002 ate test fixtures |
+| v18 | qwen8b | Y | N | Same test-file rule-4 violation as v17 (2/2 — systematic) |
+| v19 | qwen8b | Y | N | Helpers preserved, but `>` in SQL string → runtime OperationalError |
+| v20 | qwen8b | Y | 3/4 | `row_factory` dropped from `get_conn` body |
+| v21 | qwen8b | Y | 3/4 | Same row_factory loss — stochastic repeat (G7 silent — no AST violation) |
+| **v22** | qwen8b | Y | **Y** | **4/4 GREEN — ENGINEERED (G7 + G8-worker both fired live + recovered via retry)** |
+| v23 | qwen8b | Y | N | Mac first run with Occam; CRITIC_PANEL_DEVIL=false (no .env) → devil/refiner/Q&A silent; 14 observations POSTed to Occam |
+| v24 | qwen8b | Y | N | Occam read+write live (planner injected 15 prior entries); refiner injected `>` into init_schema SQL string — G8 gap on refiner path |
+| **v25** | qwen8b | Y | **Y** | **4/4 GREEN — G8-on-refiner caught the v24 regression live (`phase=refiner` fired, reverted to v0)** |
+| **v26b** | qwen8b | Y | **Y** | **4/4 GREEN — G9 partial fire (narrow window missed CI pattern) + G8-on-refiner catch** |
+| **v27** | qwen8b | Y | **Y** | **4/4 GREEN — G9 full coverage (7d/200 window) dropped 2/12 subtasks at plan time + G8-on-refiner. Only 1 worker fail (transient). Cleanest run yet.** |
 
 ## Open problems (as of 2026-04-23 PM end-of-day)
 
-### O1 — Helper deletion in test files — ✅ CLOSED by G7
+### O1 — Helper deletion in test files — Y CLOSED by G7
 
 Worker drops `db` fixture + sibling tests when emitting
 `tests/test_db.py`. G7 AST-diff fires on the first attempt and
@@ -746,7 +746,7 @@ even with the in-process repair. Visible as `worker.subtask.failed`
 with error `Could not obtain valid JSON from LLM after 3 attempts`.
 Dominant residual failure family on rung-3 today.
 
-### O4 — Body-level semantic regression — ✅ CLOSED by G8 (worker) + G8-on-refiner
+### O4 — Body-level semantic regression — Y CLOSED by G8 (worker) + G8-on-refiner
 
 Worker preserves function signatures but rewrites bodies in ways
 that break callers (e.g. drops `row_factory = sqlite3.Row`; injects

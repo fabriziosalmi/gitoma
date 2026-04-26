@@ -26,7 +26,9 @@ ANALYZE  →  PLAN  →  EXECUTE  →  PR  →  SELF-REVIEW  →  REVIEW (you)
 
 ## Why Gitoma
 
+- **Self-correcting guard stack.** 14 composable guards (G1–G14) catch specific classes of LLM patch slop — broken syntax, dropped functions, hallucinated frameworks/URLs/configs, README destruction — and feed the worker a deterministic retry signal instead of shipping the bad patch. Plus two planner-time post-processors (Layer-A real-bug synthesis, Layer-B README banishment) and a scalar Ψ-lite quality gate. See the [critic stack](https://fabriziosalmi.github.io/gitoma/architecture/critic-stack) for the chronology.
 - **Local-first.** The LLM runs on your machine (LM Studio, Ollama, or any OpenAI-compatible endpoint). Code, diffs, and secrets never leave your laptop.
+- **Grounded by [Occam Observer](https://github.com/fabriziosalmi/occam-observer).** When the optional Occam gateway is reachable, gitoma fetches a `/repo/fingerprint` snapshot (declared deps, frameworks, manifests) per run and injects it into the planner prompt as ground truth. The same fingerprint feeds the worker-side content-grounding guards. Pre-empts hallucinations at plan time instead of catching them at apply time.
 - **Resumable.** State is persisted per repo. Kill the CLI mid-run; `--resume` picks up at the last committed subtask.
 - **Observable.** A live cockpit at `http://localhost:8000` streams every phase. Structured JSONL trace per invocation.
 - **Scriptable.** Everything the CLI does is also a REST endpoint (`POST /api/v1/run`, SSE at `/stream/{id}`). Bearer-protected, CSP-hardened.
@@ -72,7 +74,9 @@ Read the full architecture, state machine, and threat model in the [**docs**](ht
 
 ## Status
 
-Gitoma passes 250+ tests, mypy strict, ruff clean, and a draconian security/UX audit across the CLI, the REST API, the MCP server, and the web cockpit. See the [security posture](https://fabriziosalmi.github.io/gitoma/architecture/security) page for the full threat model.
+Gitoma passes 970+ tests, mypy strict, ruff clean, and a draconian security/UX audit across the CLI, the REST API, the MCP server, and the web cockpit. See the [security posture](https://fabriziosalmi.github.io/gitoma/architecture/security) page for the full threat model and [critic stack](https://fabriziosalmi.github.io/gitoma/architecture/critic-stack) for the engineering history of every guard.
+
+**Latest release**: v0.4.0 (the "planner-time discipline" release) — three new content-grounding guards (G12, G13, G14), the Layer-A/B planner-time post-processors, and the markdown-fence repair in the LLM client. The current `main` branch additionally ships Ψ-lite (universal fitness function, opt-in via `GITOMA_PSI_LITE=on`).
 
 ## License
 
