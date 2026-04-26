@@ -26,12 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from gitoma.cpg._base import SymbolKind
-from gitoma.cpg.go_indexer import index_go_file
-from gitoma.cpg.javascript_indexer import index_javascript_file
-from gitoma.cpg.python_indexer import index_python_file
-from gitoma.cpg.rust_indexer import index_rust_file
+from gitoma.cpg.diff import index_text_to_storage as _index_text_to_storage_shared
 from gitoma.cpg.storage import Storage
-from gitoma.cpg.typescript_indexer import index_typescript_file
 
 __all__ = ["compute_delta_i", "MAX_REINDEX_FILES"]
 
@@ -57,35 +53,10 @@ def _delete_allowed() -> bool:
 
 
 def _index_text_to_storage(rel_path: str, content: str) -> Storage:
-    """Build a throwaway in-memory Storage from a single file's
-    content. Writes the content to a temp file because the indexers
-    take a Path (they read+parse it themselves). Returns the
-    populated Storage."""
-    import tempfile
-    storage = Storage()
-    suffix = "".join(Path(rel_path).suffixes) or ".py"
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=suffix, delete=False, encoding="utf-8",
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-    try:
-        if rel_path.endswith(".py"):
-            index_python_file(tmp_path, rel_path, storage)
-        elif rel_path.endswith((".ts", ".tsx")):
-            index_typescript_file(tmp_path, rel_path, storage)
-        elif rel_path.endswith((".js", ".mjs", ".cjs")):
-            index_javascript_file(tmp_path, rel_path, storage)
-        elif rel_path.endswith(".rs"):
-            index_rust_file(tmp_path, rel_path, storage)
-        elif rel_path.endswith(".go"):
-            index_go_file(tmp_path, rel_path, storage)
-    finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-    return storage
+    """Thin shim over :func:`gitoma.cpg.diff.index_text_to_storage`.
+    Kept as a private name in this module so existing call-sites
+    + tests that import this private symbol don't break."""
+    return _index_text_to_storage_shared(rel_path, content)
 
 
 def _count_relevant(storage: Storage, rel_path: str) -> tuple[int, int]:

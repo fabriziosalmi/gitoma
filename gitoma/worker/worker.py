@@ -649,6 +649,72 @@ class WorkerAgent:
                         compile_error_feedback = err_text
                         continue
 
+                # Test Gen v1 (5th critic, opt-in) — autogenerate
+                # tests for the new/changed public symbols in this
+                # patch. Runs AFTER all gates pass so we know the
+                # source patch itself is solid; the new tests
+                # undergo a re-check on top. Failures here NEVER
+                # block the patch — we just don't add the tests.
+                from gitoma.critic.test_gen import (
+                    TestGenAgent, is_test_gen_enabled,
+                )
+                if is_test_gen_enabled():
+                    try:
+                        agent = TestGenAgent(self._llm)
+                        gen = agent.generate_for_patch(
+                            touched=list(touched),
+                            originals=originals,
+                            repo_root=self._git.root,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — defensive
+                        current_trace().exception(
+                            "test_gen.failed", exc,
+                        )
+                        gen = None
+                    if gen:
+                        test_patches = [
+                            {"action": "create", "path": p, "content": c}
+                            for p, c in gen.items()
+                        ]
+                        try:
+                            added = apply_patches(
+                                self._git.root, test_patches,
+                                compile_fix_mode=False,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            current_trace().exception(
+                                "test_gen.apply_failed", exc,
+                            )
+                            added = []
+                        if added:
+                            current_trace().emit(
+                                "test_gen.generated",
+                                subtask_id=subtask.id,
+                                files=list(added),
+                            )
+                            # Re-run regression check on the combined
+                            # patch. If the new tests broke the baseline
+                            # (or themselves fail), revert ONLY the
+                            # additions — keep the source patch.
+                            re_regression = self._check_test_regression(
+                                subtask, languages, attempt,
+                            )
+                            if re_regression is not None:
+                                current_trace().emit(
+                                    "test_gen.reverted",
+                                    subtask_id=subtask.id,
+                                    files=list(added),
+                                    reason=re_regression[:200],
+                                )
+                                self._revert_touched(added)
+                            else:
+                                current_trace().emit(
+                                    "test_gen.applied",
+                                    subtask_id=subtask.id,
+                                    files=list(added),
+                                )
+                                touched = list(touched) + list(added)
+
                 if attempt > 1:
                     current_trace().emit(
                         "critic_build_retry.success",

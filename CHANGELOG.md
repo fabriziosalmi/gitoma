@@ -8,6 +8,41 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **Test Gen v1 — 5th critic, autogenerates tests for shipped
+  patches** (`gitoma/critic/test_gen.py`,
+  `gitoma/critic/test_gen_prompts.py`): closes the missing
+  Multi-Agent Pipeline role from the horizon blueprint
+  (Architect / Implementer / Verifier / **Test Gen**). After the
+  worker applies a patch and after all gates pass (G1-G14, Ψ-full),
+  but before the commit, this agent uses CPG-lite diff (BEFORE +
+  AFTER content per touched source file) to find new /
+  signature-changed public symbols, asks the LLM to generate ONE
+  test file per language in the project's existing test framework
+  (pytest / jest / cargo test / go test detected via marker file),
+  applies the test files alongside the source patch, and re-runs
+  G8's test-baseline check. If the new tests fail or break the
+  baseline, ONLY the test additions are reverted — the source
+  patch is preserved. Multi-language: Python / TypeScript /
+  JavaScript / Rust / Go (matches CPG coverage). Test-file path
+  follows per-language convention: `tests/test_x.py`,
+  `x.test.ts` colocated, `tests/x_tests.rs`, `x_test.go`
+  colocated. **Opt-in via `GITOMA_TEST_GEN=on`**; default off
+  until benched against real LLM responses. Cap of 5 symbols
+  per source file in the LLM prompt; cap of 3000 chars per
+  source snippet — same limits as worker prompt. Defensive:
+  any failure (LLM error, framework not detected, no symbols
+  changed, malformed response) returns silently — Test Gen
+  NEVER blocks a patch. New trace events:
+  `test_gen.llm_call`, `test_gen.generated`, `test_gen.applied`,
+  `test_gen.reverted`, `test_gen.failed`, `test_gen.apply_failed`.
+  Also extracted `gitoma/cpg/diff.py` as the shared in-memory
+  re-indexing helper (was a private helper in psi_delta_i;
+  promoted so test_gen could share without crossing layer
+  boundaries). Out of scope for v1: coverage measurement,
+  mutation testing, property-based tests, fixture-heavy
+  integration tests, style adoption from existing tests,
+  multiple test files per patch per language.
+
 - **CPG-lite Go indexer** (`gitoma/cpg/go_indexer.py`): adds `.go`
   to the indexed-suffix set, completing the mainstream-backend
   language coverage (Python + TS + JS + Rust + Go). Two Go-
