@@ -8,6 +8,33 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **Ψ-full v1 — Φ + ΔI on top of CPG-lite** (`gitoma/worker/psi_phi.py`,
+  `gitoma/worker/psi_delta_i.py`): adds two new components to the
+  scalar quality gate. Ψ = αΓ + βΦ + γΔI − λΩ. **Φ** is caller-impact-
+  weighted safety: per-symbol score `1/(1+log(1+caller_count))` from
+  CPG-lite, aggregated across touched files. **ΔI** is structural
+  conservativeness: re-index file content before+after, score
+  `1 - mean(Δsymbols, Δrefs)` — high = surgical patch, low = rewrite.
+  When CPG isn't loaded OR no `.py/.ts/.tsx` is touched, Φ/ΔI
+  default to 1.0 each (the structural components contribute a "free"
+  0.8 floor). Calibration **frozen and committed**: α=1.0, β=0.5,
+  γ=0.3, λ=1.0, threshold=1.0, phi_hard_min=0.20 — see
+  `project_psi_full_calibration.md` (memory file) for the full
+  worked-example walkthrough + the math behind the numbers
+  (initial 0.15 hard-min draft was 290-caller territory due to
+  inverse-math error; corrected to 0.20 ≈ 54-caller floor). New
+  env vars `GITOMA_PSI_FULL`, `GITOMA_PSI_BETA`, `GITOMA_PSI_GAMMA`,
+  `GITOMA_PSI_FULL_THRESHOLD`, `GITOMA_PSI_PHI_HARD_MIN`,
+  `GITOMA_PSI_DELETE_ALLOWED`. `evaluate_psi_gate` is now a
+  dispatcher: FULL takes precedence over LITE; back-compat with
+  the existing 3-arg signature preserved. New trace events
+  `critic_psi_full.fail` (with components dict) alongside
+  `critic_psi_lite.fail`. Bench artifact at
+  `tests/bench/psi_full_v1/replay_results.txt` (4 worked-example
+  scenarios with verdicts confirmed). Out of scope for v1: sub-
+  thresholds on Γ/ΔI/Ω, caching Φ across subtasks, language-
+  specific weights.
+
 - **CPG-lite v0.5-slim — TypeScript indexer** (`gitoma/cpg/typescript_indexer.py`):
   extends the v0 Python-only CPG to TypeScript via `tree-sitter` +
   `tree-sitter-typescript`. Same Symbol/Reference/Import row shapes

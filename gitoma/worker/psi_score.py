@@ -282,15 +282,28 @@ def evaluate_psi_gate(
     root: Path,
     touched: list[str],
     fingerprint: dict[str, Any] | None,
+    originals: dict[str, str] | None = None,
+    cpg_index: Any = None,
 ) -> tuple[str, str, dict[str, Any]] | None:
-    """Env-driven gate over ``compute_psi_lite``. Returns
-    ``(weakest_file, message, breakdown)`` when Ψ < threshold AND
+    """Env-driven gate over Ψ. Returns ``(weakest_file, message,
+    breakdown)`` when Ψ < threshold (or hard-min violated) AND
     feature is enabled, else ``None``.
 
-    Opt-in via ``GITOMA_PSI_LITE=on``. When disabled, always
-    returns ``None`` (silent pass — no overhead beyond the env
-    var read).
+    Dispatches based on env:
+      * ``GITOMA_PSI_FULL=on`` → Ψ-full (Γ + Φ + ΔI + Ω). Requires
+        ``cpg_index`` and ``originals`` for full signal; degrades
+        to Ψ-lite shape when either is missing.
+      * ``GITOMA_PSI_LITE=on`` → Ψ-lite (Γ + Ω) — original behavior.
+      * Neither set → silent pass (returns ``None``, no overhead).
+
+    The ``originals`` and ``cpg_index`` kwargs are optional so the
+    Ψ-lite code path stays callable with the original 3-arg
+    signature (back-compat with v0.4 callers).
     """
+    if _is_full_enabled():
+        return _evaluate_psi_full_gate(
+            root, touched, fingerprint, originals, cpg_index,
+        )
     if not _is_enabled():
         return None
     alpha = _resolve_alpha()
@@ -313,3 +326,169 @@ def evaluate_psi_gate(
         f"triple-blank lines, source files wrapped in markdown fences)."
     )
     return (weakest, msg, breakdown)
+
+
+# ── Ψ-full v1 — composes CPG-lite signal with Ψ-lite ──────────────
+
+
+# Calibration constants — see project_psi_full_calibration.md for
+# the worked-example rationale. Re-tuning these requires re-running
+# the walkthrough; do NOT vibe-tune.
+DEFAULT_BETA = 0.5
+DEFAULT_GAMMA = 0.3
+DEFAULT_FULL_THRESHOLD = 1.0
+DEFAULT_PHI_HARD_MIN = 0.20
+
+
+def _is_full_enabled() -> bool:
+    return (os.environ.get("GITOMA_PSI_FULL") or "").lower() in (
+        "1", "on", "true", "yes",
+    )
+
+
+def _resolve_beta() -> float:
+    raw = os.environ.get("GITOMA_PSI_BETA", "")
+    try:
+        v = float(raw) if raw else DEFAULT_BETA
+    except ValueError:
+        return DEFAULT_BETA
+    return max(0.0, min(10.0, v))
+
+
+def _resolve_gamma() -> float:
+    raw = os.environ.get("GITOMA_PSI_GAMMA", "")
+    try:
+        v = float(raw) if raw else DEFAULT_GAMMA
+    except ValueError:
+        return DEFAULT_GAMMA
+    return max(0.0, min(10.0, v))
+
+
+def _resolve_full_threshold() -> float:
+    raw = os.environ.get("GITOMA_PSI_FULL_THRESHOLD", "")
+    try:
+        v = float(raw) if raw else DEFAULT_FULL_THRESHOLD
+    except ValueError:
+        return DEFAULT_FULL_THRESHOLD
+    # Combined Ψ-full range is roughly 0..2; clamp wider than lite.
+    return max(0.0, min(5.0, v))
+
+
+def _resolve_phi_hard_min() -> float:
+    raw = os.environ.get("GITOMA_PSI_PHI_HARD_MIN", "")
+    try:
+        v = float(raw) if raw else DEFAULT_PHI_HARD_MIN
+    except ValueError:
+        return DEFAULT_PHI_HARD_MIN
+    return max(0.0, min(1.0, v))
+
+
+def _evaluate_psi_full_gate(
+    root: Path,
+    touched: list[str],
+    fingerprint: dict[str, Any] | None,
+    originals: dict[str, str] | None,
+    cpg_index: Any,
+) -> tuple[str, str, dict[str, Any]] | None:
+    """Inner Ψ-full evaluator. Combines:
+      * Γ + Ω from compute_psi_lite (per-file → min aggregation)
+      * Φ from compute_phi (global, weighted mean across symbols)
+      * ΔI from compute_delta_i (global, mean across files)
+
+    The combined Ψ formula uses GLOBAL Γ + Ω (= worst per-file from
+    lite) plus global Φ + ΔI. This keeps Ψ-lite's "worst file
+    dominates" property for the strings it knows about, while
+    letting Φ + ΔI add a structural lens.
+
+    Hard-min: Φ < phi_hard_min triggers a fail INDEPENDENTLY of total
+    Ψ — a patch with great Γ + low Ω but a 100-caller hub touch
+    should never pass.
+    """
+    from gitoma.worker.psi_phi import compute_phi
+    from gitoma.worker.psi_delta_i import compute_delta_i
+
+    alpha = _resolve_alpha()
+    beta = _resolve_beta()
+    gamma_w = _resolve_gamma()
+    lambda_ = _resolve_lambda()
+    threshold = _resolve_full_threshold()
+    phi_hard_min = _resolve_phi_hard_min()
+
+    # Lite components (Γ + Ω). Reuse compute_psi_lite — it returns
+    # per-file detail; we aggregate by taking the min Γ and max Ω
+    # across the report (worst signal, conservative).
+    _psi_lite, lite_breakdown = compute_psi_lite(
+        root, touched, fingerprint, alpha, lambda_,
+    )
+    if not lite_breakdown:
+        # Nothing readable to score → silent pass (matches Ψ-lite
+        # behavior on empty / missing-files patches).
+        return None
+    per_file = lite_breakdown["per_file"]
+    gammas = [d["gamma"] for d in per_file.values()]
+    omegas = [d["omega"] for d in per_file.values()]
+    # Worst-file aggregation: min Γ (least grounded), max Ω (sloppiest).
+    gamma_agg = min(gammas) if gammas else 1.0
+    omega_agg = max(omegas) if omegas else 0.0
+
+    phi, phi_breakdown = compute_phi(touched, cpg_index)
+    delta_i, di_breakdown = compute_delta_i(touched, originals, root)
+
+    psi = (
+        alpha * gamma_agg
+        + beta * phi
+        + gamma_w * delta_i
+        - lambda_ * omega_agg
+    )
+
+    # Identify the weakest file for the failure message — same
+    # convention as Ψ-lite.
+    weakest_file = min(
+        per_file, key=lambda k: per_file[k]["gamma"] - per_file[k]["omega"],
+    ) if per_file else "<unknown>"
+
+    breakdown = {
+        "psi": psi,
+        "alpha": alpha, "beta": beta, "gamma": gamma_w, "lambda": lambda_,
+        "threshold": threshold, "phi_hard_min": phi_hard_min,
+        "components": {
+            "Gamma": gamma_agg,
+            "Phi": phi,
+            "DeltaI": delta_i,
+            "Omega": omega_agg,
+        },
+        "phi_breakdown": phi_breakdown,
+        "delta_i_breakdown": di_breakdown,
+        "lite_breakdown": lite_breakdown,
+        "weakest_file": weakest_file,
+        "phi_hard_min_active": phi_breakdown.get("cpg_active", False),
+    }
+
+    # Hard-min on Φ — only enforced when CPG actually contributed
+    # signal (Φ defaulting to 1.0 when CPG is off should NOT trigger
+    # the hard-min).
+    if (
+        breakdown["phi_hard_min_active"]
+        and phi < phi_hard_min
+    ):
+        msg = (
+            f"Ψ-full Φ={phi:.2f} below hard-min {phi_hard_min:.2f} "
+            f"(min per-symbol φ={phi_breakdown.get('min_phi', 1.0):.2f}). "
+            f"The patch touches a load-bearing symbol with too many "
+            f"cross-file callers. Either preserve the symbol's signature "
+            f"and behavior, or update every caller in the same patch."
+        )
+        return (weakest_file, msg, breakdown)
+
+    if psi >= threshold:
+        return None
+
+    msg = (
+        f"Ψ-full score {psi:.2f} below threshold {threshold:.2f} "
+        f"(Γ={gamma_agg:.2f}, Φ={phi:.2f}, ΔI={delta_i:.2f}, "
+        f"Ω={omega_agg:.2f}). The combined structural + grounding "
+        f"signal indicates a patch that is either weakly grounded, "
+        f"hits hot symbols, restructures heavily, or carries slop. "
+        f"Re-emit with smaller scope or stronger grounding."
+    )
+    return (weakest_file, msg, breakdown)

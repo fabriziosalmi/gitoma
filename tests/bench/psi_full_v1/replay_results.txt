@@ -1,0 +1,37 @@
+Ψ-full v1 — calibration walkthrough replay
+================================================================
+
+Defaults: α=1.0, β=0.5, γ=0.3, λ=1.0,
+          threshold=1.0, phi_hard_min=0.20
+
+================================================================
+
+### Example A — modify one function body
+Expected from walkthrough: PASS (Ψ ~ 1.14)
+Actual: PASS (Ψ ≥ 1.0 threshold; gate returned None)
+
+----------------------------------------------------------------
+
+### Example B — touch a hub class (~40 callers)
+Expected: Φ ≈ 0.21, Ψ-full sneaks above 1.0?
+Actual: PASS (Φ above hard-min; Ψ ≥ 1.0)
+
+----------------------------------------------------------------
+
+### Example C — doc with foreign frameworks (Γ→0)
+Expected: BLOCK (Γ=0, structural floor 0.8 < 1.0)
+Actual: BLOCK
+  Ψ = 0.800
+  Components: {'Gamma': 0.0, 'Phi': 1.0, 'DeltaI': 1.0, 'Omega': 0.0}
+  Message: Ψ-full score 0.80 below threshold 1.00 (Γ=0.00, Φ=1.00, ΔI=1.00, Ω=0.00). The combined structural + grounding signal indicates a patch that is either weakly grounded, hits hot symbols, restructures he
+
+----------------------------------------------------------------
+
+### Example D — touch 100-caller hub (hard-min path)
+Expected: BLOCK via Φ < 0.20 hard-min
+Actual: BLOCK
+  Φ = 0.178
+  hard-min trigger: True
+  Message: Ψ-full Φ=0.18 below hard-min 0.20 (min per-symbol φ=0.18). The patch touches a load-bearing symbol with too many cross-file callers. Either preserve the symbol's signature and behavior, or update ever
+
+----------------------------------------------------------------

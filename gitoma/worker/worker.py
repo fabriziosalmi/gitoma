@@ -586,17 +586,22 @@ class WorkerAgent:
                     compile_error_feedback = regression_err
                     continue
 
-                # Ψ-lite gate: last quality check before commit. Pure-
-                # math scoring (Γ grounding + Ω slop) — composes WITH
-                # the structural guards above as the scalar layer that
-                # catches "passed every binary check but is meh".
-                # Opt-in via GITOMA_PSI_LITE=on; silent pass otherwise.
-                # Always emit telemetry when the score IS computed
-                # (even on pass) so we can tune thresholds from data.
+                # Ψ gate: last quality check before commit. Pure-
+                # math scoring — composes WITH the structural guards
+                # above as the scalar layer that catches "passed every
+                # binary check but is meh". Two flavors auto-selected
+                # by the dispatcher in evaluate_psi_gate:
+                #   * GITOMA_PSI_FULL=on → Ψ-full (Γ + Φ + ΔI + Ω +
+                #     hard-min on Φ); requires CPG-lite for full signal.
+                #   * GITOMA_PSI_LITE=on → Ψ-lite (Γ + Ω); legacy.
+                # We always pass originals + cpg_index so Ψ-full has
+                # what it needs; Ψ-lite ignores them.
                 from gitoma.worker.psi_score import (
-                    compute_psi_lite, evaluate_psi_gate, _is_enabled as _psi_enabled,
+                    compute_psi_lite, evaluate_psi_gate,
+                    _is_enabled as _psi_enabled,
+                    _is_full_enabled as _psi_full_enabled,
                 )
-                if _psi_enabled():
+                if _psi_enabled() or _psi_full_enabled():
                     psi_score, psi_breakdown = compute_psi_lite(
                         self._git.root, touched, self._repo_fingerprint,
                     )
@@ -610,27 +615,34 @@ class WorkerAgent:
                         )
                     psi_block = evaluate_psi_gate(
                         self._git.root, touched, self._repo_fingerprint,
+                        originals=originals,
+                        cpg_index=self._cpg_index,
                     )
                     if psi_block is not None:
-                        bad_path, msg, _br = psi_block
+                        bad_path, msg, br = psi_block
+                        # Identify which flavor failed via breakdown
+                        # shape: Ψ-full carries a "components" dict.
+                        flavor = "Ψ-full" if "components" in br else "Ψ-lite"
                         err_text = (
-                            f"Ψ-lite gate failed on {bad_path}: {msg} "
+                            f"{flavor} gate failed on {bad_path}: {msg} "
                             "Re-emit a patch with content that grounds "
                             "against the repo's actual deps and avoids "
                             "the listed slop patterns."
                         )
                         current_trace().emit(
-                            "critic_psi_lite.fail",
+                            "critic_psi_full.fail" if flavor == "Ψ-full"
+                            else "critic_psi_lite.fail",
                             subtask_id=subtask.id,
                             attempt=attempt,
                             path=bad_path,
-                            psi=psi_score,
+                            psi=br.get("psi", psi_score),
                             error=msg[:300],
+                            components=br.get("components"),
                         )
                         if attempt >= max_attempts:
                             self._revert_touched(touched)
                             raise ValueError(
-                                f"Ψ-lite gate failed after {max_attempts} "
+                                f"{flavor} gate failed after {max_attempts} "
                                 f"attempt(s) on {bad_path}. Last Ψ={psi_score:.2f}"
                             )
                         self._revert_touched(touched)
