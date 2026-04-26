@@ -90,6 +90,12 @@ export default defineConfig({
             { text: 'Observability', link: '/guide/observability' },
           ],
         },
+        {
+          text: 'Integrations',
+          items: [
+            { text: 'Occam Observer', link: '/guide/occam-observer' },
+          ],
+        },
       ],
       '/api/': [
         {
@@ -108,6 +114,7 @@ export default defineConfig({
           items: [
             { text: 'Overview', link: '/architecture/overview' },
             { text: 'Pipeline + state machine', link: '/architecture/pipeline' },
+            { text: 'Critic stack', link: '/architecture/critic-stack' },
             { text: 'Security + threat model', link: '/architecture/security' },
             { text: 'Contributing', link: '/architecture/contributing' },
           ],
