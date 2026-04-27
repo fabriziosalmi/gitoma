@@ -82,6 +82,14 @@ dev = [
 e2e_cockpit = [
     "pytest-playwright>=0.5",
 ]
+# `gitoma gitignore` — first deterministic vertical, wraps
+# occam-gitignore-core for hash-verifiable .gitignore generation
+# without LLM at runtime. Optional install:
+#   pip install gitoma[gitignore]
+# Then `gitoma gitignore <repo-url>`.
+gitignore = [
+    "occam-gitignore-core>=0.1.3",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

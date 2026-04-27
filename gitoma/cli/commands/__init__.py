@@ -10,6 +10,7 @@ from gitoma.cli.commands import (  # noqa: F401
     config_cmd,
     doctor,
     fix_ci,
+    gitignore,
     list_cmd,
     logs,
     mcp,

@@ -6,6 +6,33 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`gitoma gitignore` — first deterministic vertical**
+  (`gitoma/cli/commands/gitignore.py` + `gitoma/integrations/occam_gitignore.py`):
+  wraps the externally-shipped [occam-gitignore-core](https://pypi.org/project/occam-gitignore-core)
+  to produce hash-verifiable, byte-deterministic `.gitignore`
+  content for any repo, then opens a PR with the diff. **Zero LLM
+  at runtime** — same repo state → same `.gitignore` byte-for-byte,
+  with `sha256:` provenance baked into the commit message + PR body
+  for reviewer verification. Establishes the architectural pattern
+  for **deterministic verticals**: distinct from the existing
+  LLM-driven verticals (`gitoma docs` / `gitoma quality`), this
+  flow bypasses the worker apply pipeline (PHASE 3) and goes
+  straight to PR creation (PHASE 4) with content sourced from a
+  pure external tool. Same shape future integrations will use
+  (semgrep, reuse-tool, license-checker, etc.). Pre-flight checks
+  occam-gitignore-core importability + data files reachability;
+  graceful "feature unavailable" message when missing — never
+  crashes the worker. New optional dep group:
+  `pip install gitoma[gitignore]`. Live verified end-to-end on
+  bench-blast: detected 2 features (common+python), generated
+  39-line .gitignore with hash sha256:d3934387f931f965ab2a14b…,
+  diff vs existing showed 46-line drift.
+- New module `gitoma/integrations/` for tool integrations
+  (distinct from `gitoma/context/` which gathers data INTO
+  prompts; `integrations/` are tools gitoma DELEGATES TO).
+
 ## [0.5.0] — 2026-04-26
 
 The "structural visibility" release. CPG-lite ships across 5
