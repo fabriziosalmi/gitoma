@@ -1,5 +1,5 @@
-"""Tests for G18 (abandoned-helper) + G19 (echo-chamber) orphan
-detection."""
+"""Tests for G16 (dead-code-introduction) + G18 (abandoned-helper)
++ G19 (echo-chamber) orphan detection."""
 
 from __future__ import annotations
 
@@ -9,12 +9,17 @@ import pytest
 
 from gitoma.cpg import build_index
 from gitoma.worker.orphan_check import (
+    G16Conflict,
+    G16Result,
     G18Conflict,
     G18Result,
     G19Conflict,
     G19Result,
+    _is_test_file,
+    check_g16_dead_code,
     check_g18_abandoned_helpers,
     check_g19_echo_chamber,
+    is_g16_enabled,
     is_g18_enabled,
     is_g19_enabled,
 )
@@ -410,3 +415,211 @@ def test_both_critics_silent_when_disabled_by_default(tmp_path: Path) -> None:
         tmp_path, ["lib.py"], originals={"lib.py": ""},
         cpg_index=idx,
     ) is None
+
+
+# ── G16 — env opt-in ──────────────────────────────────────────────
+
+
+def test_g16_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITOMA_G16_DEAD_CODE", raising=False)
+    assert is_g16_enabled() is False
+
+
+@pytest.mark.parametrize("env_value", ["on", "1", "true", "yes", "ON"])
+def test_g16_enabled_via_env(
+    monkeypatch: pytest.MonkeyPatch, env_value: str,
+) -> None:
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", env_value)
+    assert is_g16_enabled() is True
+
+
+# ── G16 — disabled / inputs ───────────────────────────────────────
+
+
+def test_g16_disabled_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GITOMA_G16_DEAD_CODE", raising=False)
+    _populate(tmp_path, {"lib.py": "def lonely(): pass\n"})
+    idx = build_index(tmp_path)
+    assert check_g16_dead_code(
+        tmp_path, ["lib.py"], originals={"lib.py": ""},
+        cpg_index=idx,
+    ) is None
+
+
+def test_g16_no_cpg_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {"lib.py": "def lonely(): pass\n"})
+    assert check_g16_dead_code(
+        tmp_path, ["lib.py"], originals={"lib.py": ""},
+        cpg_index=None,
+    ) is None
+
+
+def test_g16_no_originals_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {"lib.py": "def lonely(): pass\n"})
+    idx = build_index(tmp_path)
+    assert check_g16_dead_code(
+        tmp_path, ["lib.py"], originals=None, cpg_index=idx,
+    ) is None
+
+
+# ── G16 — dead-code detection ─────────────────────────────────────
+
+
+def test_g16_replay_dead_function_in_new_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The canonical case: patch creates a new file with a public
+    function that NOTHING in the codebase calls. Pure dead code."""
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {"lib.py": "def lonely():\n    return 42\n"})
+    idx = build_index(tmp_path)
+    result = check_g16_dead_code(
+        tmp_path, ["lib.py"], originals={"lib.py": ""},
+        cpg_index=idx,
+    )
+    assert result is not None
+    assert len(result.conflicts) == 1
+    assert result.conflicts[0].symbol_name == "lonely"
+    assert result.conflicts[0].file == "lib.py"
+
+
+def test_g16_no_flag_when_called_externally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patch adds new public symbol that an existing file calls →
+    not dead, G16 silent."""
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {
+        "existing.py": (
+            "from new_lib import shipped\n"
+            "def consumer(): return shipped()\n"
+        ),
+        "new_lib.py": "def shipped():\n    return 1\n",
+    })
+    idx = build_index(tmp_path)
+    result = check_g16_dead_code(
+        tmp_path, ["new_lib.py"], originals={},
+        cpg_index=idx,
+    )
+    assert result is None
+
+
+def test_g16_no_flag_when_self_calling_clique(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two new functions calling each other: total_callers > 0 for
+    each → G16 silent. This is G19 territory (echo-chamber)."""
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {
+        "lib.py": (
+            "def new_x():\n    return new_y()\n"
+            "def new_y():\n    return new_x()\n"
+        ),
+    })
+    idx = build_index(tmp_path)
+    result = check_g16_dead_code(
+        tmp_path, ["lib.py"], originals={"lib.py": ""},
+        cpg_index=idx,
+    )
+    assert result is None
+
+
+def test_g16_skips_private_symbols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_private` not tracked as public → G16 ignores even if dead."""
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {"lib.py": "def _private():\n    return 1\n"})
+    idx = build_index(tmp_path)
+    result = check_g16_dead_code(
+        tmp_path, ["lib.py"], originals={"lib.py": ""},
+        cpg_index=idx,
+    )
+    assert result is None
+
+
+def test_g16_skips_test_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pytest discovers `test_*` by reflection — must NOT flag as
+    dead. The whole exemption hinges on the path heuristic."""
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {
+        "tests/test_foo.py": (
+            "def test_obvious():\n    assert True\n"
+        ),
+    })
+    idx = build_index(tmp_path)
+    result = check_g16_dead_code(
+        tmp_path, ["tests/test_foo.py"], originals={"tests/test_foo.py": ""},
+        cpg_index=idx,
+    )
+    assert result is None
+
+
+def test_g16_no_flag_when_no_new_symbols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Body-only patch → no new public symbols → nothing for G16."""
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {"lib.py": "def existing(): return 1\n"})
+    idx = build_index(tmp_path)
+    result = check_g16_dead_code(
+        tmp_path, ["lib.py"],
+        originals={"lib.py": "def existing(): return 0\n"},
+        cpg_index=idx,
+    )
+    assert result is None
+
+
+def test_g16_render_for_llm_includes_symbol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITOMA_G16_DEAD_CODE", "on")
+    _populate(tmp_path, {"lib.py": "def lonely():\n    return 1\n"})
+    idx = build_index(tmp_path)
+    result = check_g16_dead_code(
+        tmp_path, ["lib.py"], originals={"lib.py": ""},
+        cpg_index=idx,
+    )
+    assert result is not None
+    rendered = result.render_for_llm()
+    assert "DEAD CODE" in rendered
+    assert "lonely" in rendered
+    assert "lib.py" in rendered
+
+
+# ── _is_test_file heuristic ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("path,expected", [
+    # Path fragments
+    ("tests/test_foo.py", True),
+    ("test/foo.py", True),
+    ("src/__tests__/foo.ts", True),
+    ("packages/spec/foo.js", True),
+    # Name patterns
+    ("foo_test.py", True),
+    ("foo.test.ts", True),
+    ("foo.test.tsx", True),
+    ("foo.spec.js", True),
+    ("foo_test.go", True),
+    ("foo_test.rs", True),
+    ("test_foo.py", True),
+    # NOT test files
+    ("src/lib.py", False),
+    ("gitoma/worker/foo.py", False),
+    ("test.py", False),  # plain "test.py" — not the prefix pattern
+    ("contesto/foo.py", False),  # substring "test" inside name not enough
+    ("manifest.json", False),
+])
+def test_is_test_file(path: str, expected: bool) -> None:
+    assert _is_test_file(path) is expected

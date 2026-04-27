@@ -1,9 +1,17 @@
-"""G18 (abandoned-helper) + G19 (echo-chamber) — two CPG-based
-structural critics batched in one module.
+"""G16 (dead-code-introduction) + G18 (abandoned-helper) + G19
+(echo-chamber) — three CPG-based structural critics batched in
+one module.
 
-Both detect "orphan symbols" introduced by a patch — symbols that
-exist but aren't connected to the rest of the codebase. The two
-flavors:
+All three detect "orphan symbols" introduced by a patch — symbols
+that exist but aren't connected to the rest of the codebase.
+The three flavors:
+
+* **G16 dead-code-introduction**: NEW public symbols added by the
+  patch that have ZERO callers anywhere in the codebase. Pure
+  dead code on day one. Distinct from G19 (which fires when the
+  symbol HAS callers but they're all patch-added). Test files
+  exempted via path heuristic — pytest discovers ``test_*``
+  functions by reflection, never as call refs.
 
 * **G18 abandoned-helper**: a symbol the patch KEPT but whose last
   callers were deleted by the patch. Likely either the patch
@@ -12,13 +20,13 @@ flavors:
   cross-file deferral).
 
 * **G19 echo-chamber**: NEW public symbols added by the patch
-  that ONLY call each other — nothing existing in the codebase
-  calls them. PR claims "added X" but X is dead from the
-  outside. Repo-wide scope (uses the AFTER cpg_index built
-  before PHASE 2).
+  that have callers, but EVERY caller is patch-added code.
+  PR claims "added X" but X is dead from the outside. Repo-wide
+  scope (uses the AFTER cpg_index built before PHASE 2).
 
-Both opt-in (default off — false-positive risk on libraries +
-new entry points). Both produce LLM-feedback strings via
+All three opt-in (default off — false-positive risk on
+libraries, framework-discovery routes/fixtures, new entry
+points). Each produces an LLM-feedback string via
 ``render_for_llm()`` so a single retry round can address every
 orphan in the patch.
 
@@ -38,15 +46,23 @@ from gitoma.cpg.diff import DEFINING_KINDS, INDEXABLE_EXTS, index_text_to_storag
 from gitoma.cpg.storage import Storage
 
 __all__ = [
+    "G16Conflict", "G16Result",
     "G18Conflict", "G18Result",
     "G19Conflict", "G19Result",
+    "check_g16_dead_code",
     "check_g18_abandoned_helpers",
     "check_g19_echo_chamber",
-    "is_g18_enabled", "is_g19_enabled",
+    "is_g16_enabled", "is_g18_enabled", "is_g19_enabled",
 ]
 
 
 # ── Env opt-in ────────────────────────────────────────────────────
+
+
+def is_g16_enabled() -> bool:
+    return (os.environ.get("GITOMA_G16_DEAD_CODE") or "").lower() in (
+        "1", "on", "true", "yes",
+    )
 
 
 def is_g18_enabled() -> bool:
@@ -59,6 +75,80 @@ def is_g19_enabled() -> bool:
     return (os.environ.get("GITOMA_G19_ECHO_CHAMBER") or "").lower() in (
         "1", "on", "true", "yes",
     )
+
+
+# ── Test-file heuristic (shared) ──────────────────────────────────
+
+
+_TEST_PATH_FRAGMENTS = (
+    "/tests/", "/test/", "/__tests__/", "/spec/", "/specs/",
+)
+_TEST_NAME_PREFIXES = ("test_",)
+_TEST_NAME_SUFFIXES = (
+    "_test.py", ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+    ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
+    "_test.go", "_test.rs",
+)
+
+
+def _is_test_file(rel_path: str) -> bool:
+    """Heuristic for test-file paths across Python/TS/JS/Rust/Go.
+
+    Test functions are routinely "uncalled" — the test runner
+    discovers them by reflection (pytest, vitest, jest, go test,
+    cargo test). Any orphan-symbol critic that flags them
+    explodes false-positively, so we exempt them.
+    """
+    norm = "/" + rel_path.lstrip("/")
+    if any(frag in norm for frag in _TEST_PATH_FRAGMENTS):
+        return True
+    base = rel_path.rsplit("/", 1)[-1]
+    if base.startswith(_TEST_NAME_PREFIXES):
+        return True
+    if base.endswith(_TEST_NAME_SUFFIXES):
+        return True
+    return False
+
+
+# ── G16 result types ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class G16Conflict:
+    """One new public symbol the patch added that has zero callers
+    anywhere in the codebase. Pure dead code."""
+
+    file: str
+    symbol_name: str
+    symbol_kind: str
+    qualified_name: str
+
+
+@dataclass(frozen=True)
+class G16Result:
+    conflicts: tuple[G16Conflict, ...]
+
+    def render_for_llm(self) -> str:
+        lines = [
+            "Your patch INTRODUCED DEAD CODE — public symbols added "
+            "by this patch have ZERO callers anywhere in the "
+            "codebase (this is stricter than G19's echo-chamber "
+            "check, which fires on patch-internal callers; G16 "
+            "fires when there are NO callers at all). Either:",
+            "  * Remove the unused symbol(s), OR",
+            "  * Add the call site that uses them, OR",
+            "  * If this is a public API meant for external "
+            "    consumers (library entry point, framework-discovered "
+            "    route, plugin hook), document why it appears unused "
+            "    and we'll relax the check.",
+            "",
+        ]
+        for c in self.conflicts:
+            lines.append(
+                f"  * {c.file}: `{c.symbol_kind} {c.symbol_name}` "
+                f"({c.qualified_name}) — 0 callers."
+            )
+        return "\n".join(lines)
 
 
 # ── G18 result types ──────────────────────────────────────────────
@@ -188,6 +278,106 @@ def _count_refs_to_name_in_storage(
             continue
         count += 1
     return count
+
+
+# ── G16 dead-code-introduction ────────────────────────────────────
+
+
+def check_g16_dead_code(
+    repo_root: Path,
+    touched: list[str],
+    originals: dict[str, str] | None,
+    cpg_index: Any = None,
+) -> G16Result | None:
+    """Return None when:
+      * G16 not enabled via env
+      * No CPG index available (need repo-wide caller info)
+      * No originals available
+      * No touched indexable files
+      * No new public symbols introduced
+      * No truly-dead new symbols found
+
+    For each new public defining symbol added by the patch, query
+    the AFTER cpg_index for callers. Zero callers → flagged.
+    Test files exempted (pytest/vitest/jest/go test/cargo test
+    discover by reflection, never as call refs).
+
+    Distinct from G19 (echo-chamber): G19 fires when the new
+    symbol HAS callers but they're all patch-added; G16 fires
+    when there are NO callers at all. The two compose: a patch
+    that adds a useless function is caught by G16; a patch that
+    adds a self-calling clique is caught by G19.
+    """
+    if not is_g16_enabled():
+        return None
+    if cpg_index is None:
+        return None
+    if not touched or originals is None:
+        return None
+
+    # Phase 1: collect new public-symbol qualified_names per file,
+    # skipping test files.
+    new_symbols_by_qname: dict[str, tuple[str, str]] = {}
+
+    for rel in touched:
+        if not _is_indexable(rel):
+            continue
+        if _is_test_file(rel):
+            continue
+        before_content = originals.get(rel, "")
+        try:
+            after_content = (repo_root / rel).read_text(errors="replace")
+        except OSError:
+            continue
+        try:
+            before_storage = index_text_to_storage(rel, before_content)
+            after_storage = index_text_to_storage(rel, after_content)
+        except Exception:  # noqa: BLE001
+            continue
+        before_syms = _public_defining_symbols_in_storage(before_storage, rel)
+        after_syms = _public_defining_symbols_in_storage(after_storage, rel)
+        for key, sym in after_syms.items():
+            if key not in before_syms:
+                qname = sym.qualified_name
+                new_symbols_by_qname[qname] = (rel, sym.kind.value)
+        before_storage.close()
+        after_storage.close()
+
+    if not new_symbols_by_qname:
+        return None
+
+    # Phase 2: per new symbol, query cpg_index for callers. If 0 →
+    # truly dead → flag. Per-symbol candidates are matched on
+    # qualified_name + DEFINING_KINDS (same shape as G19).
+    conflicts: list[G16Conflict] = []
+    for qname in sorted(new_symbols_by_qname.keys()):
+        leaf = qname.rsplit(".", 1)[-1]
+        candidates = [
+            s for s in cpg_index.get_symbol(leaf)
+            if s.qualified_name == qname and s.kind in DEFINING_KINDS
+        ]
+        # Aggregate caller count across all candidates with this
+        # qname (handles overload-like collisions). 0 across all
+        # → truly dead.
+        total_callers = 0
+        for sym in candidates:
+            try:
+                callers = cpg_index.callers_of(sym.id)
+            except Exception:  # noqa: BLE001
+                continue
+            total_callers += len(callers)
+        if total_callers == 0:
+            file, kind = new_symbols_by_qname[qname]
+            conflicts.append(G16Conflict(
+                file=file,
+                symbol_name=leaf,
+                symbol_kind=kind,
+                qualified_name=qname,
+            ))
+
+    if not conflicts:
+        return None
+    return G16Result(conflicts=tuple(conflicts))
 
 
 # ── G18 abandoned-helper ──────────────────────────────────────────

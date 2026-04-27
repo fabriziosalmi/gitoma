@@ -32,6 +32,20 @@ All notable changes to gitoma are documented in this file. Format follows
 - New module `gitoma/integrations/` for tool integrations
   (distinct from `gitoma/context/` which gathers data INTO
   prompts; `integrations/` are tools gitoma DELEGATES TO).
+- **G16 — dead-code-introduction critic**
+  (`gitoma/worker/orphan_check.py` extension): catches NEW public
+  symbols added by a patch that have ZERO callers anywhere in the
+  codebase. Pure dead code on day one. Distinct from G19
+  (echo-chamber) which fires when callers exist but are all
+  patch-added; G16 fires when there are NO callers at all. Test
+  files exempted via path heuristic shared with G19 — pytest /
+  vitest / jest / `go test` / `cargo test` discover by reflection,
+  never appearing as call refs. Opt-in via
+  `GITOMA_G16_DEAD_CODE=on` (false-positive risk on libraries,
+  framework-discovered routes/fixtures, plugin entry points).
+  Wired immediately before G18/G19 in the worker, same revert+retry
+  shape. 24 new tests + a shared `_is_test_file` helper covering
+  Python/TS/TSX/JS/Go/Rust path conventions.
 - **G20 — TOML/INI syntax validator**
   (`gitoma/worker/config_syntax.py`): deterministic parse-check
   over every touched config file (`pyproject.toml`, `.ruff.toml`,

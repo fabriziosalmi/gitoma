@@ -548,16 +548,41 @@ class WorkerAgent:
                 compile_error_feedback = err_text
                 continue
 
-            # G18 + G19 orphan-symbol detection (both opt-in via
-            # GITOMA_G18_ABANDONED / GITOMA_G19_ECHO_CHAMBER).
-            # G18 = patch removed last in-file callers of a kept
-            # symbol; G19 = new symbols only called from patch-
-            # added code. Both run independently; either fails
-            # → revert + retry with feedback.
+            # G16 + G18 + G19 orphan-symbol detection (all opt-in:
+            # GITOMA_G16_DEAD_CODE / GITOMA_G18_ABANDONED /
+            # GITOMA_G19_ECHO_CHAMBER). G16 = new public symbols
+            # with ZERO callers anywhere (truly dead code); G18 =
+            # patch removed last in-file callers of a KEPT symbol;
+            # G19 = new symbols whose only callers are patch-added.
+            # All run independently; any fail → revert + retry.
             from gitoma.worker.orphan_check import (
+                check_g16_dead_code,
                 check_g18_abandoned_helpers,
                 check_g19_echo_chamber,
             )
+            g16_result = check_g16_dead_code(
+                self._git.root, touched, originals,
+                cpg_index=self._cpg_index,
+            )
+            if g16_result is not None:
+                err_text = g16_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g16_dead_code.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(g16_result.conflicts),
+                    symbols=sorted({c.symbol_name for c in g16_result.conflicts}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G16 dead-code check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(g16_result.conflicts)} new symbol(s) dead."
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
             g18_result = check_g18_abandoned_helpers(
                 self._git.root, touched, originals,
             )
