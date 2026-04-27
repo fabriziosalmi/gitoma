@@ -338,6 +338,21 @@ class LLMClient:
         _extra_body: dict | None = None
         if (_os.environ.get("LM_STUDIO_DISABLE_THINKING_TEMPLATE_KWARG") or "").lower() in ("1", "true", "yes"):
             _extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+        # Optional third prong: top-level ``enable_thinking: false`` —
+        # the only kill-switch exo's OpenAI-compat shim honors (verified
+        # 2026-04-27 against ``mlx-community/Qwen3.6-35B-A3B-4bit``:
+        # reasoning_content non-null → null, finish_reason length → stop).
+        # exo silently ignores both ``/no_think`` AND
+        # ``chat_template_kwargs``. Gated behind its own env so the
+        # default LM Studio path stays unbroken; opt in when targeting
+        # an exo cluster or another backend known to honor the
+        # top-level field. Composes additively with the kwarg above —
+        # backends that honor neither field (LM Studio) will reject
+        # the unknown key, hence the explicit opt-in.
+        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING_TOPLEVEL") or "").lower() in ("1", "true", "yes"):
+            if _extra_body is None:
+                _extra_body = {}
+            _extra_body["enable_thinking"] = False
 
         for attempt in range(retries):
             try:
