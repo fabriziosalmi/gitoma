@@ -547,6 +547,58 @@ sandboxed CI envs without network access.
 - Cross-link validation (anchor `#section` actually exists in
   target file) — adds parsing complexity for marginal coverage.
 
+> **Note**: G15 (sibling-config reconciliation), G18
+> (abandoned-helper detection), G19 (echo-chamber detection)
+> shipped after G14 but are not yet backfilled into this catalogue.
+> See their sprint plans in conversation memory and the worker.py
+> wire-in for the canonical mechanism. Backfill tracked separately.
+
+### G20 — TOML/INI syntax validation
+
+**Catches**: patches that introduce parse-level syntax errors in
+config files (broken `pyproject.toml`, `setup.cfg`, `tox.ini`,
+`.ruff.toml`, `Cargo.toml`, etc.). Closes the bench-blast PR #1
+failure mode (closed 2026-04-26): the entire G1–G15 stack +
+the LLM self-critic shipped a PR with 3 syntax errors in
+configs, because no guard ran the parser.
+
+**Mechanism**: `gitoma/worker/config_syntax.py`. For each touched
+file, classify by basename or extension:
+
+- TOML family: `pyproject.toml`, `.ruff.toml`, `ruff.toml`,
+  `uv.toml`, `mypy.toml`, `rustfmt.toml`, `clippy.toml`,
+  `Cargo.toml`, plus generic `*.toml`. Parsed via stdlib
+  `tomllib.loads`.
+- INI family: `setup.cfg`, `tox.ini`, `.flake8`, `.pylintrc`,
+  `.coveragerc`, `mypy.ini`, `.isort.cfg`, plus generic `*.ini`
+  / `*.cfg`. Parsed via stdlib `configparser` (with
+  `strict=True` so duplicate sections / options raise).
+
+Files outside both families are skipped. Errors aggregated
+across all touched configs into ONE `ConfigSyntaxResult` so
+the LLM retry sees the full picture in a single feedback round.
+Line/column extracted from parser messages where present.
+
+**Wired between G15 (sibling-config) and G18/G19 (orphan
+symbols)** in the worker, same revert+retry shape as the rest
+of the stack. No env opt-in/out — deterministic and cheap (one
+stdlib parse per file), defaults on.
+
+**Documented lenience**: stdlib `tomllib` accepts leading
+whitespace on keys (some external TOML parsers in the wild are
+stricter). G20 catches actual syntax errors only — not cosmetic
+indentation. Pinned in test
+`tests/test_config_syntax.py::test_toml_leading_whitespace_is_lenient`.
+
+**Out of scope for v1** (deferred):
+- Schema validation (already covered by G10 / `validate_config_semantics`
+  for the schemas it knows: ESLint, Prettier, tsconfig, package.json,
+  GitHub workflow, dependabot, Cargo).
+- YAML / JSON syntax (already covered upstream by
+  `validate_post_write_syntax`).
+- Cross-config consistency (already covered by G15 for the
+  JS/TS quality-config family).
+
 ## Plan-time deterministic post-processors (Layer-A + Layer-B)
 
 Two LLM-free transformations applied to the plan AFTER the LLM
@@ -846,3 +898,4 @@ existing ones.
 | 2026-04-25 AM | b2v PRs #24/#27 | G14 (URL/path grounding) — closes the content-grounding trilogy after G11/G12/G13. Two-tier external URL check (DNS → HEAD-404) catches invented `*.github.io` subdomains; relative-path filesystem check catches invented `docs/guide/code/*` paths. Carry-over links exempt. Opt-out via `GITOMA_URL_GROUNDING_OFFLINE`. |
 | 2026-04-25 PM | rung-0 backlog + b2v PR matrix | Layer-A `synthesize_real_bug_task` + Layer-B `banish_readme_only_subtasks` — deterministic plan post-processors that fire BEFORE worker apply. A: synthesize T000 when planner ignored failing tests. B: drop README-only subtasks unless Documentation metric explicitly cites README. Plus planner-prompt HARD RULE on README. Catches the planner-side root cause of 3 of 4 b2v PR README destructions. |
 | 2026-04-26 AM | b2v bench replay + horizon-Ψ memory | Ψ-lite (`gitoma/worker/psi_score.py`) — pure-math Γ (grounding fraction) + Ω (slop heuristics) → `Ψ = α·Γ - λ·Ω`. Scalar gate between structural guards and LLM critics. Opt-in via `GITOMA_PSI_LITE=on`. Calibrated against PR #27 (README destroyed: Ψ=0.40 → BLOCK) vs PR #28/#29/#30 clean (Ψ ≥ 0.935 → PASS). |
+| 2026-04-27 PM | bench-blast PR #1 | G20 (TOML/INI syntax validator) — stdlib `tomllib` + `configparser` over every touched config file in the patch. Closes the failure mode where 3 syntax errors slipped past G1–G15 + LLM self-critic. Wired between G15 and G18/G19; same revert+retry shape. 43 tests including replay of bench-blast `setup.cfg` failure. Defaults on, no env toggle. |

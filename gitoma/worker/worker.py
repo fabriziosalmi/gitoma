@@ -518,6 +518,36 @@ class WorkerAgent:
                 compile_error_feedback = err_text
                 continue
 
+            # G20 TOML/INI syntax validation: the patch may have
+            # broken a config file (pyproject.toml, .ruff.toml,
+            # setup.cfg, tox.ini, etc.). Closes the bench-blast
+            # PR #1 failure mode where 3 syntax errors slipped past
+            # the entire G1-G15 stack + LLM self-critic.
+            from gitoma.worker.config_syntax import check_config_syntax
+            cfg_syntax_result = check_config_syntax(
+                self._git.root, touched,
+            )
+            if cfg_syntax_result is not None:
+                err_text = cfg_syntax_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g20_config_syntax.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    error_count=len(cfg_syntax_result.errors),
+                    files=sorted({e.file for e in cfg_syntax_result.errors}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G20 config-syntax check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(cfg_syntax_result.errors)} parse error(s) "
+                        f"in: {sorted({e.file for e in cfg_syntax_result.errors})}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
             # G18 + G19 orphan-symbol detection (both opt-in via
             # GITOMA_G18_ABANDONED / GITOMA_G19_ECHO_CHAMBER).
             # G18 = patch removed last in-file callers of a kept

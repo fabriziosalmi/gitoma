@@ -32,6 +32,22 @@ All notable changes to gitoma are documented in this file. Format follows
 - New module `gitoma/integrations/` for tool integrations
   (distinct from `gitoma/context/` which gathers data INTO
   prompts; `integrations/` are tools gitoma DELEGATES TO).
+- **G20 — TOML/INI syntax validator**
+  (`gitoma/worker/config_syntax.py`): deterministic parse-check
+  over every touched config file (`pyproject.toml`, `.ruff.toml`,
+  `Cargo.toml`, `clippy.toml`, `setup.cfg`, `tox.ini`, `.flake8`,
+  `.pylintrc`, `mypy.ini`, plus generic `*.toml` / `*.ini` /
+  `*.cfg` fallback). Stdlib `tomllib` + `configparser` — zero
+  deps, zero LLM. Errors are aggregated across all touched
+  configs into ONE `ConfigSyntaxResult` so the LLM retry sees the
+  full picture in a single feedback round. Wired into the worker
+  between G15 (sibling-config) and G18/G19 (orphan symbols),
+  same revert+retry shape as the rest of the stack. Closes the
+  bench-blast PR #1 failure mode (closed 2026-04-26): 3 syntax
+  errors in shipped configs slipped past G1–G15 + the LLM
+  self-critic; G20 catches that class deterministically. 43 new
+  tests including a replay scenario for the bench-blast `setup.cfg`
+  failure (`tests/test_config_syntax.py`).
 
 ## [0.5.0] — 2026-04-26
 
