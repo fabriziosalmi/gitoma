@@ -6,6 +6,38 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **PHASE 7 — auto-write diary entry to a remote log repo**
+  (`gitoma/cli/diary.py` + wire-in at end of `gitoma/cli/commands/run.py`):
+  when both `GITOMA_DIARY_REPO=owner/log-repo` and
+  `GITOMA_DIARY_TOKEN=ghp_…` are set, `gitoma run` writes a markdown
+  summary of the run to that remote repo at the end of a successful
+  run (after PHASE 6, before exit). Filename is
+  `entries/YYYY-MM-DD-HHMM-{repo-slug}-{branch-slug}.md` so concurrent
+  parallel runs land different files and never conflict on commit.
+  Frontmatter is machine-readable (date, repo, branch, pr, pr_url,
+  model, endpoint, plan_source, plan_tasks, plan_subtasks,
+  subtasks_done, guards_fired, self_review, verdict). Verdict is
+  auto-derived (`clean` / `partial` / `failed` / `no-plan`).
+  `guards_fired` filters trace events to `critic_*.fail` only —
+  what actually went wrong, not the trace volume.
+  **Failure modes are intentionally swallowed**: any error in the
+  hook (bad token, network down, push conflict, missing dirs) gets
+  traced via `current_trace().emit("diary.write_failed", …)` and
+  the run completes normally. The diary is best-effort by design —
+  a flaky log must never fail an otherwise-good gitoma run. A
+  single retry on push conflict (concurrent parallel-run case)
+  via `git pull --rebase`. 33 unit tests covering env config,
+  filename slugification, verdict derivation, frontmatter
+  composition, plan-source provenance (LLM vs `plan-from-file:*`),
+  guard-firing extraction (cap at 12, bad-JSON tolerance), and
+  PAT-leak prevention (asserts no `ghp_/gho_/ghr_/ghs_/github_pat_`
+  string ever lands in entry content).
+  **Live-fire validated 2026-04-28 22:19**: end-to-end happy-path
+  run on `gitoma-bench-triggers` opened PR #1 + posted self-review
+  + auto-pushed commit `5ae9dba` to `fabgpt-coder/log`.
+
 ### Fixed
 
 - **CPG-staleness in worker — G16 false-positives + G19 unfireable**

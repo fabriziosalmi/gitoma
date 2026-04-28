@@ -2046,3 +2046,49 @@ def run(
         )
         state.advance(AgentPhase.DONE)
         save_state(state)
+
+        # ────────────────────────────────────────────────────────────
+        # PHASE 7 — DIARY (opt-in, best-effort)
+        # ────────────────────────────────────────────────────────────
+        # When GITOMA_DIARY_REPO + GITOMA_DIARY_TOKEN are both set,
+        # write a markdown summary of this run to the configured
+        # remote log repo (e.g. fabgpt-coder/log). Filename includes
+        # a timestamp + repo + branch slug so concurrent parallel
+        # runs land different files and never conflict on commit.
+        # All errors are swallowed + traced — a flaky log must NEVER
+        # fail an otherwise-good gitoma run.
+        try:
+            from gitoma.cli.diary import DiaryConfig, write_diary_entry
+            _diary_cfg = DiaryConfig.from_env()
+            if _diary_cfg is not None:
+                # Best-effort find of the trace JSONL for guard-firing
+                # extraction. The path convention is set in
+                # gitoma.core.trace (one file per run under
+                # ~/.gitoma/logs/<owner>__<name>/<timestamp>-run.jsonl).
+                _trace_dir = (
+                    _Path.home() / ".gitoma" / "logs" / f"{owner}__{name}"
+                )
+                _trace_path = None
+                if _trace_dir.is_dir():
+                    _candidates = sorted(_trace_dir.glob("*-run.jsonl"))
+                    _trace_path = _candidates[-1] if _candidates else None
+                _diary_result = write_diary_entry(
+                    diary_config=_diary_cfg,
+                    repo_url=repo_url,
+                    state=state,
+                    plan=plan,
+                    config=config,
+                    trace_path=_trace_path,
+                )
+                if _diary_result.ok:
+                    console.print(
+                        f"[muted]Diary entry written to {_diary_cfg.repo}/"
+                        f"{_diary_result.entry_path}[/muted]"
+                    )
+                else:
+                    console.print(
+                        f"[warning]Diary write failed (non-fatal): "
+                        f"{_diary_result.error[:120]}[/warning]"
+                    )
+        except Exception:  # noqa: BLE001 — must never escape
+            pass
