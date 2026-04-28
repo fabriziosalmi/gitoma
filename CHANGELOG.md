@@ -8,6 +8,42 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **`gitoma scaffold` — third deterministic vertical**
+  (`gitoma/cli/commands/scaffold.py` + `gitoma/integrations/occam_trees.py`):
+  given a GitHub repo URL + `--stack <id>` + `--level <1-10>`,
+  resolves the canonical file tree from a local
+  [occam-trees](https://github.com/fabriziosalmi/occam-trees) HTTP
+  service (`OCCAM_TREES_URL`, default `http://localhost:8420`),
+  diffs against the repo's existing files (additive only — never
+  overwrites), creates every missing canonical path with a tiny
+  TODO stub matching its semantic role (manifest, framework-config,
+  root-layout, …), commits, opens a PR. **Zero LLM at runtime** —
+  occam-trees is a 1000-scaffold dataset lookup oracle (100 stacks
+  × 10 archetypes). Mirror of the `gitoma gitignore` shape.
+  Pre-flight checks server reachability + validates `(stack, level)`
+  with helpful "did you mean" errors when the stack id is unknown.
+  PR body emphasises reproducibility (same `(stack, level)` input
+  → same file tree, byte-for-byte) + tells the reviewer how to
+  re-derive the patch via `occam-trees resolve <stack> <level>
+  --json`. Each stub file body matches the file's role (when
+  known) or its extension (Python / JS / TS / Go / Rust / Ruby /
+  PHP / CSS / HTML / Markdown / YAML / TOML / JSON / shell /
+  txt) so the post-scaffold polish-agent (`gitoma run`) can
+  read them without choking. **Why this exists**: yesterday's
+  5-way `gitoma-bench-generation` bench proved gitoma's LLM
+  planner cannot generate a project from zero — README intent +
+  spec files + failing tests are all invisible to it. This
+  vertical is the upstream fix: scaffold the canonical tree
+  deterministically FIRST, then let the LLM-driven `gitoma run`
+  polish the result. Third spider leg integrated (after
+  occam-gitignore + layer0). 20 unit tests covering env config,
+  ScaffoldNode flatten (leaf/nested/empty-dir), ResolvedScaffold
+  round-trip, silent-fail-open across all 4 methods, HTTP-error
+  swallowing, null-stack/archetype tolerance, mocked happy path,
+  CLI registration smoke.
+
+### Added
+
 - **PHASE 1.5 + PHASE 8 — Layer0 cross-run memory wired into the run loop**
   (`gitoma/cli/commands/run.py`): the Layer0 client shipped earlier
   is now consumed in two places.

@@ -18,6 +18,7 @@ from gitoma.cli.commands import (  # noqa: F401
     review,
     run,
     sandbox,
+    scaffold,
     serve,
     status,
 )
