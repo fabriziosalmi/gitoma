@@ -60,6 +60,7 @@ from typing import Any
 __all__ = [
     "Layer0Config",
     "Layer0Hit",
+    "Layer0Group",
     "Layer0Client",
     "namespace_for_repo",
 ]
@@ -106,6 +107,17 @@ class Layer0Hit:
     distance: float
     tags: tuple[str, ...] = field(default_factory=tuple)
     created_at_ms: int = 0
+
+
+@dataclass(frozen=True)
+class Layer0Group:
+    """One bucket of a `search_grouped` response — top-K hits whose
+    metadata tags include ``tag``. Empty ``hits`` means no memory in
+    the namespace currently carries this tag (or none matched the
+    semantic query within the over-fetch window)."""
+
+    tag: str
+    hits: tuple[Layer0Hit, ...] = field(default_factory=tuple)
 
 
 # ── Namespace builder ─────────────────────────────────────────────
@@ -179,10 +191,22 @@ class Layer0Client:
         namespace: str,
         tags: list[str] | None = None,
         fields: dict[str, str] | None = None,
+        pinned: bool = False,
+        ttl_ms: int = 0,
     ) -> bool:
-        """Ingest a single memory. Layer0's IngestMemories returns
-        success-only (server assigns id internally — there's no
-        client-side id needed for gitoma's append-only usage)."""
+        """Ingest a single memory.
+
+        ``pinned=True`` exempts this memory from ALL retention pruning
+        (namespace TTL, size-cap, per-memory expires_at_ms). Use for
+        architectural facts that must survive months — e.g. "this repo
+        uses pytest 8.x with asyncio mode strict".
+
+        ``ttl_ms > 0`` sets per-memory absolute expiry as
+        ``now + ttl_ms``. Ignored when ``pinned=True``. Falls back to
+        namespace-wide retention when ``ttl_ms=0``.
+
+        Layer0's IngestMemories returns success-only (server assigns
+        id internally; gitoma's append-only usage doesn't need it)."""
         if not self._ensure_stub():
             return False
         if not text or not namespace:
@@ -195,6 +219,10 @@ class Layer0Client:
                 updated_at_ms=now_ms,
                 tags=list(tags or []),
                 fields=dict(fields or {}),
+                pinned=bool(pinned),
+                expires_at_ms=(
+                    now_ms + int(ttl_ms) if (ttl_ms > 0 and not pinned) else 0
+                ),
             )
             # IngestMemories has no server-side id assignment —
             # `MemoryNode.id` is taken as the storage slot, passing
@@ -230,10 +258,15 @@ class Layer0Client:
         namespace: str,
         k: int = 10,
         tag_any_of: list[str] | None = None,
+        tag_all_of: list[str] | None = None,
         created_after_ms: int = 0,
     ) -> list[Layer0Hit]:
         """Top-K text search in ``namespace``. Returns [] on failure
-        / disabled / empty namespace."""
+        / disabled / empty namespace.
+
+        Tag filters compose: ``tag_any_of`` is OR (hit must carry at
+        least one), ``tag_all_of`` is AND (hit must carry every one).
+        Both empty ⇒ no tag filtering."""
         if not self._ensure_stub():
             return []
         if not query or not namespace or k <= 0:
@@ -243,9 +276,10 @@ class Layer0Client:
             req_kwargs: dict[str, Any] = dict(
                 query=query, k=k, namespace=namespace,
             )
-            if tag_any_of or created_after_ms:
+            if tag_any_of or tag_all_of or created_after_ms:
                 req_kwargs["filter"] = pb.MetadataFilter(
                     tag_any_of=list(tag_any_of or []),
+                    tag_all_of=list(tag_all_of or []),
                     created_after_ms=created_after_ms,
                 )
             req = pb.SearchByTextRequest(**req_kwargs)
@@ -264,6 +298,62 @@ class Layer0Client:
                     tags=tags,
                     created_at_ms=created,
                 ))
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    # ── search_grouped (top-K per tag bucket, single round-trip) ──
+
+    def search_grouped(
+        self,
+        *,
+        query: str,
+        namespace: str,
+        group_tags: list[str],
+        k_per_group: int = 3,
+    ) -> list[Layer0Group]:
+        """Single HNSW walk → results bucketised by tag. Returns one
+        ``Layer0Group`` per requested tag in the same order. Empty
+        ``hits`` on a group means no memory in the namespace currently
+        carries that tag (or none matched the semantic query within
+        the over-fetch window). Returns [] on failure / disabled /
+        empty inputs.
+
+        Designed for PHASE 1.5 prior-runs context where gitoma wants
+        e.g. top-3 from each of [plan-shipped, guard-fail, pr-shipped]
+        in ONE call instead of three. Layer0 server does the bucketing
+        internally with proper over-fetch (k×groups×4) so we never get
+        truncation under selective tag filters."""
+        if not self._ensure_stub():
+            return []
+        if not query or not namespace or not group_tags or k_per_group <= 0:
+            return []
+        try:
+            from gitoma.integrations._layer0_proto import supermemory_pb2 as pb
+            req = pb.SearchGroupedByTextRequest(
+                query=query,
+                k_per_group=k_per_group,
+                namespace=namespace,
+                group_tags=list(group_tags),
+            )
+            resp = self._stub.SearchGroupedByText(
+                req, timeout=self.config.timeout_s, metadata=self._metadata(),
+            )
+            out: list[Layer0Group] = []
+            for g in resp.groups:
+                hits: list[Layer0Hit] = []
+                for h in g.hits:
+                    meta = getattr(h, "metadata", None)
+                    tags = tuple(getattr(meta, "tags", ()) or ()) if meta else ()
+                    created = (
+                        int(getattr(meta, "created_at_ms", 0) or 0) if meta else 0
+                    )
+                    hits.append(Layer0Hit(
+                        id=int(h.id), text=str(h.content),
+                        distance=float(h.distance),
+                        tags=tags, created_at_ms=created,
+                    ))
+                out.append(Layer0Group(tag=str(g.tag), hits=tuple(hits)))
             return out
         except Exception:  # noqa: BLE001
             return []

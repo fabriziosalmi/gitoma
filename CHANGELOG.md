@@ -8,6 +8,47 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **Layer0 client follow-up — grouped search + tag_all_of + pinned/TTL**
+  (`gitoma/integrations/layer0.py` + regenerated proto stubs +
+  `gitoma/cli/commands/run.py`): tracks the
+  `fabriziosalmi/layer0` v0.0.1+ ship (commit `f2e70860` upstream
+  on 2026-04-29 01:04 — "ship 6 agentic memory features"). Wires
+  three of the new capabilities into gitoma:
+  * `Layer0Client.search_grouped(query, namespace, group_tags,
+    k_per_group)` — single HNSW walk → top-K results PER tag
+    bucket in one gRPC round-trip. Backed by the new server RPC
+    `SearchGroupedByText`. Returns `list[Layer0Group]`.
+  * `Layer0Client.search_memory(..., tag_all_of=[...])` — new
+    AND-semantics filter on tags. Composes with `tag_any_of`
+    (OR); both must pass when both non-empty.
+  * `Layer0Client.ingest_one(..., pinned=False, ttl_ms=0)` — new
+    kwargs map to the server's `MemoryMetadata.pinned` (exempts
+    from ALL retention pruning) + `expires_at_ms` (per-memory
+    absolute expiry, `now + ttl_ms`). `pinned=True` wins over
+    `ttl_ms`.
+  **PHASE 1.5 upgrade**: pre-planner cross-run memory query now
+  uses `search_grouped` against four high-signal buckets in
+  one round-trip — `pinned-fact`, `guard-fail`, `pr-shipped`,
+  `plan-shipped`. Pinned facts come FIRST in the prompt so
+  architectural facts override everything else when present.
+  Backward-compat: when the server doesn't expose grouped search
+  (old build) OR no tagged memories exist yet, falls back to
+  the legacy flat `search_memory` — visible in console as
+  "Layer0: injected N flat memories".
+  **PHASE 8 upgrade**: when the plan was loaded via
+  `--plan-from-file`, the plan-source memory now carries
+  `pinned=True` + the extra `pinned-fact` tag. Operator-curated
+  plans must survive retention pruning indefinitely (losing
+  them to a background TTL sweep would erase reproducibility);
+  LLM-generated plans stay ephemeral and follow the namespace's
+  TTL. Live-fire validated: a happy-path `--plan-from-file`
+  run ingested its plan-source memory tagged
+  `['plan-loaded', 'plan-from-file', 'pinned-fact']` with
+  `pinned=True` server-side.
+  5 new unit tests (Layer0Group dataclass, disabled-client
+  no-op for grouped search, empty-arg guards, pinned/ttl_ms
+  kwargs accepted, tag_all_of kwarg accepted).
+
 - **`gitoma scaffold` — third deterministic vertical**
   (`gitoma/cli/commands/scaffold.py` + `gitoma/integrations/occam_trees.py`):
   given a GitHub repo URL + `--stack <id>` + `--level <1-10>`,

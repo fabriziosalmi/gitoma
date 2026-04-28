@@ -186,3 +186,80 @@ def test_layer0_hit_tags_immutable() -> None:
     h = Layer0Hit(id=1, text="hi", distance=0.5)
     with pytest.raises(Exception):
         h.id = 99   # type: ignore[misc]
+
+
+# ── New API surface (server v0.0.1+ post 2026-04-29) ──────────────
+
+
+def test_layer0_group_default_empty_hits() -> None:
+    from gitoma.integrations.layer0 import Layer0Group
+    g = Layer0Group(tag="x")
+    assert g.tag == "x"
+    assert g.hits == ()
+
+
+def test_disabled_client_search_grouped_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LAYER0_GRPC_URL", raising=False)
+    c = Layer0Client()
+    assert c.search_grouped(
+        query="x", namespace="ns", group_tags=["a", "b"], k_per_group=3,
+    ) == []
+
+
+def test_search_grouped_empty_args_return_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAYER0_GRPC_URL", "127.0.0.1:50051")
+    c = Layer0Client()
+    assert c.search_grouped(
+        query="", namespace="ns", group_tags=["a"], k_per_group=3,
+    ) == []
+    assert c.search_grouped(
+        query="x", namespace="", group_tags=["a"], k_per_group=3,
+    ) == []
+    assert c.search_grouped(
+        query="x", namespace="ns", group_tags=[], k_per_group=3,
+    ) == []
+    assert c.search_grouped(
+        query="x", namespace="ns", group_tags=["a"], k_per_group=0,
+    ) == []
+
+
+def test_ingest_one_accepts_pinned_and_ttl_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke: passing the new kwargs must not crash even when the
+    transport layer fails — silent-fail-open is preserved."""
+    monkeypatch.delenv("LAYER0_GRPC_URL", raising=False)
+    c = Layer0Client()
+    # pinned
+    assert c.ingest_one(
+        text="arch fact", namespace="ns", tags=["arch"], pinned=True,
+    ) is False
+    # ttl_ms
+    assert c.ingest_one(
+        text="ephemeral", namespace="ns", tags=["e"], ttl_ms=86400000,
+    ) is False
+    # both (pinned wins on the server side; client just passes both)
+    assert c.ingest_one(
+        text="both", namespace="ns", pinned=True, ttl_ms=86400000,
+    ) is False
+
+
+def test_search_memory_accepts_tag_all_of(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabled client returns [] regardless — but the new kwarg
+    must be accepted without TypeError."""
+    monkeypatch.delenv("LAYER0_GRPC_URL", raising=False)
+    c = Layer0Client()
+    assert c.search_memory(
+        query="x", namespace="ns", k=5,
+        tag_all_of=["guard-fail", "G18"],
+    ) == []
+    assert c.search_memory(
+        query="x", namespace="ns", k=5,
+        tag_any_of=["a"], tag_all_of=["b"],
+    ) == []

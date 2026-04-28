@@ -64,6 +64,16 @@ class CognitiveEngineStub(object):
                 request_serializer=supermemory__pb2.SearchByTextRequest.SerializeToString,
                 response_deserializer=supermemory__pb2.SearchByTextResponse.FromString,
                 _registered_method=True)
+        self.SearchGroupedByText = channel.unary_unary(
+                '/supermemory.v1.CognitiveEngine/SearchGroupedByText',
+                request_serializer=supermemory__pb2.SearchGroupedByTextRequest.SerializeToString,
+                response_deserializer=supermemory__pb2.SearchGroupedByTextResponse.FromString,
+                _registered_method=True)
+        self.GetMemoryById = channel.unary_unary(
+                '/supermemory.v1.CognitiveEngine/GetMemoryById',
+                request_serializer=supermemory__pb2.GetMemoryByIdRequest.SerializeToString,
+                response_deserializer=supermemory__pb2.GetMemoryByIdResponse.FromString,
+                _registered_method=True)
         self.UpdateText = channel.unary_unary(
                 '/supermemory.v1.CognitiveEngine/UpdateText',
                 request_serializer=supermemory__pb2.UpdateTextRequest.SerializeToString,
@@ -219,6 +229,27 @@ class CognitiveEngineServicer(object):
         callers that don't carry their own embedder (Claude Code, simple
         Python orchestrators). Returns INTERNAL if the server started
         without a loadable ONNX model.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SearchGroupedByText(self, request, context):
+        """Grouped search: single HNSW walk, results distributed into per-tag
+        buckets. Returns top-K hits per tag group in one round-trip.
+        Designed for consumer agents (gitoma) that need e.g. top-3 from
+        each of [plan-shipped, guard-fail, pr-shipped] without issuing N
+        separate SearchByText calls. Uses the internal ONNX embedder;
+        returns INTERNAL if no model is loaded.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetMemoryById(self, request, context):
+        """Point lookup: fetch a single memory by id (text + metadata).
+        Returns NOT_FOUND when the id does not exist or is tombstoned.
+        Useful for "show memory X" UIs, replay, and audit.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -449,6 +480,16 @@ def add_CognitiveEngineServicer_to_server(servicer, server):
                     servicer.SearchByText,
                     request_deserializer=supermemory__pb2.SearchByTextRequest.FromString,
                     response_serializer=supermemory__pb2.SearchByTextResponse.SerializeToString,
+            ),
+            'SearchGroupedByText': grpc.unary_unary_rpc_method_handler(
+                    servicer.SearchGroupedByText,
+                    request_deserializer=supermemory__pb2.SearchGroupedByTextRequest.FromString,
+                    response_serializer=supermemory__pb2.SearchGroupedByTextResponse.SerializeToString,
+            ),
+            'GetMemoryById': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetMemoryById,
+                    request_deserializer=supermemory__pb2.GetMemoryByIdRequest.FromString,
+                    response_serializer=supermemory__pb2.GetMemoryByIdResponse.SerializeToString,
             ),
             'UpdateText': grpc.unary_unary_rpc_method_handler(
                     servicer.UpdateText,
@@ -703,6 +744,60 @@ class CognitiveEngine(object):
             '/supermemory.v1.CognitiveEngine/SearchByText',
             supermemory__pb2.SearchByTextRequest.SerializeToString,
             supermemory__pb2.SearchByTextResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SearchGroupedByText(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/supermemory.v1.CognitiveEngine/SearchGroupedByText',
+            supermemory__pb2.SearchGroupedByTextRequest.SerializeToString,
+            supermemory__pb2.SearchGroupedByTextResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetMemoryById(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/supermemory.v1.CognitiveEngine/GetMemoryById',
+            supermemory__pb2.GetMemoryByIdRequest.SerializeToString,
+            supermemory__pb2.GetMemoryByIdResponse.FromString,
             options,
             channel_credentials,
             insecure,

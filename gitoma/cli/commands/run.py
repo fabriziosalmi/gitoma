@@ -671,41 +671,90 @@ def run(
                     _l0 = _L0Client()
                     if _l0.enabled:
                         _l0_namespace = _l0_ns(owner, name)
-                        # Pull top-8 most-relevant. Query text =
-                        # planner-prompt seed: the report's failing
-                        # metric names, so we get memories about
-                        # related prior tasks.
                         _l0_query_seed = " ".join(
                             m.display_name for m in report.metrics
                             if m.status in ("fail", "warn")
                         ) or f"recent activity on {owner}/{name}"
-                        _l0_hits = _l0.search_memory(
+                        # Single grouped call: top-K from each of
+                        # 4 high-signal buckets in ONE round-trip.
+                        # Pinned-fact comes FIRST in the prompt
+                        # because architectural facts must override
+                        # everything else when they exist.
+                        # Backward-compat: if the server is older
+                        # (pre-2026-04-29 ships) and doesn't expose
+                        # SearchGroupedByText, the call returns []
+                        # and we degrade to the legacy single search.
+                        _bucket_tags = [
+                            "pinned-fact",
+                            "guard-fail",
+                            "pr-shipped",
+                            "plan-shipped",
+                        ]
+                        _l0_groups = _l0.search_grouped(
                             query=_l0_query_seed,
                             namespace=_l0_namespace,
-                            k=8,
+                            group_tags=_bucket_tags,
+                            k_per_group=3,
                         )
-                        if _l0_hits:
+                        _injected = 0
+                        if _l0_groups and any(g.hits for g in _l0_groups):
                             _l0_block_lines = [
                                 "",
-                                "## Cross-run memory (Layer0 — most-relevant prior runs on this repo)",
+                                "## Cross-run memory (Layer0 — bucketised prior context)",
                                 "",
                             ]
-                            for _h in _l0_hits:
-                                _tag_str = (
-                                    f" [{', '.join(_h.tags)}]" if _h.tags else ""
-                                )
+                            for _g in _l0_groups:
+                                if not _g.hits:
+                                    continue
                                 _l0_block_lines.append(
-                                    f"- {_h.text}{_tag_str}"
+                                    f"### {_g.tag} (top {len(_g.hits)})"
                                 )
+                                for _h in _g.hits:
+                                    _l0_block_lines.append(f"- {_h.text}")
+                                    _injected += 1
+                                _l0_block_lines.append("")
                             _l0_block = "\n".join(_l0_block_lines)
                             _prior_runs = (
                                 _prior_runs + "\n" + _l0_block
                                 if _prior_runs else _l0_block
                             )
                             console.print(
-                                f"[muted]Layer0: injected {len(_l0_hits)} prior-runs "
-                                f"memories from ns={_l0_namespace}[/muted]"
+                                f"[muted]Layer0: injected {_injected} prior-runs "
+                                f"memories across {sum(1 for g in _l0_groups if g.hits)}/"
+                                f"{len(_bucket_tags)} buckets from ns={_l0_namespace}[/muted]"
                             )
+                        else:
+                            # Fallback to flat search for older servers
+                            # OR brand-new namespaces where no tagged
+                            # memories exist yet.
+                            _l0_hits = _l0.search_memory(
+                                query=_l0_query_seed,
+                                namespace=_l0_namespace,
+                                k=8,
+                            )
+                            if _l0_hits:
+                                _l0_block_lines = [
+                                    "",
+                                    "## Cross-run memory (Layer0 — most-relevant prior runs on this repo)",
+                                    "",
+                                ]
+                                for _h in _l0_hits:
+                                    _tag_str = (
+                                        f" [{', '.join(_h.tags)}]" if _h.tags else ""
+                                    )
+                                    _l0_block_lines.append(
+                                        f"- {_h.text}{_tag_str}"
+                                    )
+                                _l0_block = "\n".join(_l0_block_lines)
+                                _prior_runs = (
+                                    _prior_runs + "\n" + _l0_block
+                                    if _prior_runs else _l0_block
+                                )
+                                console.print(
+                                    f"[muted]Layer0: injected {len(_l0_hits)} "
+                                    f"flat memories from ns={_l0_namespace} "
+                                    f"(no tagged buckets matched)[/muted]"
+                                )
                         _l0.close()
                 except Exception as _l0_exc:  # noqa: BLE001 — must never escape
                     try:
@@ -2189,16 +2238,28 @@ def run(
                 _l0w_namespace = _l0_ns_w(owner, name)
 
                 # ── Plan source memory ──────────────────────────────
+                # Curated plans (--plan-from-file) get pinned=True so
+                # they survive retention pruning indefinitely. The
+                # operator chose them deliberately; losing them to a
+                # background TTL sweep would erase reproducibility.
+                # LLM-generated plans are ephemeral (the planner
+                # regenerates equivalents on demand) and follow the
+                # namespace's TTL.
                 _plan_src = (plan.llm_model if plan else "") or "llm"
+                _is_curated = _plan_src.startswith("plan-from-file:")
                 _plan_summary = (
                     f"Plan loaded: {plan.total_tasks if plan else 0} task(s), "
                     f"{plan.total_subtasks if plan else 0} subtask(s) — "
                     f"source={_plan_src} model={config.lmstudio.model}"
                 )
+                _plan_tags = ["plan-loaded", _plan_src.split(":")[0]]
+                if _is_curated:
+                    _plan_tags.append("pinned-fact")
                 _l0w.ingest_one(
                     text=_plan_summary,
                     namespace=_l0w_namespace,
-                    tags=["plan-loaded", _plan_src.split(":")[0]],
+                    tags=_plan_tags,
+                    pinned=_is_curated,
                 )
 
                 # ── Guard-firings memories ──────────────────────────
