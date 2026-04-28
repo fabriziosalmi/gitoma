@@ -90,6 +90,15 @@ e2e_cockpit = [
 gitignore = [
     "occam-gitignore-core>=0.1.3",
 ]
+# `gitoma` cross-run memory via Layer0 (HNSW + Poincaré ball, gRPC at
+# `LAYER0_GRPC_URL`). Optional install: `pip install gitoma[layer0]`.
+# When the env var is set, gitoma queries memories before PHASE 2 and
+# ingests a run summary at the end. Silent fail-open if Layer0 is
+# unavailable — gitoma proceeds unchanged.
+layer0 = [
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

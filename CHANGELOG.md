@@ -8,6 +8,38 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **Layer0 cross-run memory client** (`gitoma/integrations/layer0.py`
+  + generated proto stubs under `gitoma/integrations/_layer0_proto/`):
+  thin gRPC wrapper for the Layer0 vector-memory engine
+  (`fabriziosalmi/layer0`, HNSW + Poincaré ball with multi-tenant
+  namespaces, retention, soft-delete, metadata filters, MCP bridge).
+  Exposes the 3 surface-area tools gitoma needs: `ingest_one`
+  (write a memory: text + tags + fields → namespace), `search_memory`
+  (top-K query with optional `tag_any_of` filter), `list_namespaces`
+  (ops). Plus `namespace_for_repo(owner, name)` builds the canonical
+  namespace id `{owner}__{name}` matching layer0's
+  `[a-zA-Z0-9_-]{1,64}` regex with sanitisation + truncation.
+  **Silent fail-open contract** mirrored from `occam_client`: when
+  `LAYER0_GRPC_URL` is unset OR the server is unreachable, every
+  call returns a benign default (`False` / `[]`) and the gitoma
+  pipeline proceeds unchanged. 2 s timeout per call, no retries.
+  **Slot ID strategy**: layer0 reserves `MemoryNode.id ∈ [0, 1024)`
+  for manual ingests; client hashes
+  `SHA-256(namespace || ts_ns || text) % 1024` so concurrent writes
+  don't overwrite each other (collision rate stays under ~0.5 % at
+  N=20 active memories per namespace, comfortable with retention TTL
+  pruning > 30 d). Optional install: `pip install gitoma[layer0]`
+  brings in `grpcio>=1.60`. Live-validated end-to-end on the local
+  layer0 build: 6 memories ingested into
+  `fabriziosalmi__gitoma-bench-blast`, top-K + tag-filtered search
+  both surface semantically-correct results. PHASE 1.5 (pre-planner
+  query) + PHASE 8 (post-run ingest) wire-in lands in a follow-up
+  commit. 23 unit tests covering env config, namespace
+  sanitisation, silent-fail-open paths, empty-arg guards,
+  permanent-disable on stub-init failure.
+
+### Added
+
 - **PHASE 7 — auto-write diary entry to a remote log repo**
   (`gitoma/cli/diary.py` + wire-in at end of `gitoma/cli/commands/run.py`):
   when both `GITOMA_DIARY_REPO=owner/log-repo` and

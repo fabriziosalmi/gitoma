@@ -7,6 +7,12 @@ scratch/
 mypy_output.txt
 mypy_output_2.txt
 
+# Layer0 (vector memory) on-disk store — the layer0-server defaults to
+# `graph_l2.bin*` relative to its CWD; if it gets started from gitoma's
+# directory those files end up here. They are runtime data, not source.
+graph_l2.bin
+graph_l2.bin.*
+
 # Python
 __pycache__/
 *.py[cod]
