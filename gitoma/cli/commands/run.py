@@ -181,6 +181,15 @@ def run(
         ),
     ] = False,
     skip_lm: Annotated[bool, typer.Option("--skip-lm-check", hidden=True, help="Skip LM Studio check (testing)")] = False,
+    plan_from_file: Annotated[
+        Optional[str],
+        typer.Option(
+            "--plan-from-file",
+            help="Path to a JSON file containing a hand-curated TaskPlan. "
+            "Skips PHASE 2 (LLM planning) and uses the file as the plan. "
+            "See gitoma/planner/plan_loader.py for the schema.",
+        ),
+    ] = None,
 ) -> None:
     """
     🚀 Run the full autonomous improvement pipeline on a GitHub repo.
@@ -485,6 +494,11 @@ def run(
         # ────────────────────────────────────────────────────────────────────────
         # PHASE 2 — PLAN
         # ────────────────────────────────────────────────────────────────────────
+        # Defaults for variables that PHASE 3 reads but only the LLM
+        # branch of PHASE 2 sets (Occam fingerprint, repo brief, …).
+        # Without these, --plan-from-file paths trip an UnboundLocalError
+        # in PHASE 3.
+        _repo_fp: dict | None = None
         # Resume gate on PLANNING: skip only if we can actually rehydrate.
         # Same reasoning as PHASE 1 — fall back to re-planning on deser
         # failure instead of crashing the whole resume.
@@ -500,6 +514,43 @@ def run(
                     "Re-running PHASE 2.[/warning]"
                 )
                 plan = None
+        if plan is None and plan_from_file is not None:
+            # Operator-curated plan path: skip PHASE 2 entirely. Load
+            # the JSON, validate, and treat the result as if the LLM
+            # planner had emitted it. The rest of the pipeline (post-
+            # plan filters, worker, critic stack, PR, self-review)
+            # runs unchanged. See plan_loader docstring + the
+            # bench-generation 2026-04-28 finding for why this exists.
+            from gitoma.planner.plan_loader import (
+                PlanFileError,
+                load_plan_from_file,
+            )
+            with _phase("PHASE 2 — PLANNING (curated plan)", cleanup=git_repo, state=state):
+                console.print(
+                    f"[muted]Loading hand-curated plan from "
+                    f"{plan_from_file} (skipping LLM call)…[/muted]"
+                )
+                try:
+                    plan = load_plan_from_file(plan_from_file)
+                except PlanFileError as exc:
+                    console.print(
+                        Panel(
+                            f"[danger]Could not load plan from file:[/danger] {exc}\n\n"
+                            "[muted]The file must conform to TaskPlan.from_dict — "
+                            "see gitoma/planner/plan_loader.py docstring for the "
+                            "exact schema.[/muted]",
+                            title="[danger]🤖 Plan File Error[/danger]",
+                            border_style="danger",
+                        )
+                    )
+                    _safe_cleanup(git_repo)
+                    raise typer.Exit(1)
+                console.print(
+                    f"[primary]✓ Loaded {plan.total_tasks} task(s) / "
+                    f"{plan.total_subtasks} subtask(s) from {plan_from_file}[/primary]"
+                )
+                state.task_plan = plan.to_dict()
+                save_state(state)
         if plan is None:
             with _phase("PHASE 2 — PLANNING", cleanup=git_repo, state=state):
                 from gitoma.planner.planner import PlannerAgent

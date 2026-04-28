@@ -8,6 +8,37 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **`--plan-from-file` — operator-curated TaskPlan path**
+  (`gitoma/planner/plan_loader.py` + `gitoma/cli/commands/run.py`):
+  pass `--plan-from-file path/to/tasks.json` to `gitoma run` and
+  PHASE 2 (the LLM planner call) is skipped entirely; the plan is
+  loaded from disk and treated as if the planner had emitted it.
+  Everything else (post-plan filters, worker, critic stack, PR
+  creation, self-review) runs unchanged. The JSON must conform to
+  `TaskPlan.from_dict` — full schema documented in
+  `plan_loader.py`. Validation is intentionally minimal (file
+  readable, JSON parses, at least one task with at least one
+  subtask, schema accepts) — the worker / critic stack are the
+  authority on richer constraints. **Why this exists**: the
+  2026-04-28 5-way generation bench proved gitoma's LLM planner
+  is metric-driven and effectively blind to README intent, spec
+  files, and failing-test imports. For workloads where the
+  operator already knows exactly which tasks they want
+  (reproducible benches, regression tests for individual critics,
+  deterministic verticals, demos, true generation work), routing
+  through the LLM planner adds noise without value. This loader
+  is the operator's escape hatch. Provenance: every loaded plan
+  stamps `plan.llm_model = "plan-from-file:<filename>"` so the
+  trace can distinguish curated plans from LLM-generated ones at
+  a glance. **Live-fire validated 2026-04-28 21:30**: a
+  hand-curated `tasks.json` targeting the `core_helpers.py` G18
+  trigger on `gitoma-bench-triggers` produced the first ever live
+  G18 firing in a real `gitoma run` — closing the Path D
+  structural blocker that days of metric-driven planner runs
+  could not. 14 new tests
+  (`tests/test_plan_loader.py`).
+
+
 - **`gitoma gitignore` — first deterministic vertical**
   (`gitoma/cli/commands/gitignore.py` + `gitoma/integrations/occam_gitignore.py`):
   wraps the externally-shipped [occam-gitignore-core](https://pypi.org/project/occam-gitignore-core)
