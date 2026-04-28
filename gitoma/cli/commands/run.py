@@ -647,6 +647,73 @@ def run(
                                 f"{', '.join(_fws[:3]) or '(none)'}[/muted]"
                             )
 
+                # ────────────────────────────────────────────────────
+                # PHASE 1.5 — LAYER0 CROSS-RUN MEMORY QUERY
+                # ────────────────────────────────────────────────────
+                # When LAYER0_GRPC_URL is set, ask Layer0 for the
+                # top-K most relevant memories from this repo's
+                # namespace. Memories are appended to ``_prior_runs``
+                # so they reach the planner via the same context
+                # channel Occam Observer's agent-log uses. Disabled
+                # path: Layer0Client returns [] and nothing changes.
+                #
+                # Why this matters: without persistent memory the
+                # planner re-proposes the same generic boilerplate
+                # tasks every run on the same repo. Layer0 lets the
+                # planner see "we already shipped Ruff config 3 days
+                # ago" / "G18 fired on core_helpers.py last time" /
+                # "PR #5 closed without merge — model gemma-4-e4b".
+                try:
+                    from gitoma.integrations.layer0 import (
+                        Layer0Client as _L0Client,
+                        namespace_for_repo as _l0_ns,
+                    )
+                    _l0 = _L0Client()
+                    if _l0.enabled:
+                        _l0_namespace = _l0_ns(owner, name)
+                        # Pull top-8 most-relevant. Query text =
+                        # planner-prompt seed: the report's failing
+                        # metric names, so we get memories about
+                        # related prior tasks.
+                        _l0_query_seed = " ".join(
+                            m.display_name for m in report.metrics
+                            if m.status in ("fail", "warn")
+                        ) or f"recent activity on {owner}/{name}"
+                        _l0_hits = _l0.search_memory(
+                            query=_l0_query_seed,
+                            namespace=_l0_namespace,
+                            k=8,
+                        )
+                        if _l0_hits:
+                            _l0_block_lines = [
+                                "",
+                                "## Cross-run memory (Layer0 — most-relevant prior runs on this repo)",
+                                "",
+                            ]
+                            for _h in _l0_hits:
+                                _tag_str = (
+                                    f" [{', '.join(_h.tags)}]" if _h.tags else ""
+                                )
+                                _l0_block_lines.append(
+                                    f"- {_h.text}{_tag_str}"
+                                )
+                            _l0_block = "\n".join(_l0_block_lines)
+                            _prior_runs = (
+                                _prior_runs + "\n" + _l0_block
+                                if _prior_runs else _l0_block
+                            )
+                            console.print(
+                                f"[muted]Layer0: injected {len(_l0_hits)} prior-runs "
+                                f"memories from ns={_l0_namespace}[/muted]"
+                            )
+                        _l0.close()
+                except Exception as _l0_exc:  # noqa: BLE001 — must never escape
+                    try:
+                        from gitoma.core.trace import current as _ct_l0
+                        _ct_l0().exception("layer0.query_failed", _l0_exc)
+                    except Exception:
+                        pass
+
                 # Skeletal v1: compressed per-file signature view from
                 # the CPG-lite index. Off by default OR when CPG isn't
                 # built — falls back to file-tree-only behavior. Opt-out
@@ -2092,3 +2159,122 @@ def run(
                     )
         except Exception:  # noqa: BLE001 — must never escape
             pass
+
+        # ────────────────────────────────────────────────────────────
+        # PHASE 8 — LAYER0 CROSS-RUN MEMORY INGEST (opt-in, best-effort)
+        # ────────────────────────────────────────────────────────────
+        # When LAYER0_GRPC_URL is set, push a small set of memories
+        # about this run into the repo's namespace so the NEXT run
+        # of `gitoma` on this same repo can query them. Memories
+        # are short, tag-rich, single-fact strings — what Layer0
+        # was designed for.
+        #
+        # We ingest at most 1 + N + 1 memories per run:
+        #   * 1 plan-source line (LLM-planned vs operator-curated)
+        #   * N guard-firing lines (one per unique critic_*.fail
+        #     event, capped at 8)
+        #   * 1 outcome line (PR opened or aborted, with subtask
+        #     completion ratio)
+        #
+        # All errors swallowed — Layer0 down must never fail an
+        # otherwise-good gitoma run. Same contract as PHASE 7 + the
+        # client wrapper itself.
+        try:
+            from gitoma.integrations.layer0 import (
+                Layer0Client as _L0WClient,
+                namespace_for_repo as _l0_ns_w,
+            )
+            _l0w = _L0WClient()
+            if _l0w.enabled:
+                _l0w_namespace = _l0_ns_w(owner, name)
+
+                # ── Plan source memory ──────────────────────────────
+                _plan_src = (plan.llm_model if plan else "") or "llm"
+                _plan_summary = (
+                    f"Plan loaded: {plan.total_tasks if plan else 0} task(s), "
+                    f"{plan.total_subtasks if plan else 0} subtask(s) — "
+                    f"source={_plan_src} model={config.lmstudio.model}"
+                )
+                _l0w.ingest_one(
+                    text=_plan_summary,
+                    namespace=_l0w_namespace,
+                    tags=["plan-loaded", _plan_src.split(":")[0]],
+                )
+
+                # ── Guard-firings memories ──────────────────────────
+                # Reuse the trace JSONL the diary hook already
+                # located. Re-extract here independently — both
+                # hooks are best-effort and we don't want to share
+                # state (PHASE 7 may have failed early).
+                _trace_dir_w = (
+                    _Path.home() / ".gitoma" / "logs" / f"{owner}__{name}"
+                )
+                _trace_path_w = None
+                if _trace_dir_w.is_dir():
+                    _candidates_w = sorted(_trace_dir_w.glob("*-run.jsonl"))
+                    _trace_path_w = _candidates_w[-1] if _candidates_w else None
+                _guard_events: list[str] = []
+                if _trace_path_w is not None and _trace_path_w.exists():
+                    import json as _json
+                    try:
+                        with _trace_path_w.open("r", encoding="utf-8") as _fh:
+                            for _line in _fh:
+                                try:
+                                    _ev = _json.loads(_line)
+                                except Exception:  # noqa: BLE001
+                                    continue
+                                _name = _ev.get("event") or ""
+                                if (
+                                    _name.startswith("critic_")
+                                    and _name.endswith(".fail")
+                                    and _name not in _guard_events
+                                ):
+                                    _guard_events.append(_name)
+                                    if len(_guard_events) >= 8:
+                                        break
+                    except OSError:
+                        pass
+                for _g in _guard_events:
+                    _l0w.ingest_one(
+                        text=f"Guard fired during run: {_g}",
+                        namespace=_l0w_namespace,
+                        tags=["guard-fail", _g.split(".")[0]],
+                    )
+
+                # ── Outcome memory ──────────────────────────────────
+                _subtasks_done = 0
+                if state.task_plan:
+                    for _t in state.task_plan.get("tasks", []) or []:
+                        for _s in _t.get("subtasks", []) or []:
+                            if _s.get("status") == "completed":
+                                _subtasks_done += 1
+                _total_st = plan.total_subtasks if plan else 0
+                if state.pr_url:
+                    _outcome = (
+                        f"PR shipped #{state.pr_number} {_subtasks_done}/{_total_st} "
+                        f"subtasks — {state.pr_url}"
+                    )
+                    _outcome_tags = ["pr-shipped"]
+                else:
+                    _outcome = (
+                        f"Run finished without PR — {_subtasks_done}/{_total_st} "
+                        f"subtasks completed"
+                    )
+                    _outcome_tags = ["run-no-pr"]
+                _l0w.ingest_one(
+                    text=_outcome, namespace=_l0w_namespace,
+                    tags=_outcome_tags,
+                )
+
+                _written = 1 + len(_guard_events) + 1
+                console.print(
+                    f"[muted]Layer0: ingested {_written} memories into "
+                    f"ns={_l0w_namespace}[/muted]"
+                )
+                _l0w.close()
+        except Exception:  # noqa: BLE001 — must never escape
+            try:
+                from gitoma.core.trace import current as _ct_l0w
+                _ct_l0w().emit("layer0.ingest_failed")
+            except Exception:
+                pass

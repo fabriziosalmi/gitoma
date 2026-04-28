@@ -8,6 +8,32 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ### Added
 
+- **PHASE 1.5 + PHASE 8 — Layer0 cross-run memory wired into the run loop**
+  (`gitoma/cli/commands/run.py`): the Layer0 client shipped earlier
+  is now consumed in two places.
+  * **PHASE 1.5** runs inside the LLM-planner branch (skipped on
+    `--plan-from-file` — operator-curated plans don't need
+    history). It queries the repo's namespace for the top-8
+    most-relevant memories using the failing-metric names as the
+    query seed, then appends them to the planner's
+    `prior_runs_context` under a clearly-labeled section header
+    so the LLM treats them as ground truth from past runs.
+    Composes additively with Occam Observer's agent-log block —
+    they feed the same context channel.
+  * **PHASE 8** runs at the end of every successful run
+    (alongside PHASE 7 diary), writes 1 + N + 1 memories to the
+    namespace: a plan-source line (LLM vs `plan-from-file:*`),
+    one line per unique `critic_*.fail` event from the trace
+    (capped at 8), and an outcome line (PR opened or no-PR).
+    Each memory is short, tag-rich, and immediately searchable
+    on the next run.
+  All errors are swallowed + traced (`layer0.query_failed` /
+  `layer0.ingest_failed`); a Layer0 outage cannot fail a gitoma
+  run. Live-validated end-to-end: 6 prior memories injected into
+  the planner prompt for a `bench-blast` LLM-planner run that
+  shipped PR #6, then 3 fresh memories ingested back into the
+  same namespace post-run.
+
 - **Layer0 cross-run memory client** (`gitoma/integrations/layer0.py`
   + generated proto stubs under `gitoma/integrations/_layer0_proto/`):
   thin gRPC wrapper for the Layer0 vector-memory engine
