@@ -347,7 +347,7 @@ def scaffold(
         )
         console.print(Panel(
             f"[success]🎉 Pull Request #{pr.number} is LIVE![/success]\n\n"
-            f"  {pr.html_url}\n\n"
+            f"  {pr.url}\n\n"
             f"[muted]Branch: {branch}\n"
             f"Stack: {resolved.stack_name} × L{resolved.archetype_level}\n"
             f"Files added: {len(missing_files)}. Stubs are TODO-only — run "
