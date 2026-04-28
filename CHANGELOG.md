@@ -6,6 +6,31 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **CPG-staleness in worker — G16 false-positives + G19 unfireable**
+  (`gitoma/worker/worker.py`): `self._cpg_index` was built once
+  before PHASE 2 and never refreshed across subtasks. New public
+  symbols added by a worker patch were invisible to
+  `cpg_index.get_symbol(...)`, so `candidates` came out empty,
+  `total_callers` stayed 0, and **G16 fired on every new public
+  symbol** regardless of actual caller status. Worse, **G19
+  echo-chamber detection was structurally non-fireable** — the
+  new symbols' callers (also new) were equally invisible.
+  Discovered 2026-04-28 within 30 minutes of the
+  `--plan-from-file` first run, when a curated plan asked the
+  worker to add a self-calling clique to an empty file and G16
+  flagged BOTH the caller and callee as dead. Fix: rebuild the
+  in-memory CPG index over the post-patch worktree right before
+  the orphan-symbol guard chain (G16/G18/G19). Strategy = full
+  rebuild (simple, correct, O(repo size); revisit incremental
+  if any user reports >1s overhead per subtask). Defensive: any
+  rebuild error is traced via `cpg.refresh_failed` and the
+  stale index is kept rather than crashing the run. **Live-fire
+  validated**: G19 fires correctly on a `ping/pong` mutual-
+  recursion plan against bench-triggers. Closes the orphan-
+  symbol critic family (G16 + G18 + G19) for live-fire benches.
+
 ### Added
 
 - **`--plan-from-file` — operator-curated TaskPlan path**

@@ -548,6 +548,40 @@ class WorkerAgent:
                 compile_error_feedback = err_text
                 continue
 
+            # CPG-lite refresh: rebuild the in-memory index over the
+            # post-patch worktree so the orphan-symbol guards (G16,
+            # G19) and Ψ-full Φ see the symbols this subtask just
+            # introduced. Without this, ``self._cpg_index`` (built
+            # once before PHASE 2) doesn't know about new functions/
+            # classes, so ``cpg_index.get_symbol("new_func")``
+            # returns [], ``candidates`` is empty, ``total_callers``
+            # stays 0, and G16 false-positives on EVERY new public
+            # symbol while G19 cannot detect echo-chamber cliques at
+            # all. Discovered 2026-04-28 via the first --plan-from-
+            # file run that exercised G19.
+            #
+            # Strategy: full rebuild over the worktree root. Simple,
+            # correct, O(repo size). Acceptable for the bench-shape
+            # repos we target (≤ 200 files); revisit with incremental
+            # update if any user reports >1s overhead per subtask.
+            #
+            # Defensive: if the rebuild raises (CPG dep missing on a
+            # newly-added language, parse failure on the patched
+            # file, etc.) we keep the stale index. The guards will
+            # silently degrade to false-positives rather than crash
+            # the run.
+            if self._cpg_index is not None:
+                try:
+                    from gitoma.cpg import build_index as _build_cpg_refresh
+                    self._cpg_index = _build_cpg_refresh(self._git.root)
+                except Exception as _cpg_exc:  # noqa: BLE001
+                    current_trace().emit(
+                        "cpg.refresh_failed",
+                        subtask_id=subtask.id,
+                        attempt=attempt,
+                        error=f"{type(_cpg_exc).__name__}: {str(_cpg_exc)[:200]}",
+                    )
+
             # G16 + G18 + G19 orphan-symbol detection (all opt-in:
             # GITOMA_G16_DEAD_CODE / GITOMA_G18_ABANDONED /
             # GITOMA_G19_ECHO_CHAMBER). G16 = new public symbols
