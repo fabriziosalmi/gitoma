@@ -55,6 +55,7 @@ class WorkerAgent:
         repo_fingerprint: dict[str, Any] | None = None,
         cpg_index: Any = None,
         semgrep_baseline: set[tuple[str, str]] | None = None,
+        trivy_baseline: set[tuple[str, str]] | None = None,
     ) -> None:
         self._llm = llm
         self._git = git_repo
@@ -106,6 +107,13 @@ class WorkerAgent:
         # introduced new high-severity findings. Opt-in via
         # ``GITOMA_G21_SEMGREP=1``.
         self._semgrep_baseline: set[tuple[str, str]] | None = semgrep_baseline
+        # G22 trivy-regression critic: same shape as G21 but for the
+        # supply-chain leg. Fingerprint = (rule_id, target) — works
+        # uniformly across vulns/secrets/misconfigs because rule_id
+        # is unique per finding kind. ``None`` = PHASE 1.8 didn't
+        # produce a baseline → G22 silently skips. Opt-in via
+        # ``GITOMA_G22_TRIVY=1``.
+        self._trivy_baseline: set[tuple[str, str]] | None = trivy_baseline
 
     def execute(
         self,
@@ -700,6 +708,43 @@ class WorkerAgent:
                         f"{max_attempts} attempt(s). "
                         f"{len(g21_result.conflicts)} new finding(s) "
                         f"introduced."
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
+            # G22 trivy-regression: opt-in via GITOMA_G22_TRIVY=1.
+            # Re-scan post-patch with trivy + diff against PHASE-1.8
+            # baseline. Catches new dep CVEs / secrets / IaC misconfigs
+            # introduced by the patch. Default scope = WHOLE repo (a
+            # patch that adds an import line can pull in a vulnerable
+            # transitive dep without directly touching the manifest);
+            # GITOMA_G22_TOUCHED_ONLY=1 narrows to touched files for
+            # speed. Baseline ``None`` = PHASE 1.8 didn't run, G22
+            # silently skips.
+            from gitoma.worker.trivy_regression import (
+                check_g22_trivy_regression,
+            )
+            g22_result = check_g22_trivy_regression(
+                self._git.root, touched, self._trivy_baseline,
+            )
+            if g22_result is not None:
+                err_text = g22_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g22_trivy.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(g22_result.conflicts),
+                    rules=sorted({c.rule_id for c in g22_result.conflicts}),
+                    kinds=sorted({c.kind for c in g22_result.conflicts}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G22 trivy-regression check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(g22_result.conflicts)} new supply-chain "
+                        f"finding(s) introduced."
                     )
                 self._revert_touched(touched)
                 compile_error_feedback = err_text

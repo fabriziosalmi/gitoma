@@ -500,6 +500,7 @@ def run(
         # in PHASE 3.
         _repo_fp: dict | None = None
         _semgrep_baseline: set[tuple[str, str]] | None = None
+        _trivy_baseline: set[tuple[str, str]] | None = None
         # Resume gate on PLANNING: skip only if we can actually rehydrate.
         # Same reasoning as PHASE 1 — fall back to re-planning on deser
         # failure instead of crashing the whole resume.
@@ -993,13 +994,23 @@ def run(
                             TrivyClient as _TvClient,
                             render_findings_block as _tv_render,
                         )
+                        from gitoma.worker.trivy_regression import (
+                            compute_trivy_baseline_fingerprints as _tv_baseline,
+                            g22_severity_floor as _tv_floor,
+                        )
                         _tv = _TvClient()
                         if _tv.enabled:
+                            # Wide cap so the baseline gets the full
+                            # picture; top-20 still go to prompt block.
+                            # Same pattern as PHASE 1.6 / G21.
                             _tv_findings = _tv.scan(
-                                git_repo.root, max_findings=20,
+                                git_repo.root, max_findings=500,
                             )
                             if _tv_findings:
-                                _trivy_block = _tv_render(_tv_findings)
+                                _trivy_block = _tv_render(_tv_findings[:20])
+                                _trivy_baseline = _tv_baseline(
+                                    _tv_findings, severity_floor=_tv_floor(),
+                                )
                                 _by_kind = {"vuln": 0, "secret": 0, "misconfig": 0}
                                 for _f in _tv_findings:
                                     _by_kind[_f.kind] = _by_kind.get(_f.kind, 0) + 1
@@ -1007,7 +1018,8 @@ def run(
                                     f"[muted]PHASE 1.8: trivy — "
                                     f"{_by_kind.get('vuln', 0)} vuln, "
                                     f"{_by_kind.get('secret', 0)} secret, "
-                                    f"{_by_kind.get('misconfig', 0)} misconfig[/muted]"
+                                    f"{_by_kind.get('misconfig', 0)} misconfig "
+                                    f"(baseline={len(_trivy_baseline)})[/muted]"
                                 )
                                 try:
                                     from gitoma.core.trace import current as _ct18
@@ -1017,6 +1029,7 @@ def run(
                                         vulns=_by_kind.get("vuln", 0),
                                         secrets=_by_kind.get("secret", 0),
                                         misconfigs=_by_kind.get("misconfig", 0),
+                                        baseline_size=len(_trivy_baseline),
                                     )
                                 except Exception:
                                     pass
@@ -1355,6 +1368,7 @@ def run(
                 repo_fingerprint=_repo_fp,
                 cpg_index=_cpg_index,
                 semgrep_baseline=_semgrep_baseline,
+                trivy_baseline=_trivy_baseline,
             )
 
             from gitoma.planner.task import SubTask, Task
