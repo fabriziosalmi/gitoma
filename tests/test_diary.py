@@ -345,3 +345,187 @@ def test_write_diary_entry_returns_failure_on_subprocess_error(
     assert isinstance(result, DiaryWriteResult)
     assert result.ok is False
     assert "simulated git failure" in result.error
+
+
+# ── Allowlist (added 2026-04-29 post-leak audit) ──────────────────
+
+
+def test_from_env_allowlist_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backward-compat: unset allowlist env → empty tuple → all repos allowed."""
+    monkeypatch.setenv("GITOMA_DIARY_REPO", "fabgpt-coder/log")
+    monkeypatch.setenv("GITOMA_DIARY_TOKEN", "ghp_x")
+    monkeypatch.delenv("GITOMA_DIARY_REPO_ALLOWLIST", raising=False)
+    cfg = DiaryConfig.from_env()
+    assert cfg is not None
+    assert cfg.allowlist == ()
+
+
+def test_from_env_allowlist_parses_comma_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITOMA_DIARY_REPO", "fabgpt-coder/log")
+    monkeypatch.setenv("GITOMA_DIARY_TOKEN", "ghp_x")
+    monkeypatch.setenv(
+        "GITOMA_DIARY_REPO_ALLOWLIST",
+        "owner/repo-a, owner/repo-b ,owner/bench-*",
+    )
+    cfg = DiaryConfig.from_env()
+    assert cfg is not None
+    assert cfg.allowlist == ("owner/repo-a", "owner/repo-b", "owner/bench-*")
+
+
+def test_matches_allowlist_empty_returns_true() -> None:
+    """Empty allowlist = default-allow (backward-compat)."""
+    from gitoma.cli.diary import _matches_allowlist
+    assert _matches_allowlist("https://github.com/anyone/anywhere", ()) is True
+
+
+def test_matches_allowlist_exact_match() -> None:
+    from gitoma.cli.diary import _matches_allowlist
+    assert _matches_allowlist(
+        "https://github.com/owner/repo-a",
+        ("owner/repo-a",),
+    ) is True
+
+
+def test_matches_allowlist_wildcard_suffix() -> None:
+    """`owner/bench-*` matches bench-blast, bench-quality, etc."""
+    from gitoma.cli.diary import _matches_allowlist
+    assert _matches_allowlist(
+        "https://github.com/owner/bench-blast",
+        ("owner/bench-*",),
+    ) is True
+    assert _matches_allowlist(
+        "https://github.com/owner/bench-quality",
+        ("owner/bench-*",),
+    ) is True
+
+
+def test_matches_allowlist_case_insensitive() -> None:
+    from gitoma.cli.diary import _matches_allowlist
+    assert _matches_allowlist(
+        "https://github.com/Owner/Repo-A",
+        ("owner/repo-a",),
+    ) is True
+
+
+def test_matches_allowlist_strips_git_suffix() -> None:
+    """Both `repo` and `repo.git` should match the same pattern."""
+    from gitoma.cli.diary import _matches_allowlist
+    assert _matches_allowlist(
+        "https://github.com/owner/repo.git",
+        ("owner/repo",),
+    ) is True
+
+
+def test_matches_allowlist_miss_returns_false() -> None:
+    from gitoma.cli.diary import _matches_allowlist
+    assert _matches_allowlist(
+        "https://github.com/client/private-repo",
+        ("owner/bench-*", "owner/log"),
+    ) is False
+
+
+def test_matches_allowlist_first_pattern_wins() -> None:
+    """OR semantics: any pattern in allowlist matching = allowed."""
+    from gitoma.cli.diary import _matches_allowlist
+    assert _matches_allowlist(
+        "https://github.com/x/repo-b",
+        ("owner/repo-a", "x/repo-b", "y/repo-c"),
+    ) is True
+
+
+def test_write_diary_entry_skips_when_repo_not_allowlisted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """End-to-end: a non-allowlisted repo must produce a no-op result
+    with the explicit error message — no git operations attempted."""
+    cfg = DiaryConfig(
+        repo="fabgpt-coder/log", token="ghp_x",
+        allowlist=("owner/bench-*",),
+    )
+
+    # Build a minimal "state" object with the fields write_diary_entry reads
+    class _State:
+        pr_number = 42
+        pr_url = "https://github.com/x/y/pull/42"
+        branch = "main"
+        task_plan = None
+
+    class _Plan:
+        total_tasks = 1
+        total_subtasks = 1
+        llm_model = "test-model"
+
+    class _LM:
+        model = "test-model"
+        base_url = "http://localhost"
+
+    class _Config:
+        lmstudio = _LM()
+
+    # Patch _commit_and_push so test confirms it's NEVER called
+    called = {"n": 0}
+
+    def fake_commit_push(*_args, **_kwargs):
+        called["n"] += 1
+        return "deadbeef"
+
+    monkeypatch.setattr(
+        "gitoma.cli.diary._commit_and_push", fake_commit_push,
+    )
+    result = write_diary_entry(
+        diary_config=cfg,
+        repo_url="https://github.com/client/secret-repo",
+        state=_State(), plan=_Plan(), config=_Config(),
+        trace_path=None,
+    )
+    assert result.ok is False
+    assert "allowlist" in result.error.lower()
+    assert called["n"] == 0  # no git op attempted
+
+
+def test_write_diary_entry_proceeds_when_repo_is_allowlisted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The positive case — allowlisted repo proceeds to commit_and_push."""
+    cfg = DiaryConfig(
+        repo="fabgpt-coder/log", token="ghp_x",
+        allowlist=("owner/bench-*",),
+    )
+
+    class _State:
+        pr_number = None
+        pr_url = ""
+        branch = "main"
+        task_plan = None
+
+    class _Plan:
+        total_tasks = 0
+        total_subtasks = 0
+        llm_model = "x"
+
+    class _LM:
+        model = "x"
+        base_url = ""
+
+    class _Config:
+        lmstudio = _LM()
+
+    captured = {}
+
+    def fake_commit_push(_cfg, filename, _content, commit_msg):
+        captured["filename"] = filename
+        return "abc123"
+
+    monkeypatch.setattr(
+        "gitoma.cli.diary._commit_and_push", fake_commit_push,
+    )
+    result = write_diary_entry(
+        diary_config=cfg,
+        repo_url="https://github.com/owner/bench-blast",
+        state=_State(), plan=_Plan(), config=_Config(),
+        trace_path=None,
+    )
+    assert result.ok is True
+    assert "filename" in captured

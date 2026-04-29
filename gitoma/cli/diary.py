@@ -68,6 +68,15 @@ class DiaryConfig:
 
     repo: str          # owner/name (e.g. "fabgpt-coder/log")
     token: str         # GitHub PAT with push rights to ``repo``
+    # Optional allowlist of source-repo patterns that are allowed to
+    # have diary entries written. Set via ``GITOMA_DIARY_REPO_ALLOWLIST``
+    # (comma-separated, supports ``*`` wildcards). Empty list = all
+    # repos allowed (backward-compatible default). When non-empty, any
+    # source repo whose ``owner/name`` does not match at least one
+    # pattern is silently skipped — protects against pushing client
+    # repo names to a public diary log when running gitoma on
+    # confidential codebases. Matching is case-insensitive.
+    allowlist: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "DiaryConfig | None":
@@ -81,7 +90,37 @@ class DiaryConfig:
             return None
         if "/" not in repo:
             return None
-        return cls(repo=repo, token=token)
+        allowlist_raw = (
+            os.environ.get("GITOMA_DIARY_REPO_ALLOWLIST") or ""
+        ).strip()
+        allowlist: tuple[str, ...] = ()
+        if allowlist_raw:
+            allowlist = tuple(
+                p.strip() for p in allowlist_raw.split(",") if p.strip()
+            )
+        return cls(repo=repo, token=token, allowlist=allowlist)
+
+
+def _matches_allowlist(repo_url: str, allowlist: tuple[str, ...]) -> bool:
+    """Return True iff ``repo_url`` (parsed to ``owner/name``) matches
+    at least one pattern in ``allowlist``. Empty allowlist = always
+    True (backward-compat default-allow)."""
+    if not allowlist:
+        return True
+    # Reduce the URL to ``owner/name`` for pattern matching.
+    parts = repo_url.rstrip("/").split("/")
+    if len(parts) >= 2:
+        owner_name = f"{parts[-2]}/{parts[-1]}".lower()
+    else:
+        owner_name = repo_url.lower()
+    # Strip .git suffix if present
+    if owner_name.endswith(".git"):
+        owner_name = owner_name[:-4]
+    import fnmatch
+    for pattern in allowlist:
+        if fnmatch.fnmatchcase(owner_name, pattern.lower()):
+            return True
+    return False
 
 
 # ── Result ────────────────────────────────────────────────────────
@@ -305,7 +344,25 @@ def write_diary_entry(
     trace_path: Path | None = None,
 ) -> DiaryWriteResult:
     """Compose a diary entry from the run state and push it to the
-    diary repo. All errors caught + reported via DiaryWriteResult."""
+    diary repo. All errors caught + reported via DiaryWriteResult.
+
+    When ``diary_config.allowlist`` is non-empty AND ``repo_url`` does
+    not match any pattern, the write is skipped silently (with a
+    trace event) so client/private repos don't leak their identity
+    onto a public diary log."""
+    if not _matches_allowlist(repo_url, diary_config.allowlist):
+        try:
+            current_trace().emit(
+                "diary.skipped_by_allowlist",
+                repo_url=repo_url,
+                allowlist=list(diary_config.allowlist),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return DiaryWriteResult(
+            ok=False,
+            error="repo not in GITOMA_DIARY_REPO_ALLOWLIST — skipped",
+        )
     try:
         guard_firings = _extract_guard_firings(trace_path)
         filename, content = _compose_entry(
