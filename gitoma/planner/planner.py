@@ -28,6 +28,7 @@ class PlannerAgent:
         skeleton_context: str | None = None,
         scaffold_context: str | None = None,
         semgrep_context: str | None = None,
+        trivy_context: str | None = None,
     ) -> TaskPlan:
         """
         Generate a TaskPlan from a MetricReport.
@@ -62,6 +63,7 @@ class PlannerAgent:
                     skeleton_context=skeleton_context,
                     scaffold_context=scaffold_context,
                     semgrep_context=semgrep_context,
+                    trivy_context=trivy_context,
                 ),
             },
         ]

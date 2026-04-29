@@ -45,6 +45,7 @@ def planner_user_prompt(
     skeleton_context: str | None = None,
     scaffold_context: str | None = None,
     semgrep_context: str | None = None,
+    trivy_context: str | None = None,
 ) -> str:
     metrics_summary = "\n".join(
         f"- {m.display_name}: score={m.score:.2f} status={m.status} | {m.details}"
@@ -129,6 +130,22 @@ def planner_user_prompt(
             "defects with rule ids you can cite in commit messages.\n"
         )
 
+    # PHASE 1.8 — trivy supply-chain findings. Complements PHASE 1.6
+    # (semgrep, in-code) with three signal types: dependency CVEs
+    # (with bump-target version), leaked secrets, and IaC misconfigs.
+    # Vulnerabilities are the most actionable subset — they carry
+    # concrete fix-version info the planner can cite directly.
+    trivy_block = ""
+    if trivy_context:
+        trivy_block = (
+            "\n== TRIVY SUPPLY-CHAIN FINDINGS (deps + secrets + IaC) ==\n"
+            f"{trivy_context}\n"
+            "Each entry is a real, locatable supply-chain issue. Vuln "
+            "entries carry the fix-version — emit subtasks that bump to "
+            "that version. Secrets must be removed or rotated. IaC "
+            "misconfigs target specific Dockerfile/K8s/Terraform lines.\n"
+        )
+
     # PHASE 1.7 — canonical-shape context from occam-trees. Lists the
     # paths the inferred (stack, level) pair says SHOULD exist but
     # don't yet. Treated as ADDITIVE-ONLY hints: the planner may
@@ -190,7 +207,7 @@ Overall score: {report.overall_score:.2f}/1.0
 
 == FILE TREE (sample) ==
 {tree_sample}
-{skeleton_block}{semgrep_block}{scaffold_block}
+{skeleton_block}{semgrep_block}{trivy_block}{scaffold_block}
 
 == TASK ==
 Create an improvement plan ONLY for metrics with status "fail" or "warn".

@@ -972,6 +972,61 @@ def run(
                         except Exception:
                             pass
 
+                # ────────────────────────────────────────────────────
+                # PHASE 1.8 — TRIVY SUPPLY-CHAIN CONTEXT
+                # ────────────────────────────────────────────────────
+                # When the `trivy` binary is on PATH, scan the repo
+                # for dep CVEs + secrets + IaC misconfigs and inject
+                # the top-N as concrete supply-chain issues for the
+                # planner. Complementary to PHASE 1.6 (semgrep covers
+                # in-code; trivy covers deps/secrets/IaC). Skipped
+                # when binary missing / scan errors / no findings /
+                # GITOMA_PHASE18_OFF=1. Cap at 20 findings (prompt
+                # budget shared with the other context blocks).
+                _trivy_block: str | None = None
+                _phase18_off = (
+                    os.environ.get("GITOMA_PHASE18_OFF") or ""
+                ).strip().lower() in ("1", "true", "yes")
+                if not _phase18_off:
+                    try:
+                        from gitoma.integrations.trivy_scan import (
+                            TrivyClient as _TvClient,
+                            render_findings_block as _tv_render,
+                        )
+                        _tv = _TvClient()
+                        if _tv.enabled:
+                            _tv_findings = _tv.scan(
+                                git_repo.root, max_findings=20,
+                            )
+                            if _tv_findings:
+                                _trivy_block = _tv_render(_tv_findings)
+                                _by_kind = {"vuln": 0, "secret": 0, "misconfig": 0}
+                                for _f in _tv_findings:
+                                    _by_kind[_f.kind] = _by_kind.get(_f.kind, 0) + 1
+                                console.print(
+                                    f"[muted]PHASE 1.8: trivy — "
+                                    f"{_by_kind.get('vuln', 0)} vuln, "
+                                    f"{_by_kind.get('secret', 0)} secret, "
+                                    f"{_by_kind.get('misconfig', 0)} misconfig[/muted]"
+                                )
+                                try:
+                                    from gitoma.core.trace import current as _ct18
+                                    _ct18().emit(
+                                        "phase18.trivy_findings",
+                                        total=len(_tv_findings),
+                                        vulns=_by_kind.get("vuln", 0),
+                                        secrets=_by_kind.get("secret", 0),
+                                        misconfigs=_by_kind.get("misconfig", 0),
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as _tv_exc:  # noqa: BLE001 — must never escape
+                        try:
+                            from gitoma.core.trace import current as _ct_tv
+                            _ct_tv().exception("phase18.failed", _tv_exc)
+                        except Exception:
+                            pass
+
                 try:
                     plan = planner.plan(
                         report, file_tree,
@@ -984,6 +1039,7 @@ def run(
                         skeleton_context=_skeleton_block,
                         scaffold_context=_scaffold_block,
                         semgrep_context=_semgrep_block,
+                        trivy_context=_trivy_block,
                     )
                 except LLMError as e:
                     # LLM-specific error — give actionable hint
