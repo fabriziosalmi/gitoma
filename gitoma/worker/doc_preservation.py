@@ -48,6 +48,7 @@ Out of scope for v1 (deferred):
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -145,6 +146,93 @@ def _check_literal_newline_corruption(
     return None
 
 
+# ── Bulk-shrinkage check (added 2026-04-29 EVE post-PR-#7 audit) ──
+
+
+# Below this fraction of the original character count, a doc-modify
+# patch is treated as bulk destruction. 0.30 = "kept under 30% of
+# the original" → flag. Picked from the bench-blast PR #7 case where
+# README went 4099 → 750 chars (~18% retained) — clearly destructive
+# rewrite. Configurable via ``GITOMA_G13_DOC_SHRINK_FLOOR=0.50`` for
+# stricter operators.
+_DOC_SHRINK_FLOOR_DEFAULT = 0.30
+
+# Below this original size (chars), a doc is too small for the
+# shrinkage check to produce a useful signal — a 100-char
+# placeholder going to 20 chars isn't a destruction worth blocking.
+# 500 chars ≈ 15-20 lines of typical markdown; PR #7's original was
+# ~4000 chars so well above this floor.
+_DOC_SHRINK_MIN_ORIGINAL_CHARS = 500
+
+
+def _bulk_shrink_floor() -> float:
+    """Returns the configured shrinkage floor (0.0-1.0). Operators
+    can tighten via ``GITOMA_G13_DOC_SHRINK_FLOOR``. Out-of-range
+    values fall back to the default."""
+    raw = (os.environ.get("GITOMA_G13_DOC_SHRINK_FLOOR") or "").strip()
+    if not raw:
+        return _DOC_SHRINK_FLOOR_DEFAULT
+    try:
+        v = float(raw)
+    except ValueError:
+        return _DOC_SHRINK_FLOOR_DEFAULT
+    if not 0.0 < v < 1.0:
+        return _DOC_SHRINK_FLOOR_DEFAULT
+    return v
+
+
+def _bulk_shrink_disabled() -> bool:
+    """Operator opt-out via ``GITOMA_G13_BULK_SHRINK=off|0|false``.
+    Default = enabled (this is the PR #7 hardening)."""
+    raw = (os.environ.get("GITOMA_G13_BULK_SHRINK") or "").strip().lower()
+    return raw in ("off", "0", "false", "no")
+
+
+def _check_bulk_shrinkage(
+    rel: str, orig: str, new: str,
+) -> tuple[str, str] | None:
+    """Flag when a doc-modify patch shrinks the file past the floor.
+
+    Closes the bench-blast PR #7 failure mode: gemma-4-e4b emitted a
+    ``modify`` patch on README.md that replaced 93 lines of bench-
+    specific design prose with 19 lines of generic "Installation /
+    Usage / Contributing" boilerplate. The two existing G13 checks
+    (code-block char preservation, literal-newline corruption) both
+    silent-passed — the original had no/few fenced blocks to compare
+    against, and the new content was clean syntactically. Char-count
+    ratio is the discriminator: an 80%-shrink doc-modify is almost
+    certainly destruction, not legitimate cleanup.
+
+    Skipped when:
+      * operator opted out via ``GITOMA_G13_BULK_SHRINK=off``
+      * original < ``_DOC_SHRINK_MIN_ORIGINAL_CHARS`` (small doc;
+        legitimate rewrites are common at this size)
+      * new content is at or above floor × original
+    """
+    if _bulk_shrink_disabled():
+        return None
+    orig_chars = len(orig)
+    if orig_chars < _DOC_SHRINK_MIN_ORIGINAL_CHARS:
+        return None
+    floor = _bulk_shrink_floor()
+    new_chars = len(new)
+    if new_chars >= orig_chars * floor:
+        return None
+    retained_pct = int((new_chars / orig_chars) * 100) if orig_chars else 0
+    return (
+        rel,
+        f"doc shrunk from {orig_chars} → {new_chars} chars "
+        f"({retained_pct}% retained, below the {int(floor*100)}% floor). "
+        f"This is almost certainly a wholesale rewrite, not a cleanup — "
+        f"the original prose carried information the new content does "
+        f"not. Re-emit the patch as a SURGICAL edit (preserve every "
+        f"existing section heading and rewrite paragraphs in place) "
+        f"rather than a full replacement. If the entire doc genuinely "
+        f"needs replacing, do it in a separate dedicated subtask whose "
+        f"description literally says 'rewrite {rel} from scratch'."
+    )
+
+
 def validate_doc_preservation(
     root: Path,
     touched: list[str],
@@ -184,6 +272,9 @@ def validate_doc_preservation(
         if result is not None:
             return result
         result = _check_literal_newline_corruption(rel, new_content)
+        if result is not None:
+            return result
+        result = _check_bulk_shrinkage(rel, original_content, new_content)
         if result is not None:
             return result
     return None

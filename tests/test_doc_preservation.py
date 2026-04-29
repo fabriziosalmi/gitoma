@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from gitoma.worker.doc_preservation import (
     DOC_EXTENSIONS,
     _check_code_block_preservation,
@@ -299,3 +301,164 @@ def test_unit_literal_newline_check_two_or_more_flags() -> None:
     result = _check_literal_newline_corruption("R", new)
     assert result is not None
     assert "literal '\\n'" in result[1]
+
+
+# ── Bulk-shrinkage check (added 2026-04-29 EVE post-PR-#7 audit) ──
+
+
+def test_bulk_shrink_default_floor_30pct() -> None:
+    """Without env override, the floor is 0.30."""
+    import os
+    if "GITOMA_G13_DOC_SHRINK_FLOOR" in os.environ:
+        del os.environ["GITOMA_G13_DOC_SHRINK_FLOOR"]
+    from gitoma.worker.doc_preservation import _bulk_shrink_floor
+    assert _bulk_shrink_floor() == 0.30
+
+
+def test_bulk_shrink_floor_env_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GITOMA_G13_DOC_SHRINK_FLOOR", "0.50")
+    from gitoma.worker.doc_preservation import _bulk_shrink_floor
+    assert _bulk_shrink_floor() == 0.50
+
+
+def test_bulk_shrink_floor_invalid_falls_back(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GITOMA_G13_DOC_SHRINK_FLOOR", "not-a-number")
+    from gitoma.worker.doc_preservation import _bulk_shrink_floor
+    assert _bulk_shrink_floor() == 0.30
+
+
+def test_bulk_shrink_floor_out_of_range_falls_back(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GITOMA_G13_DOC_SHRINK_FLOOR", "1.5")
+    from gitoma.worker.doc_preservation import _bulk_shrink_floor
+    assert _bulk_shrink_floor() == 0.30
+
+
+@pytest.mark.parametrize("val", ["off", "0", "false", "no", "OFF"])
+def test_bulk_shrink_disabled_via_env(monkeypatch, val: str) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GITOMA_G13_BULK_SHRINK", val)
+    from gitoma.worker.doc_preservation import _bulk_shrink_disabled
+    assert _bulk_shrink_disabled() is True
+
+
+def test_bulk_shrink_enabled_by_default(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("GITOMA_G13_BULK_SHRINK", raising=False)
+    from gitoma.worker.doc_preservation import _bulk_shrink_disabled
+    assert _bulk_shrink_disabled() is False
+
+
+# ── The bench-blast PR #7 case ────────────────────────────────────
+
+
+def test_pr7_readme_destruction_caught(tmp_path: Path) -> None:
+    """The exact PR #7 shape: 4099-char README replaced by 750-char
+    boilerplate. With G13 hardening this MUST be flagged."""
+    readme = tmp_path / "README.md"
+    # Build a substantive original (~4000 chars, no fenced code blocks
+    # to ensure existing G13 checks silent-pass — only bulk-shrink
+    # should fire)
+    original = (
+        "# bench-blast\n\n> Hot-symbol blast-radius stress test.\n\n"
+        "## What this measures\n\n"
+        + ("Detailed prose paragraph about the bench design. " * 30)
+        + "\n\n## Repo layout\n\n"
+        + ("More detailed prose explaining each module. " * 30)
+        + "\n\n## Running the bench\n\n"
+        + ("Long description of how to operate the bench. " * 30)
+    )
+    new = (
+        "# bench-blast\n\n"
+        "## Installation\n\nFollow the installation guide.\n\n"
+        "## Usage\n\nDocumentation goes here.\n"
+    )
+    readme.write_text(new)
+    err = validate_doc_preservation(
+        tmp_path, ["README.md"],
+        {"README.md": original},
+    )
+    assert err is not None
+    rel, msg = err
+    assert rel == "README.md"
+    assert "shrunk" in msg.lower()
+    assert "retained" in msg.lower()
+
+
+def test_bulk_shrink_passes_when_above_floor(tmp_path: Path) -> None:
+    """A doc shrunk to 50% of original (above the 30% floor) passes."""
+    readme = tmp_path / "README.md"
+    original = "# Doc\n\n" + ("Some prose. " * 100)  # ~1200 chars
+    new = "# Doc\n\n" + ("Some prose. " * 60)  # ~720 chars (≈60% retained)
+    readme.write_text(new)
+    err = validate_doc_preservation(
+        tmp_path, ["README.md"],
+        {"README.md": original},
+    )
+    assert err is None
+
+
+def test_bulk_shrink_skips_small_originals(tmp_path: Path) -> None:
+    """Original < 500 chars → too small to flag, even on heavy shrink."""
+    readme = tmp_path / "README.md"
+    original = "# Tiny\n\nA placeholder." * 4  # ~100 chars
+    new = "# Tiny"
+    readme.write_text(new)
+    err = validate_doc_preservation(
+        tmp_path, ["README.md"],
+        {"README.md": original},
+    )
+    assert err is None
+
+
+def test_bulk_shrink_skips_when_disabled(
+    tmp_path: Path, monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """Operator opt-out via GITOMA_G13_BULK_SHRINK=off restores the
+    pre-hardening behavior."""
+    monkeypatch.setenv("GITOMA_G13_BULK_SHRINK", "off")
+    readme = tmp_path / "README.md"
+    original = ("Lots of prose. " * 300)  # ~4500 chars
+    new = "# brief\n"
+    readme.write_text(new)
+    err = validate_doc_preservation(
+        tmp_path, ["README.md"],
+        {"README.md": original},
+    )
+    assert err is None  # opted out
+
+
+def test_bulk_shrink_respects_custom_floor(
+    tmp_path: Path, monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """With floor raised to 0.70, a 60%-retained doc gets flagged."""
+    monkeypatch.setenv("GITOMA_G13_DOC_SHRINK_FLOOR", "0.70")
+    readme = tmp_path / "README.md"
+    original = "# Doc\n\n" + ("Some prose. " * 100)  # ~1200 chars
+    new = "# Doc\n\n" + ("Some prose. " * 60)  # ~720 chars (≈60% retained)
+    readme.write_text(new)
+    err = validate_doc_preservation(
+        tmp_path, ["README.md"],
+        {"README.md": original},
+    )
+    assert err is not None  # below 70% floor
+
+
+def test_bulk_shrink_skipped_for_create_action(tmp_path: Path) -> None:
+    """A NEW file (no original captured) skips bulk-shrink check."""
+    readme = tmp_path / "README.md"
+    readme.write_text("# brief")
+    err = validate_doc_preservation(
+        tmp_path, ["README.md"],
+        {},  # no original → CREATE
+    )
+    assert err is None
+
+
+def test_bulk_shrink_only_applies_to_doc_extensions(tmp_path: Path) -> None:
+    """A python file shrinking heavily is NOT G13's concern."""
+    py = tmp_path / "main.py"
+    original = ("def foo():\n    return 42\n" * 100)  # large
+    py.write_text("# brief\n")
+    err = validate_doc_preservation(
+        tmp_path, ["main.py"],
+        {"main.py": original},
+    )
+    assert err is None  # not in DOC_EXTENSIONS
