@@ -564,6 +564,43 @@ class WorkerAgent:
                 compile_error_feedback = err_text
                 continue
 
+            # G23 config-key validity: opt-in via GITOMA_G23_CONFIG_KEYS=1.
+            # G20 catches BROKEN toml/ini (parse fails). G23 catches
+            # WELL-FORMED toml with INVALID [tool.X] keys — closes the
+            # bench-blast PR #8 failure mode where gemma-4-e4b emitted
+            # `[tool.mypy] suppress_missing_imports = true` (correct key
+            # is `ignore_missing_imports`) and `[tool.coverage]
+            # ignore_patterns/run_if_covered = ...` (invented keys).
+            # Same revert+retry shape; closed-set + typo dictionary
+            # so default false-negative is "tool we don't catalog =
+            # silent passthrough", not false-positive on operator
+            # legitimate config.
+            from gitoma.worker.config_keys import check_g23_config_keys
+            g23_result = check_g23_config_keys(
+                self._git.root, touched, originals,
+            )
+            if g23_result is not None:
+                err_text = g23_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g23_config_keys.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(g23_result.conflicts),
+                    files=sorted({c.file for c in g23_result.conflicts}),
+                    typo_count=sum(1 for c in g23_result.conflicts if c.is_typo),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G23 config-keys check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(g23_result.conflicts)} invalid key(s) in: "
+                        f"{sorted({c.file for c in g23_result.conflicts})}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
             # CPG-lite refresh: rebuild the in-memory index over the
             # post-patch worktree so the orphan-symbol guards (G16,
             # G19) and Ψ-full Φ see the symbols this subtask just
