@@ -486,3 +486,144 @@ def test_finding_default_optional_fields() -> None:
     assert f.fixed_version == ""
     assert f.line == 0
     assert f.references == ()
+
+
+# ── Semver bump-class classifier (added 2026-04-30 post-PR-#2 audit) ──
+
+
+def test_parse_semver_basic() -> None:
+    from gitoma.integrations.trivy_scan import _parse_semver
+    assert _parse_semver("1.24.1") == (1, 24, 1)
+    assert _parse_semver("2.0.0") == (2, 0, 0)
+
+
+def test_parse_semver_short_forms() -> None:
+    from gitoma.integrations.trivy_scan import _parse_semver
+    assert _parse_semver("1.24") == (1, 24, 0)
+    assert _parse_semver("2") == (2, 0, 0)
+
+
+def test_parse_semver_strips_v_prefix() -> None:
+    from gitoma.integrations.trivy_scan import _parse_semver
+    assert _parse_semver("v1.24.1") == (1, 24, 1)
+    assert _parse_semver("V2.0.0") == (2, 0, 0)
+
+
+def test_parse_semver_strips_prerelease() -> None:
+    from gitoma.integrations.trivy_scan import _parse_semver
+    assert _parse_semver("1.24.1-beta") == (1, 24, 1)
+    assert _parse_semver("2.0.0-rc1") == (2, 0, 0)
+
+
+def test_parse_semver_strips_build_metadata() -> None:
+    from gitoma.integrations.trivy_scan import _parse_semver
+    assert _parse_semver("1.24.1+abc123") == (1, 24, 1)
+
+
+def test_parse_semver_returns_none_on_garbage() -> None:
+    from gitoma.integrations.trivy_scan import _parse_semver
+    assert _parse_semver("") is None
+    assert _parse_semver("git-abc123") is None
+    assert _parse_semver("not-a-version") is None
+    assert _parse_semver("1.24.1.dev1") == (1, 24, 1)  # 1.24.1 with extra .dev1
+
+
+def test_classify_bump_patch() -> None:
+    """The canonical safe upgrade — same major, same minor, +patch."""
+    from gitoma.integrations.trivy_scan import _classify_bump
+    assert _classify_bump("1.24.1", "1.24.2") == "patch"
+    assert _classify_bump("2.20.0", "2.20.1") == "patch"
+
+
+def test_classify_bump_minor() -> None:
+    from gitoma.integrations.trivy_scan import _classify_bump
+    assert _classify_bump("1.24.1", "1.25.0") == "minor"
+    assert _classify_bump("8.0.0", "8.1.0") == "minor"
+
+
+def test_classify_bump_major() -> None:
+    """The dangerous one — qwen3-8b PR #2 shipped these."""
+    from gitoma.integrations.trivy_scan import _classify_bump
+    assert _classify_bump("1.24.1", "2.0.3") == "major"   # urllib3
+    assert _classify_bump("5.3", "6.0.1") == "major"      # pyyaml
+    assert _classify_bump("2.2.0", "3.1.17") == "major"   # django
+
+
+def test_classify_bump_zero_x_treated_as_major() -> None:
+    """semver special case: 0.x.x is pre-stable; everything can break.
+    Bias toward conservatism — any change in 0.x = major."""
+    from gitoma.integrations.trivy_scan import _classify_bump
+    assert _classify_bump("0.1.0", "0.2.0") == "major"
+    assert _classify_bump("0.0.1", "0.0.2") == "major"
+    assert _classify_bump("0.5.0", "1.0.0") == "major"
+
+
+def test_classify_bump_unknown_on_unparseable() -> None:
+    from gitoma.integrations.trivy_scan import _classify_bump
+    assert _classify_bump("git-abc", "1.0.0") == "unknown"
+    assert _classify_bump("1.0.0", "") == "unknown"
+    assert _classify_bump("", "") == "unknown"
+
+
+def test_render_vuln_includes_patch_safe_annotation(tmp_path: Path) -> None:
+    """Vuln with patch-class bump renders with `(patch — safe)` tag."""
+    findings = [TrivyFinding(
+        "vuln", "CVE-X", "p", "ERROR", "Path traversal",
+        pkg_name="urllib3", installed_version="1.24.1",
+        fixed_version="1.24.2",
+    )]
+    out = render_findings_block(findings)
+    assert "patch — safe" in out
+
+
+def test_render_vuln_includes_major_breaking_annotation(tmp_path: Path) -> None:
+    """The qwen3-8b case — a major-class bump must carry the
+    BREAKING warning so the planner doesn't take it at face value."""
+    findings = [TrivyFinding(
+        "vuln", "CVE-X", "p", "ERROR", "title",
+        pkg_name="urllib3", installed_version="1.24.1",
+        fixed_version="2.0.3",
+    )]
+    out = render_findings_block(findings)
+    assert "MAJOR" in out
+    assert "BREAKING" in out
+    assert "avoid" in out
+
+
+def test_render_vuln_includes_minor_annotation(tmp_path: Path) -> None:
+    findings = [TrivyFinding(
+        "vuln", "CVE-X", "p", "ERROR", "title",
+        pkg_name="lib", installed_version="1.24.1",
+        fixed_version="1.25.0",
+    )]
+    out = render_findings_block(findings)
+    assert "minor — usually safe" in out
+
+
+def test_render_vuln_no_annotation_when_unparseable_versions(
+    tmp_path: Path,
+) -> None:
+    """When semver can't be classified, fall back to bare bump-target
+    (no fake annotation that might mislead the planner)."""
+    findings = [TrivyFinding(
+        "vuln", "CVE-X", "p", "ERROR", "title",
+        pkg_name="lib", installed_version="git-abc",
+        fixed_version="1.0.0",
+    )]
+    out = render_findings_block(findings)
+    assert "patch" not in out.lower() or "(patch" not in out
+    assert "minor" not in out.lower() or "(minor" not in out
+    assert "MAJOR" not in out
+
+
+def test_render_vuln_no_annotation_when_no_fixed_version(
+    tmp_path: Path,
+) -> None:
+    """No fix available = no bump suggestion at all."""
+    findings = [TrivyFinding(
+        "vuln", "CVE-X", "p", "ERROR", "title",
+        pkg_name="lib", installed_version="1.0.0",
+        fixed_version="",
+    )]
+    out = render_findings_block(findings)
+    assert "bump" not in out.lower() or "→ bump" not in out

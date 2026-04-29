@@ -389,12 +389,88 @@ def render_findings_block(
     return "\n".join(out_lines).rstrip()
 
 
+def _parse_semver(v: str) -> tuple[int, int, int] | None:
+    """Best-effort parse of ``X.Y.Z`` (or ``X.Y`` / ``X``) into a
+    ``(major, minor, patch)`` tuple. Pre-release tags (after ``-``)
+    and build metadata (after ``+``) are stripped. Returns ``None``
+    on anything we can't confidently classify (e.g. ``"git-abc123"``,
+    pep440 dev releases like ``"1.0.0.dev1"`` with extra dot, distro
+    versions like ``"1.24.1-2ubuntu0.3"``).
+
+    Conservative — when we can't parse, the bump-class falls back
+    to ``"unknown"`` and the LLM gets no semver hint (just the bare
+    bump-target, same as pre-this-change behaviour)."""
+    if not v:
+        return None
+    base = v.lstrip("vV").split("-", 1)[0].split("+", 1)[0]
+    parts = base.split(".")
+    if not parts:
+        return None
+    try:
+        nums = [int(p) for p in parts[:3]]
+    except ValueError:
+        return None
+    while len(nums) < 3:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2])
+
+
+def _classify_bump(installed: str, fixed: str) -> str:
+    """Return one of ``"patch"`` / ``"minor"`` / ``"major"`` /
+    ``"unknown"`` describing the semver class of ``installed → fixed``.
+
+    Special case: when ``installed[0] == 0``, semver says EVERYTHING
+    in the 0.x.x range can break, so we treat any change as
+    ``"major"`` to bias the prompt toward conservatism."""
+    inst = _parse_semver(installed)
+    fix = _parse_semver(fixed)
+    if inst is None or fix is None:
+        return "unknown"
+    # 0.x.x — pre-stable, treat any change as breaking
+    if inst[0] == 0 or fix[0] == 0:
+        if inst == fix:
+            return "patch"
+        return "major"
+    if fix[0] != inst[0]:
+        return "major"
+    if fix[1] != inst[1]:
+        return "minor"
+    return "patch"
+
+
+# Annotation strings shown in the LLM prompt block per bump-class.
+# Crafted to bias the planner toward the safe-version pick — the
+# planner reads these literally and routes its subtask description
+# accordingly.
+_BUMP_ANNOTATIONS: dict[str, str] = {
+    "patch": "(patch — safe)",
+    "minor": "(minor — usually safe)",
+    "major": "(MAJOR — BREAKING, avoid)",
+    "unknown": "",  # no annotation when we can't classify
+}
+
+
 def _render_one(kind: str, f: TrivyFinding) -> str:
     """Render one finding line. Format depends on kind because vulns
     have actionable bump-target version info that secrets/misconfigs
-    don't."""
+    don't.
+
+    Vuln entries also get a semver bump-class annotation
+    (``patch``/``minor``/``MAJOR``) so the planner can prefer the
+    smallest safe upgrade for a CVE fix instead of jumping to the
+    latest stable. Closes the qwen3-8b PR #2 failure mode (2026-04-30
+    bench-supply-chain): qwen took the trivy ``FixedVersion`` at face
+    value and shipped major-version bumps (urllib3 1.x→2.x, pyyaml
+    5.x→6.x, django 2.x→3.x), which break consuming code in ways the
+    critic stack can't catch."""
     if kind == "vuln":
-        bump = f" → bump to {f.fixed_version}" if f.fixed_version else ""
+        bump = ""
+        if f.fixed_version:
+            cls = _classify_bump(f.installed_version, f.fixed_version)
+            tag = _BUMP_ANNOTATIONS.get(cls, "")
+            bump = f" → bump to {f.fixed_version}"
+            if tag:
+                bump += f" {tag}"
         pkg = f"{f.pkg_name}@{f.installed_version}" if f.pkg_name else f.target
         return (
             f"- {pkg} ({f.severity}) `{f.rule_id}`{bump} — {f.title[:120]}"

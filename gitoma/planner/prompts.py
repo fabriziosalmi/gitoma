@@ -140,10 +140,23 @@ def planner_user_prompt(
         trivy_block = (
             "\n== TRIVY SUPPLY-CHAIN FINDINGS (deps + secrets + IaC) ==\n"
             f"{trivy_context}\n"
-            "Each entry is a real, locatable supply-chain issue. Vuln "
-            "entries carry the fix-version — emit subtasks that bump to "
-            "that version. Secrets must be removed or rotated. IaC "
-            "misconfigs target specific Dockerfile/K8s/Terraform lines.\n"
+            "Each entry is a real, locatable supply-chain issue.\n\n"
+            "VULN ENTRIES carry the fix-version with a semver bump-class\n"
+            "annotation:\n"
+            "  - `(patch — safe)` / `(minor — usually safe)`: PREFER these.\n"
+            "    For a CVE fix, use the SMALLEST version range that includes\n"
+            "    the patch (e.g. `urllib3>=1.24.2`, NOT `urllib3==2.0.3`).\n"
+            "  - `(MAJOR — BREAKING, avoid)`: a major-version jump.\n"
+            "    HARD RULE: never auto-cross a major version boundary as a\n"
+            "    security fix. Major bumps are deliberate modernization\n"
+            "    decisions that require code changes in consuming code, NOT\n"
+            "    automated security patches. If trivy's only listed fix\n"
+            "    crosses a major boundary, prefer a version-RANGE pin\n"
+            "    (`>=current.next-patch`) to land the safe upgrade and\n"
+            "    leave the major migration for a separate, deliberate\n"
+            "    subtask whose description literally says \"modernize X to vN\".\n\n"
+            "SECRETS must be removed or rotated (never just renamed).\n\n"
+            "IaC MISCONFIGS target specific Dockerfile/K8s/Terraform lines.\n"
         )
 
     # PHASE 1.7 — canonical-shape context from occam-trees. Lists the
