@@ -827,6 +827,58 @@ def run(
                             pass
 
                 # ────────────────────────────────────────────────────
+                # PHASE 1.6 — SEMGREP STATIC-ANALYSIS CONTEXT
+                # ────────────────────────────────────────────────────
+                # When the `semgrep` binary is on PATH, run the
+                # registry's auto-config ruleset, sort findings by
+                # severity (ERROR first), and inject the top-N as
+                # actionable security/quality issues for the planner.
+                # Skipped when binary missing / scan errors / repo
+                # has no findings / GITOMA_PHASE16_OFF=1. Cap at
+                # 20 findings to protect prompt budget.
+                _semgrep_block: str | None = None
+                _phase16_off = (
+                    os.environ.get("GITOMA_PHASE16_OFF") or ""
+                ).strip().lower() in ("1", "true", "yes")
+                if not _phase16_off:
+                    try:
+                        from gitoma.integrations.semgrep_scan import (
+                            SemgrepClient as _SgClient,
+                            render_findings_block as _sg_render,
+                        )
+                        _sg = _SgClient()
+                        if _sg.enabled:
+                            _sg_findings = _sg.scan(
+                                git_repo.root, max_findings=20,
+                            )
+                            if _sg_findings:
+                                _semgrep_block = _sg_render(_sg_findings)
+                                _err_count = sum(
+                                    1 for f in _sg_findings
+                                    if f.severity.upper() == "ERROR"
+                                )
+                                console.print(
+                                    f"[muted]PHASE 1.6: semgrep — "
+                                    f"{len(_sg_findings)} finding(s) "
+                                    f"({_err_count} ERROR)[/muted]"
+                                )
+                                try:
+                                    from gitoma.core.trace import current as _ct16
+                                    _ct16().emit(
+                                        "phase16.semgrep_findings",
+                                        total=len(_sg_findings),
+                                        errors=_err_count,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception as _sg_exc:  # noqa: BLE001 — must never escape
+                        try:
+                            from gitoma.core.trace import current as _ct_sg
+                            _ct_sg().exception("phase16.failed", _sg_exc)
+                        except Exception:
+                            pass
+
+                # ────────────────────────────────────────────────────
                 # PHASE 1.7 — STACK-SHAPE CONTEXT (occam-trees)
                 # ────────────────────────────────────────────────────
                 # When OCCAM_TREES_URL is reachable AND the RepoBrief
@@ -914,6 +966,7 @@ def run(
                         ),
                         skeleton_context=_skeleton_block,
                         scaffold_context=_scaffold_block,
+                        semgrep_context=_semgrep_block,
                     )
                 except LLMError as e:
                     # LLM-specific error — give actionable hint

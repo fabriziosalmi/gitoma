@@ -27,6 +27,7 @@ class PlannerAgent:
         vertical_addendum: str | None = None,
         skeleton_context: str | None = None,
         scaffold_context: str | None = None,
+        semgrep_context: str | None = None,
     ) -> TaskPlan:
         """
         Generate a TaskPlan from a MetricReport.
@@ -60,6 +61,7 @@ class PlannerAgent:
                     vertical_addendum=vertical_addendum,
                     skeleton_context=skeleton_context,
                     scaffold_context=scaffold_context,
+                    semgrep_context=semgrep_context,
                 ),
             },
         ]
