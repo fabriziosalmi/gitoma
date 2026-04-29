@@ -125,6 +125,105 @@ def _extract_readme(root: Path, brief: RepoBrief) -> None:
     ][:12]
 
 
+# Framework signal tables. Used by manifest extractors to enrich
+# `brief.stack` beyond a single language tag, so PHASE 1.7's
+# component-set matching against the occam-trees catalog (which keys
+# on framework names like "FastAPI" / "React" / "Tokio") gets at least
+# 2 signals and clears the inference threshold. Mapping is exact-on-
+# normalised-name (lower + alnum); first match per dep wins.
+_PY_FRAMEWORKS = {
+    "fastapi": "FastAPI",
+    "django": "Django",
+    "flask": "Flask",
+    "tornado": "Tornado",
+    "pyramid": "Pyramid",
+    "starlette": "Starlette",
+    "aiohttp": "aiohttp",
+    "sanic": "Sanic",
+    "scrapy": "Scrapy",
+    "sqlalchemy": "SQLAlchemy",
+    "celery": "Celery",
+    "pytorch": "PyTorch",
+    "torch": "PyTorch",
+    "tensorflow": "TensorFlow",
+    "langchain": "LangChain",
+    "langgraph": "LangGraph",
+    "pydantic": "Pydantic",
+    "pydanticai": "PydanticAI",
+    "numpy": "NumPy",
+    "pandas": "pandas",
+    "jinja2": "Jinja2",
+}
+_RUST_FRAMEWORKS = {
+    "tokio": "Tokio",
+    "actix": "Actix",
+    "actixweb": "Actix",
+    "rocket": "Rocket",
+    "warp": "Warp",
+    "axum": "Axum",
+    "hyper": "Hyper",
+    "tauri": "Tauri",
+    "yew": "Yew",
+    "rustls": "rustls",
+    "diesel": "Diesel",
+    "sqlx": "SQLx",
+    "serde": "serde",
+}
+_JS_FRAMEWORKS = {
+    "react": "React",
+    "vue": "Vue.js",
+    "angular": "Angular",
+    "svelte": "Svelte",
+    "sveltekit": "SvelteKit",
+    "next": "Next.js",
+    "nuxt": "Nuxt.js",
+    "express": "Express.js",
+    "expressjs": "Express.js",
+    "fastify": "Fastify",
+    "koa": "Koa.js",
+    "hapi": "Hapi.js",
+    "nestjs": "NestJS",
+    "remix": "Remix",
+    "gatsby": "Gatsby",
+    "astro": "Astro",
+    "solid": "SolidJS",
+    "solidjs": "SolidJS",
+    "vite": "Vite",
+    "tailwindcss": "Tailwind CSS",
+    "tailwind": "Tailwind CSS",
+    "prisma": "Prisma",
+    "trpc": "tRPC",
+    "redux": "Redux",
+}
+
+
+def _norm_dep(name: str) -> str:
+    """Lowercase + strip non-alnum for fuzzy framework lookup. Matches
+    `react`, `react-dom`, `@types/react`, `react.js`, etc → 'react'."""
+    return "".join(c for c in name.lower() if c.isalnum())
+
+
+def _add_frameworks_from_dep_names(
+    dep_names: list[str],
+    brief: RepoBrief,
+    table: dict[str, str],
+) -> None:
+    """Walk `dep_names`, look up each (normalised) name in `table`,
+    append the canonical framework tag to brief.stack on hit. Dedup
+    happens later in extract_brief."""
+    seen: set[str] = set()
+    for raw in dep_names:
+        if not raw:
+            continue
+        norm = _norm_dep(raw)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        canonical = table.get(norm)
+        if canonical:
+            brief.stack.append(canonical)
+
+
 def _extract_pyproject(root: Path, brief: RepoBrief) -> None:
     p = root / "pyproject.toml"
     if not p.is_file():
@@ -166,6 +265,28 @@ def _extract_pyproject(root: Path, brief: RepoBrief) -> None:
     if "pytest" in brief.ci_tools:
         brief.test_cmd = brief.test_cmd or "pytest"
 
+    # Framework signal extraction — pulls FastAPI/Django/Flask/etc out
+    # of [project.dependencies] so PHASE 1.7 stack inference has at
+    # least 2 components to match against the occam-trees catalog.
+    # Live-fire bench 2026-04-29 found PHASE 1.7 SKIPS on every real
+    # repo because RepoBrief was emitting language-only signals.
+    deps_raw = project.get("dependencies") or []
+    dep_names: list[str] = []
+    if isinstance(deps_raw, list):
+        for d in deps_raw:
+            if not isinstance(d, str):
+                continue
+            # PEP 508: "fastapi>=0.100" / "fastapi[all] (>=0.100)"
+            head = d.split(";", 1)[0].strip()
+            for sep in ("[", "(", ">", "<", "=", "!", "~", " "):
+                idx = head.find(sep)
+                if idx > 0:
+                    head = head[:idx]
+                    break
+            if head:
+                dep_names.append(head)
+    _add_frameworks_from_dep_names(dep_names, brief, _PY_FRAMEWORKS)
+
 
 def _extract_package_json(root: Path, brief: RepoBrief) -> None:
     p = root / "package.json"
@@ -203,6 +324,32 @@ def _extract_package_json(root: Path, brief: RepoBrief) -> None:
     elif isinstance(bin_entries, str) and data.get("name"):
         brief.entry_points.append(data["name"])
 
+    # Framework signal extraction — pulls React/Vue/Express/Next/etc
+    # out of dependencies + devDependencies (frameworks land in either
+    # depending on app vs lib convention). Live-fire bench 2026-04-29
+    # surfaced this gap.
+    dep_names: list[str] = []
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        block = data.get(key)
+        if isinstance(block, dict):
+            dep_names.extend(str(k) for k in block.keys() if isinstance(k, str))
+    # @scope/pkg deps: try BOTH the scope (`nestjs`) and the package
+    # (`core`). The framework table keys on the discriminator part —
+    # which is the SCOPE for `@nestjs/core` but the PACKAGE for
+    # `@types/react`. Cheap to try both; collisions impossible because
+    # the table has canonical entries.
+    cleaned: list[str] = []
+    for d in dep_names:
+        if d.startswith("@") and "/" in d:
+            scope, _, pkg = d[1:].partition("/")
+            if scope:
+                cleaned.append(scope)
+            if pkg:
+                cleaned.append(pkg)
+        else:
+            cleaned.append(d)
+    _add_frameworks_from_dep_names(cleaned, brief, _JS_FRAMEWORKS)
+
 
 def _extract_cargo(root: Path, brief: RepoBrief) -> None:
     p = root / "Cargo.toml"
@@ -225,6 +372,16 @@ def _extract_cargo(root: Path, brief: RepoBrief) -> None:
     brief.build_cmd = brief.build_cmd or "cargo build"
     brief.test_cmd = brief.test_cmd or "cargo test"
     brief.install_cmd = brief.install_cmd or "cargo build --release"
+
+    # Framework signal extraction — pulls Tokio/Actix/Rocket/Axum/etc
+    # out of [dependencies]. Live-fire bench 2026-04-29 found
+    # zion (tokio+hyper+rustls) was emitting just ['Rust'] which
+    # blocked PHASE 1.7 inference.
+    deps_block = data.get("dependencies") or {}
+    if isinstance(deps_block, dict):
+        _add_frameworks_from_dep_names(
+            list(deps_block.keys()), brief, _RUST_FRAMEWORKS,
+        )
     for b in data.get("bin", []) or []:
         if isinstance(b, dict) and "name" in b:
             brief.entry_points.append(b["name"])

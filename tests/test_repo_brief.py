@@ -56,6 +56,92 @@ def test_package_json_detects_ts_vs_js(tmp_path: Path) -> None:
     assert b.build_cmd == "npm run build"
 
 
+# ── Framework signal extraction (added 2026-04-29 post-bench) ───
+
+
+def test_pyproject_extracts_fastapi_framework(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ["fastapi>=0.100", "uvicorn"]\n'
+    )
+    b = extract_brief(tmp_path)
+    assert "Python" in b.stack
+    assert "FastAPI" in b.stack
+
+
+def test_pyproject_extracts_multiple_frameworks(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ['
+        '"langchain>=0.1", "pydantic>=2", "numpy>=1.24"]\n'
+    )
+    b = extract_brief(tmp_path)
+    assert "LangChain" in b.stack
+    assert "Pydantic" in b.stack
+    assert "NumPy" in b.stack
+
+
+def test_pyproject_handles_pep508_extras_and_specifiers(tmp_path: Path) -> None:
+    """Dependency strings like 'fastapi[all] (>=0.100,<1.0)' must
+    still resolve to 'fastapi' for framework matching."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ['
+        '"fastapi[all] (>=0.100,<1.0)", "django ; python_version >= \'3.10\'"]\n'
+    )
+    b = extract_brief(tmp_path)
+    assert "FastAPI" in b.stack
+    assert "Django" in b.stack
+
+
+def test_cargo_extracts_tokio_hyper_axum(tmp_path: Path) -> None:
+    """The exact zion-shape signal pattern surfaced by the live-fire bench."""
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "z"\nversion = "0.1.0"\n'
+        '[dependencies]\ntokio = "1"\nhyper = "1"\nrustls = "0.23"\n'
+    )
+    b = extract_brief(tmp_path)
+    assert "Rust" in b.stack
+    assert "Tokio" in b.stack
+    assert "Hyper" in b.stack
+    assert "rustls" in b.stack
+
+
+def test_package_json_extracts_react_and_next(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"name": "x", "dependencies": {"react": "18", "next": "14"}}'
+    )
+    b = extract_brief(tmp_path)
+    assert "React" in b.stack
+    assert "Next.js" in b.stack
+
+
+def test_package_json_extracts_from_dev_dependencies(tmp_path: Path) -> None:
+    """Frameworks like vite/tailwind are usually in devDependencies."""
+    (tmp_path / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"vite": "5", "tailwindcss": "3"}}'
+    )
+    b = extract_brief(tmp_path)
+    assert "Vite" in b.stack
+    assert "Tailwind CSS" in b.stack
+
+
+def test_package_json_strips_scope_prefix(tmp_path: Path) -> None:
+    """@nestjs/core → 'nestjs' for framework lookup."""
+    (tmp_path / "package.json").write_text(
+        '{"name": "x", "dependencies": {"@nestjs/core": "10"}}'
+    )
+    b = extract_brief(tmp_path)
+    assert "NestJS" in b.stack
+
+
+def test_unknown_deps_dont_pollute_stack(tmp_path: Path) -> None:
+    """Random package names must NOT add bogus tags to brief.stack."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ["some-random-pkg", "another-thing"]\n'
+    )
+    b = extract_brief(tmp_path)
+    # Only "Python" (language tag); no garbage from unknown deps
+    assert b.stack == ["Python"]
+
+
 def test_pyproject_extracts_scripts_and_tooling(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "gitoma"\ndescription = "An agent"\n'
