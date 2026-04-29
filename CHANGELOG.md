@@ -6,6 +6,150 @@ All notable changes to gitoma are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added (2026-04-29 AM shipping streak)
+
+- **PHASE 1.7 — stack-shape context from occam-trees**
+  (`gitoma/planner/scaffold_shape.py` + planner.plan/prompts.py +
+  `gitoma/cli/commands/run.py`): composes the 3 spider-web legs
+  (RepoBrief + occam-trees + planner) into a single pre-PHASE-2
+  context block. Infers `(stack, level)` from `RepoBrief.stack`
+  signals via component-set intersection (≥2 matches, tie-break by
+  catalog rank), pulls the canonical scaffold from occam-trees,
+  computes additive-only delta vs `file_tree`, injects "REPO
+  CANONICAL SHAPE" block into planner prompt with explicit
+  "additive only — never remove" hard rule. Skipped on
+  `--plan-from-file` / no signals / server unreachable /
+  `GITOMA_PHASE17_OFF=1`. 31 unit tests. Commit `e46752d`.
+
+- **Layer0 v2 leftovers — get_by_id + dedupe_hits + guard TTL**
+  (`gitoma/integrations/layer0.py` + PHASE 1.5/8 in run.py): closes
+  the 3 backlog items from the v2 wire-in. (1)
+  `Layer0Client.get_by_id(*, id, namespace) → Layer0Hit | None` for
+  point lookup / audit replay (distance=0.0 since no semantic
+  ranking on point queries). (2) Module-level
+  `dedupe_hits(hits, prefix_len=80)` pure function — folds same-
+  prefix hits keeping closer distance; wired into PHASE 1.5
+  per-bucket on grouped + on flat fallback. (3)
+  `LAYER0_GUARD_TTL_DAYS` env knob — when >0, guard-fail memories
+  in PHASE 8 get TTL via existing `ttl_ms` kwarg; pinned/plan-source/
+  outcome untouched; default 0 = forever (backward-compat).
+  10 new tests. Commit `7079216`.
+
+- **PHASE 1.6 — semgrep static-analysis context (4th spider leg)**
+  (`gitoma/integrations/semgrep_scan.py` + planner.plan/prompts.py +
+  run.py): thin subprocess wrapper for the `semgrep` CLI. Sorted
+  top-N findings (ERROR before WARNING before INFO, then path:line)
+  injected as `SEMGREP STATIC-ANALYSIS FINDINGS` block in the
+  planner prompt with explicit "prefer these over generic security
+  work" instruction so the planner sees concrete rule_id+path:line+
+  CWE locations to target instead of generic boilerplate. Slot in
+  pipeline: PHASE 1.6 between Skeletal and PHASE 1.7. Silent fail-
+  open (binary missing / scan errors / no findings = no block).
+  Opt-out via `GITOMA_PHASE16_OFF=1`. Cap at 20 findings (prompt
+  budget). Env: `SEMGREP_BIN`, `SEMGREP_CONFIG` (default `auto`),
+  `SEMGREP_TIMEOUT_S` (default 60s, clamped min 5s). 32 unit tests.
+  Commit `e5e34c4`.
+
+- **G21 — semgrep-regression critic**
+  (`gitoma/worker/semgrep_regression.py` + worker.py wire-in): closes
+  the PHASE 1.6 loop on the worker side. Mirrors G16/G18/G19 shape
+  with `G21Conflict` + `G21Result` + `render_for_llm` + revert+retry.
+  Baseline = `(rule_id, path)` tuples severity-floored (default
+  ERROR). Line intentionally NOT in fingerprint — patches shift line
+  numbers; `(rule_id, path)` is stable. PHASE 1.6 scan cap raised
+  20→500 to capture the full baseline; top-20 still go to the prompt
+  block. Threaded via new `WorkerAgent(semgrep_baseline=...)` kwarg.
+  Opt-in `GITOMA_G21_SEMGREP=1` (default OFF — adds ~5-30s subprocess
+  cost per patch attempt). Severity floor `GITOMA_G21_SEVERITY=
+  warning|info|error`. Silent skip when baseline `None` (PHASE 1.6
+  disabled). 38 unit tests. Commit `285b68e`.
+
+- **PHASE 1.8 — trivy supply-chain context (5th spider leg)**
+  (`gitoma/integrations/trivy_scan.py` + planner.plan/prompts.py +
+  run.py): thin subprocess wrapper for the `trivy` CLI covering
+  3 finding kinds (vuln / secret / misconfig) in one scan. Severity
+  normalised CRITICAL/HIGH→ERROR, MEDIUM→WARNING, LOW/UNKNOWN→INFO
+  so the prompt structure stays uniform across PHASE 1.6 and 1.8.
+  Vulns render with bump-target version inline ("requests@2.20.0
+  → bump to 2.20.1"). 3 per-kind parser helpers
+  (`_parse_vulns/_parse_secrets/_parse_misconfigs`). Slot in
+  pipeline: PHASE 1.8 after PHASE 1.7. Opt-out
+  `GITOMA_PHASE18_OFF=1`. Env: `TRIVY_BIN`, `TRIVY_TIMEOUT_S`
+  (default 90s, clamped min 10s for first-run DB download). Cap 20
+  findings. 37 unit tests. Commit `343ff49`.
+
+- **G22 — trivy-regression critic**
+  (`gitoma/worker/trivy_regression.py` + worker.py wire-in): mirrors
+  G21 for the trivy supply-chain leg. Fingerprint = `(rule_id,
+  target)` uniformly across vuln/secret/misconfig (rule_id is
+  unique-enough per kind: CVE for vulns, RuleID for secrets, ID for
+  misconfigs; target is manifest path / leak file / IaC file).
+  Per-kind render: vulns get bump-target version, secrets+misconfigs
+  get path:line. Scope policy difference vs G21: **G22 default =
+  WHOLE repo, not touched-only** — a patch adding an `import` line
+  can pull in a new vulnerable transitive dep without directly
+  touching the manifest. `GITOMA_G22_TOUCHED_ONLY=1` narrows to
+  touched files for speed. Opt-in `GITOMA_G22_TRIVY=1` (default OFF
+  — adds ~10-90s per patch). Severity `GITOMA_G22_SEVERITY=
+  warning|info|error`. 42 unit tests. Commit `c49a0e3`.
+
+- **RepoBrief — framework signal extraction (bench-driven fix)**
+  (`gitoma/context/repo_brief.py`): live-fire bench on 3 real repos
+  surfaced that PHASE 1.7 was SKIPped on 3/3 because
+  `RepoBrief.stack` was emitting language-only signals
+  (`['Python']`, `['Rust']`). Extended `_extract_pyproject` /
+  `_extract_cargo` / `_extract_package_json` to walk the dependency
+  list and append canonical framework tags from 3 lookup tables:
+  `_PY_FRAMEWORKS` (22 entries), `_RUST_FRAMEWORKS` (13 entries),
+  `_JS_FRAMEWORKS` (22 entries). Plus PEP-508 dep-string
+  normalisation (`fastapi[all] (>=0.100,<1.0)` → `fastapi`) and
+  JS @scope/pkg double-lookup (`@nestjs/core` tries both `nestjs`
+  AND `core`). Post-fix firing: 2/3 repos now match a catalog
+  stack (third still skips — upstream occam-trees catalog gap on
+  raw-Tokio+Hyper Rust stacks). 8 new tests. Commit `89f7bf3`.
+
+- **PHASE 7 allowlist + secret-rotation scripts**
+  (`gitoma/cli/diary.py` + `scripts/ops/`): closes a structural leak
+  vector found post-bench. (1) `GITOMA_DIARY_REPO_ALLOWLIST` env
+  (comma-separated fnmatch patterns, case-insensitive, .git suffix
+  tolerated) on `DiaryConfig`; `write_diary_entry` short-circuits
+  with `diary.skipped_by_allowlist` trace event when the source
+  repo doesn't match — empty allowlist = backward-compat default-
+  allow. (2) `scripts/ops/rotate-diary-token.sh` — interactive PAT
+  rotation: opens GitHub PAT page, prompts new token (hidden input),
+  tests via `git ls-remote`, backs up `.env`, swaps the line in-place,
+  reminds operator to revoke the old PAT. Auto-detects classic vs
+  fine-grained from existing token prefix; auto-detects the GitHub
+  user that owns the current token via `/api/v1/user` so the
+  operator knows which account to log into. (3)
+  `scripts/ops/rotate-claude-config.sh` — same shape for the
+  Anthropic API key in Claude Code settings.json: locates the file
+  (project-local OR `~/.claude/`), uses jq to show candidate JSON
+  paths, opens Anthropic Console, tests via 1-token /v1/messages
+  call before persisting. (4) `scripts/ops/audit-secrets.sh` —
+  trivy secret-only scan including the gitignored `.env` /
+  `.claude/settings.json` files trivy would otherwise skip, exit 1
+  on any finding so it composes with pre-commit hooks. 11 new diary
+  tests. Commit `d7a7f0f`.
+
+### Docs (2026-04-29 AM)
+
+- **`.env.example` — document all opt-in env vars** (commit `35921bb`).
+  Adds commented sections for all PHASE 7 / Layer0 / semgrep / trivy /
+  G21 / G22 / occam-trees / exo-compat env knobs. Each section
+  explains the trigger condition + opt-out + cost trade-off.
+- **README + critic-stack + pipeline + overview refresh** for the
+  v0.4 spider-web reality (commit `18f91dd`). README now reflects
+  22 critics + 5 spider legs + 6 PHASE blocks; critic-stack adds
+  G21/G22 entries; pipeline adds the optional PHASE-block side
+  bands to the state machine graph; overview adds the spider-web
+  architecture section + integrations/ subpackage in the tree.
+
+### Chore (2026-04-29 AM)
+
+- **Remove orphaned `gitoma.mp3`** (716 KB, never referenced from
+  any markdown/code/config). Commit `08cde8d`.
+
 ### Added
 
 - **Layer0 client follow-up — grouped search + tag_all_of + pinned/TTL**
