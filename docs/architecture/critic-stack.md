@@ -599,6 +599,69 @@ indentation. Pinned in test
 - Cross-config consistency (already covered by G15 for the
   JS/TS quality-config family).
 
+### G21 — Semgrep regression gate
+
+**Wired right after G19 (echo-chamber) in the worker apply loop.**
+Closes the PHASE 1.6 loop on the worker side: PHASE 1.6 already
+injects high-severity semgrep findings into the planner prompt as
+actionable issues, but the planner could still propose patches that
+INTRODUCE new findings of the same kind. G21 prevents that.
+
+Mechanism:
+1. PHASE 1.6 scans the whole repo at audit time and computes a
+   baseline = set of `(rule_id, path)` tuples for all findings at
+   or above the configured severity floor (default ERROR).
+2. The baseline is threaded to `WorkerAgent` via the
+   `semgrep_baseline=` constructor kwarg.
+3. After every patch attempt, G21 re-scans the repo and compares.
+   Any `(rule_id, path)` tuple in the post-patch result that is in
+   a touched file AND not in the baseline AND at or above the floor
+   triggers a critic fail (revert + retry with the LLM-feedback
+   block listing the new findings).
+
+Fingerprint design — `(rule_id, path)` without line: line numbers
+shift across patches, but `(rule_id, path)` is stable. The trade-off
+is that two findings of the same rule on the same file collapse to
+one fingerprint. The LLM-feedback message lists the actual post-patch
+finding details (path:line + message) so the worker can target the
+right line — staleness of "which exact instance" is acceptable in
+exchange for robustness against drift.
+
+Opt-in via `GITOMA_G21_SEMGREP=1` (default OFF — adds ~5-30s per
+patch attempt for the re-scan). Severity floor configurable via
+`GITOMA_G21_SEVERITY=warning|info|error` (default error). G21
+silently skips when the baseline is `None` (PHASE 1.6 disabled or
+semgrep binary missing).
+
+### G22 — Trivy regression gate
+
+**Wired right after G21 in the worker apply loop.** Mirrors G21's
+shape exactly but for the trivy supply-chain leg (PHASE 1.8).
+Catches three regression categories:
+- **vuln**: a patch upgraded a dep to a vulnerable version, or
+  added a new vulnerable dep to a manifest
+- **secret**: a patch hardcoded a credential into a source file
+- **misconfig**: a patch introduced an IaC misconfiguration in a
+  Dockerfile / Terraform / K8s manifest
+
+Fingerprint = `(rule_id, target)` uniformly across the three kinds:
+- vuln: `rule_id` = CVE id, `target` = manifest file
+- secret: `rule_id` = secret rule, `target` = file containing the leak
+- misconfig: `rule_id` = misconfig id, `target` = IaC file
+
+Scope policy difference vs G21: **G22 default = WHOLE repo**, not
+touched-only. A patch that adds an `import aiohttp` line in
+`client.py` could trigger pip / poetry to add `aiohttp==X.Y.Z` to
+the lockfile on the next install — and if Z is vulnerable, the new
+finding would be in the lockfile, NOT in `client.py`. G21's
+intra-file scope would miss this. `GITOMA_G22_TOUCHED_ONLY=1`
+narrows scope to touched files for speed (operator opt-in).
+
+Opt-in via `GITOMA_G22_TRIVY=1` (default OFF — adds ~10-90s per
+patch attempt; trivy DB cache helps on subsequent runs). Severity
+floor `GITOMA_G22_SEVERITY=warning|info|error` (default error).
+Silent skip when baseline is `None`.
+
 ## Plan-time deterministic post-processors (Layer-A + Layer-B)
 
 Two LLM-free transformations applied to the plan AFTER the LLM

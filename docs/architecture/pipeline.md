@@ -2,6 +2,12 @@
 
 ## The graph
 
+The core states are `IDLE → ANALYZING → PLANNING → WORKING → PR_OPEN → REVIEWING → DONE`.
+PHASE blocks numbered with a decimal (1.5 / 1.6 / 1.7 / 1.8 / 7 / 8) are
+**opt-in context substrates** that thread through the core states without
+replacing them — each silently skips when its substrate is unavailable
+so the core flow always works.
+
 ```
                   gitoma run <url>
                         │
@@ -9,17 +15,22 @@
                       IDLE
                         │ acquire_run_lock (fcntl.flock)
                         ▼
-                   ANALYZING                  ← registry.run(on_progress)
+                   ANALYZING                          ← registry.run + RepoBrief
                         │
+                        ├── PHASE 1.5 (opt-in)        ← Layer0.search_grouped → planner context
+                        ├── PHASE 1.6 (opt-in)        ← semgrep scan → planner context + G21 baseline
+                        ├── PHASE 1.7 (opt-in)        ← occam-trees stack-shape → planner context
+                        ├── PHASE 1.8 (opt-in)        ← trivy scan → planner context + G22 baseline
                         ▼
-                   PLANNING                   ← planner.plan(report, file_tree)
+                   PLANNING (PHASE 2)                 ← planner.plan(report, file_tree, …context)
+                        │                               OR --plan-from-file (skip LLM)
                         │ confirm
                         ▼
-                   WORKING                    ← worker.execute(plan, callbacks)
+                   WORKING (PHASE 3-6)                ← worker.execute(plan, callbacks)
                         │ for each subtask:
-                        │   LLM → patches → apply → commit
+                        │   LLM → patches → apply → critic stack G1..G22 → commit
                         ▼
-                   PR_OPEN                    ← push + pr_agent.open_pr
+                   PR_OPEN                            ← push + pr_agent.open_pr
                         │
                         ├── (--no-self-review) skip →
                         ▼
@@ -33,15 +44,35 @@
                         ├── CI failure → [auto fix-ci] → re-watch → continue
                         └── CI timeout → warn, continue
                         │
+                        ├── PHASE 7 (opt-in)          ← diary.write_diary_entry → public/private log repo
+                        ├── PHASE 8 (opt-in)          ← Layer0.ingest_one × N (plan + guards + outcome)
                         ▼
             [pause — user invokes `gitoma review` later]
                         │
                         ▼
-                   REVIEWING                  ← watcher.fetch + integrator.integrate
+                   REVIEWING                          ← watcher.fetch + integrator.integrate
                         │
                         ▼
                       DONE
 ```
+
+## Optional PHASE blocks at a glance
+
+| PHASE | Substrate | Trigger | Opt-out |
+|---|---|---|---|
+| 1.5 | Layer0 gRPC server | `LAYER0_GRPC_URL` set + reachable | unset env |
+| 1.6 | semgrep CLI binary | `semgrep` on PATH | `GITOMA_PHASE16_OFF=1` |
+| 1.7 | occam-trees HTTP server | `OCCAM_TREES_URL` set + reachable | `GITOMA_PHASE17_OFF=1` |
+| 1.8 | trivy CLI binary | `trivy` on PATH | `GITOMA_PHASE18_OFF=1` |
+| 7   | git push to remote diary repo | `GITOMA_DIARY_REPO` + `GITOMA_DIARY_TOKEN` set | unset either; `GITOMA_DIARY_REPO_ALLOWLIST` further filters |
+| 8   | Layer0 gRPC server (write side) | same as 1.5 | unset env |
+
+Critic-side regression gates that consume PHASE 1.6 / 1.8 baselines:
+
+| Critic | Reads baseline from | Trigger |
+|---|---|---|
+| **G21** | PHASE 1.6 semgrep | `GITOMA_G21_SEMGREP=1` (default OFF) |
+| **G22** | PHASE 1.8 trivy | `GITOMA_G22_TRIVY=1` (default OFF) |
 
 ## Each phase, precisely
 
