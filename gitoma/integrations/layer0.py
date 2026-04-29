@@ -63,6 +63,7 @@ __all__ = [
     "Layer0Group",
     "Layer0Client",
     "namespace_for_repo",
+    "dedupe_hits",
 ]
 
 
@@ -132,6 +133,44 @@ def namespace_for_repo(owner: str, name: str) -> str:
     raw = f"{owner}__{name}"
     safe = _NS_BAD.sub("-", raw).strip("-_")
     return safe[:64] or "default"
+
+
+# ── Dedup utility (pure function, operates on hit lists) ──────────
+
+
+def dedupe_hits(
+    hits: list[Layer0Hit],
+    *,
+    prefix_len: int = 80,
+) -> list[Layer0Hit]:
+    """Collapse hits whose ``text`` shares the same first ``prefix_len``
+    characters. The hit with the lower ``distance`` (= better match)
+    wins; ties broken by earlier position in the input. Order otherwise
+    preserved.
+
+    Why this exists: PHASE 1.5 fans out across N tag buckets and can
+    inject several near-identical PR-shipped or guard-fail memories
+    that pollute the planner prompt with redundancy. A simple prefix
+    fold is enough — the first 80 chars of a memory's summary uniquely
+    identify it for every gitoma-ingested memory shape today (plan
+    summaries, guard firings, PR outcomes all start with a stable
+    discriminator). When no two hits collide, the function is a
+    no-op (returns hits in input order)."""
+    if not hits or prefix_len <= 0:
+        return list(hits)
+    seen: dict[str, int] = {}  # prefix → index in `out` of best-so-far
+    out: list[Layer0Hit] = []
+    for h in hits:
+        key = (h.text or "")[:prefix_len]
+        existing_idx = seen.get(key)
+        if existing_idx is None:
+            seen[key] = len(out)
+            out.append(h)
+            continue
+        # Replace the existing best if this hit is closer
+        if h.distance < out[existing_idx].distance:
+            out[existing_idx] = h
+    return out
 
 
 # ── Client (silent-fail-open) ─────────────────────────────────────
@@ -357,6 +396,45 @@ class Layer0Client:
             return out
         except Exception:  # noqa: BLE001
             return []
+
+    # ── get_by_id (point lookup, audit / replay) ──────────────────
+
+    def get_by_id(
+        self,
+        *,
+        id: int,
+        namespace: str,
+    ) -> Layer0Hit | None:
+        """Fetch a single memory by its slot id. Returns ``None`` when
+        the id doesn't exist in ``namespace``, when the client is
+        disabled, or on transport error.
+
+        Note the hit's ``distance`` is always 0.0 (point lookup, no
+        semantic ranking). Tags + created_at_ms come back from the
+        server-side metadata."""
+        if not self._ensure_stub():
+            return None
+        if id < 0 or not namespace:
+            return None
+        try:
+            from gitoma.integrations._layer0_proto import supermemory_pb2 as pb
+            req = pb.GetMemoryByIdRequest(id=int(id), namespace=namespace)
+            resp = self._stub.GetMemoryById(
+                req, timeout=self.config.timeout_s, metadata=self._metadata(),
+            )
+            # Server returns id=0 + empty content when the slot is
+            # unused. Treat as "not found".
+            if not resp.content:
+                return None
+            meta = getattr(resp, "metadata", None)
+            tags = tuple(getattr(meta, "tags", ()) or ()) if meta else ()
+            created = int(getattr(meta, "created_at_ms", 0) or 0) if meta else 0
+            return Layer0Hit(
+                id=int(resp.id), text=str(resp.content), distance=0.0,
+                tags=tags, created_at_ms=created,
+            )
+        except Exception:  # noqa: BLE001
+            return None
 
     # ── list_namespaces (ops / debug) ─────────────────────────────
 

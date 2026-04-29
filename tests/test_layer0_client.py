@@ -263,3 +263,127 @@ def test_search_memory_accepts_tag_all_of(
         query="x", namespace="ns", k=5,
         tag_any_of=["a"], tag_all_of=["b"],
     ) == []
+
+
+# ── get_by_id (new in 2026-04-29 follow-up) ───────────────────────
+
+
+def test_disabled_client_get_by_id_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LAYER0_GRPC_URL", raising=False)
+    c = Layer0Client()
+    assert c.get_by_id(id=42, namespace="ns") is None
+
+
+def test_get_by_id_empty_namespace_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAYER0_GRPC_URL", "127.0.0.1:50051")
+    c = Layer0Client()
+    assert c.get_by_id(id=42, namespace="") is None
+
+
+def test_get_by_id_negative_id_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAYER0_GRPC_URL", "127.0.0.1:50051")
+    c = Layer0Client()
+    assert c.get_by_id(id=-1, namespace="ns") is None
+
+
+# ── dedupe_hits (pure module function) ────────────────────────────
+
+
+def test_dedupe_hits_empty_list() -> None:
+    from gitoma.integrations.layer0 import dedupe_hits
+    assert dedupe_hits([]) == []
+
+
+def test_dedupe_hits_unique_pass_through() -> None:
+    """All hits with distinct prefixes are preserved in order."""
+    from gitoma.integrations.layer0 import dedupe_hits
+    hits = [
+        Layer0Hit(id=1, text="alpha task", distance=0.1),
+        Layer0Hit(id=2, text="beta task", distance=0.2),
+        Layer0Hit(id=3, text="gamma task", distance=0.3),
+    ]
+    out = dedupe_hits(hits)
+    assert [h.id for h in out] == [1, 2, 3]
+
+
+def test_dedupe_hits_collapses_same_prefix_keeps_closer() -> None:
+    """Two hits with identical first 80 chars: lower distance wins."""
+    from gitoma.integrations.layer0 import dedupe_hits
+    base = "PR shipped #" + "X" * 100  # 100+ identical chars
+    hits = [
+        Layer0Hit(id=1, text=base + " a", distance=0.5),
+        Layer0Hit(id=2, text=base + " b", distance=0.2),
+        Layer0Hit(id=3, text=base + " c", distance=0.7),
+    ]
+    out = dedupe_hits(hits)
+    assert len(out) == 1
+    assert out[0].id == 2  # closest match wins
+    assert out[0].distance == 0.2
+
+
+def test_dedupe_hits_short_text_uses_full_string() -> None:
+    """Hits shorter than prefix_len are folded by their full text."""
+    from gitoma.integrations.layer0 import dedupe_hits
+    hits = [
+        Layer0Hit(id=1, text="short", distance=0.5),
+        Layer0Hit(id=2, text="short", distance=0.1),  # closer, same text
+        Layer0Hit(id=3, text="other", distance=0.3),
+    ]
+    out = dedupe_hits(hits)
+    assert len(out) == 2
+    # The "short" survivor should be id=2 (closer)
+    short_hit = next(h for h in out if h.text == "short")
+    assert short_hit.id == 2
+
+
+def test_dedupe_hits_preserves_order_of_first_occurrence() -> None:
+    """When dedup keeps a different id at index N, the position of
+    the deduped slot stays where the first occurrence was."""
+    from gitoma.integrations.layer0 import dedupe_hits
+    base = "X" * 200
+    hits = [
+        Layer0Hit(id=1, text=base + " a", distance=0.5),
+        Layer0Hit(id=2, text="unique", distance=0.4),
+        Layer0Hit(id=3, text=base + " b", distance=0.1),  # collapses with id=1
+    ]
+    out = dedupe_hits(hits)
+    assert len(out) == 2
+    # Position 0 = the deduped slot (id=3 wins on distance)
+    # Position 1 = the unique hit
+    assert out[0].id == 3
+    assert out[1].id == 2
+
+
+def test_dedupe_hits_zero_prefix_len_no_op() -> None:
+    """prefix_len=0 disables dedup entirely."""
+    from gitoma.integrations.layer0 import dedupe_hits
+    hits = [
+        Layer0Hit(id=1, text="same", distance=0.1),
+        Layer0Hit(id=2, text="same", distance=0.2),
+    ]
+    out = dedupe_hits(hits, prefix_len=0)
+    assert len(out) == 2
+
+
+def test_dedupe_hits_custom_prefix_len() -> None:
+    """A short prefix_len makes more aggressive dedup."""
+    from gitoma.integrations.layer0 import dedupe_hits
+    hits = [
+        Layer0Hit(id=1, text="ABCDEF then alpha", distance=0.5),
+        Layer0Hit(id=2, text="ABCDEF then beta", distance=0.1),
+    ]
+    # Default prefix_len=80 → both texts share <80 chars but diverge,
+    # actually both ABCDEF-prefix is only 6 chars long so they share the
+    # whole 17-char strings differ, with default they're different prefixes
+    out_default = dedupe_hits(hits)
+    assert len(out_default) == 2  # different at position 12
+    # With prefix_len=6, both share "ABCDEF" → collapse
+    out_short = dedupe_hits(hits, prefix_len=6)
+    assert len(out_short) == 1
+    assert out_short[0].id == 2  # closer wins

@@ -666,6 +666,7 @@ def run(
                 try:
                     from gitoma.integrations.layer0 import (
                         Layer0Client as _L0Client,
+                        dedupe_hits as _l0_dedupe,
                         namespace_for_repo as _l0_ns,
                     )
                     _l0 = _L0Client()
@@ -706,10 +707,17 @@ def run(
                             for _g in _l0_groups:
                                 if not _g.hits:
                                     continue
+                                # Dedup within bucket — same prefix
+                                # (= near-identical text) collapses to
+                                # the closer-matching hit. Across-bucket
+                                # dedup intentionally NOT done so the
+                                # planner sees the bucket structure
+                                # even when one fact is tagged twice.
+                                _bucket_hits = _l0_dedupe(list(_g.hits))
                                 _l0_block_lines.append(
-                                    f"### {_g.tag} (top {len(_g.hits)})"
+                                    f"### {_g.tag} (top {len(_bucket_hits)})"
                                 )
-                                for _h in _g.hits:
+                                for _h in _bucket_hits:
                                     _l0_block_lines.append(f"- {_h.text}")
                                     _injected += 1
                                 _l0_block_lines.append("")
@@ -732,6 +740,10 @@ def run(
                                 namespace=_l0_namespace,
                                 k=8,
                             )
+                            # Flat search collides way more often than
+                            # the bucketised path because there's no
+                            # tag separation — dedup is essential here.
+                            _l0_hits = _l0_dedupe(_l0_hits)
                             if _l0_hits:
                                 _l0_block_lines = [
                                     "",
@@ -2373,11 +2385,26 @@ def run(
                                         break
                     except OSError:
                         pass
+                # Optional TTL on guard-fail memories — high-volume
+                # noise like repeated G14 firings on flaky test files
+                # can flood the namespace within weeks. Operators set
+                # LAYER0_GUARD_TTL_DAYS to age them out automatically;
+                # 0 (default) = forever, matching prior behaviour.
+                _guard_ttl_ms = 0
+                try:
+                    _guard_ttl_days = float(
+                        os.environ.get("LAYER0_GUARD_TTL_DAYS") or "0",
+                    )
+                    if _guard_ttl_days > 0:
+                        _guard_ttl_ms = int(_guard_ttl_days * 24 * 60 * 60 * 1000)
+                except ValueError:
+                    pass
                 for _g in _guard_events:
                     _l0w.ingest_one(
                         text=f"Guard fired during run: {_g}",
                         namespace=_l0w_namespace,
                         tags=["guard-fail", _g.split(".")[0]],
+                        ttl_ms=_guard_ttl_ms,
                     )
 
                 # ── Outcome memory ──────────────────────────────────
