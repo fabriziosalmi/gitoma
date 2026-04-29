@@ -76,11 +76,17 @@ def test_config_clamps_minimum_timeout_to_5s(
     assert cfg.timeout_s >= 5.0
 
 
-def test_config_default_config_is_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_config_default_config_is_p_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default changed from 'auto' to 'p/default' on 2026-04-29 EVE
+    after bench-supply-chain build surfaced that '--config auto'
+    requires '--metrics on' (incompatible with our metrics-off
+    privacy posture). 'p/default' works fine with metrics off."""
     monkeypatch.setenv("SEMGREP_BIN", "sh")
     monkeypatch.delenv("SEMGREP_CONFIG", raising=False)
     cfg = SemgrepConfig.from_env()
-    assert cfg.config == "auto"
+    assert cfg.config == "p/default"
 
 
 def test_config_custom_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,3 +374,46 @@ def test_finding_is_frozen() -> None:
 def test_finding_default_cwe_is_empty_tuple() -> None:
     f = SemgrepFinding("r", "p", 1, "ERROR", "m")
     assert f.cwe == ()
+
+
+# ── Metrics adaptation (added 2026-04-29 EVE post-bench-supply-chain) ──
+
+
+def test_scan_uses_metrics_off_for_static_config(tmp_path: Path) -> None:
+    """For any non-`auto` config, the cmd must include `--metrics off`
+    to preserve the privacy posture."""
+    cfg = SemgrepConfig(
+        binary="sh", config="p/default", enabled=True,
+    )
+    client = SemgrepClient(cfg)
+    captured: dict = {}
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0, stdout='{"results": []}', stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        client.scan(tmp_path)
+    assert "--metrics" in captured["cmd"]
+    idx = captured["cmd"].index("--metrics")
+    assert captured["cmd"][idx + 1] == "off"
+
+
+def test_scan_uses_metrics_on_for_auto_config(tmp_path: Path) -> None:
+    """`--config auto` requires `--metrics on` per semgrep's design;
+    the wrapper must adapt to avoid silent-bail."""
+    cfg = SemgrepConfig(
+        binary="sh", config="auto", enabled=True,
+    )
+    client = SemgrepClient(cfg)
+    captured: dict = {}
+
+    def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        return MagicMock(returncode=0, stdout='{"results": []}', stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        client.scan(tmp_path)
+    assert "--metrics" in captured["cmd"]
+    idx = captured["cmd"].index("--metrics")
+    assert captured["cmd"][idx + 1] == "on"

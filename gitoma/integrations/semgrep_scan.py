@@ -85,7 +85,14 @@ class SemgrepConfig:
     """Resolved semgrep invocation settings."""
 
     binary: str = "semgrep"        # absolute path or PATH-resolvable name
-    config: str = "auto"            # --config value
+    # ``--config`` value. Default ``p/default`` instead of ``auto``
+    # because ``--config auto`` REQUIRES ``--metrics on`` (semgrep
+    # phones home to semgrep.dev to pick the language-appropriate
+    # ruleset). When metrics are forced off (privacy posture below),
+    # ``auto`` silently bails with no scan output. Operators who
+    # want ``auto`` MUST also set SEMGREP_CONFIG=auto AND we'll
+    # enable metrics for that single config (see _build_cmd below).
+    config: str = "p/default"
     timeout_s: float = 60.0
     enabled: bool = True
     max_target_bytes: int = 0       # 0 = semgrep default
@@ -101,7 +108,7 @@ class SemgrepConfig:
             timeout_s = float(os.environ.get("SEMGREP_TIMEOUT_S") or "60")
         except ValueError:
             timeout_s = 60.0
-        config = (os.environ.get("SEMGREP_CONFIG") or "auto").strip() or "auto"
+        config = (os.environ.get("SEMGREP_CONFIG") or "p/default").strip() or "p/default"
         return cls(
             binary=resolved or binary,
             config=config,
@@ -163,6 +170,16 @@ class SemgrepClient:
         root = Path(repo_root)
         if not root.is_dir():
             return []
+        # ``--config auto`` requires ``--metrics on`` (semgrep phones
+        # home to semgrep.dev to choose language-appropriate rules).
+        # Any static config (``p/default``, ``p/security-audit``, a
+        # local file path) works fine with metrics off. Bench
+        # 2026-04-29 EVE: building bench-supply-chain corpus surfaced
+        # this — every prior gitoma run had been silently bailing
+        # because the default ``auto`` + ``--metrics off`` combination
+        # is incompatible. Discovery: 0 findings on EVERY clean repo
+        # was the symptom; fix is to detect and adapt.
+        metrics_mode = "on" if self.config.config == "auto" else "off"
         cmd = [
             self.config.binary,
             "scan",
@@ -170,7 +187,7 @@ class SemgrepClient:
             "--json",
             "--quiet",
             "--no-git-ignore",  # respect .gitignore via git, not semgrep's heuristic
-            "--metrics", "off",
+            "--metrics", metrics_mode,
             str(root),
         ]
         try:
