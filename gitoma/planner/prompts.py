@@ -43,6 +43,7 @@ def planner_user_prompt(
     repo_fingerprint_context: str | None = None,
     vertical_addendum: str | None = None,
     skeleton_context: str | None = None,
+    scaffold_context: str | None = None,
 ) -> str:
     metrics_summary = "\n".join(
         f"- {m.display_name}: score={m.score:.2f} status={m.status} | {m.details}"
@@ -111,6 +112,25 @@ def planner_user_prompt(
             f"{skeleton_context}\n"
         )
 
+    # PHASE 1.7 — canonical-shape context from occam-trees. Lists the
+    # paths the inferred (stack, level) pair says SHOULD exist but
+    # don't yet. Treated as ADDITIVE-ONLY hints: the planner may
+    # propose subtasks that create these files, but must never read
+    # the absence of a path here as license to delete files that ARE
+    # in the repo. Matches the additive contract enforced by
+    # ``gitoma scaffold`` at the materialisation layer.
+    scaffold_block = ""
+    if scaffold_context:
+        scaffold_block = (
+            "\n== REPO CANONICAL SHAPE (occam-trees — additive hints only) ==\n"
+            f"{scaffold_context}\n"
+            "These are paths the canonical scaffold expects but the repo "
+            "does not have. You MAY emit subtasks that create them when "
+            "they address a metric in the report. You MUST NOT propose "
+            "removing files just because they don't appear above — the "
+            "absence of a path here means \"no opinion\", not \"unwanted\".\n"
+        )
+
     # Vertical addendum — declarative narrowing prompt from the active
     # Vertical record (Castelletto Taglio A). When `gitoma docs` is the
     # entry point, this block tells the LLM to emit ONLY doc-file
@@ -153,7 +173,7 @@ Overall score: {report.overall_score:.2f}/1.0
 
 == FILE TREE (sample) ==
 {tree_sample}
-{skeleton_block}
+{skeleton_block}{scaffold_block}
 
 == TASK ==
 Create an improvement plan ONLY for metrics with status "fail" or "warn".

@@ -814,6 +814,83 @@ def run(
                         except Exception:
                             pass
 
+                # ────────────────────────────────────────────────────
+                # PHASE 1.7 — STACK-SHAPE CONTEXT (occam-trees)
+                # ────────────────────────────────────────────────────
+                # When OCCAM_TREES_URL is reachable AND the RepoBrief
+                # has stack signals, infer (stack, level), pull the
+                # canonical scaffold from occam-trees, diff against
+                # the current file_tree, and inject the missing-paths
+                # delta as additive-only context for the planner.
+                #
+                # Skipped when: no stack signals, server unreachable,
+                # match below threshold, or GITOMA_PHASE17_OFF=1.
+                # Composes the 3 spider-web legs (occam-trees +
+                # RepoBrief + planner) without any new dependencies.
+                _scaffold_block: str | None = None
+                _phase17_off = (
+                    os.environ.get("GITOMA_PHASE17_OFF") or ""
+                ).strip().lower() in ("1", "true", "yes")
+                if (
+                    not _phase17_off
+                    and repo_brief is not None
+                    and repo_brief.stack
+                ):
+                    try:
+                        from gitoma.integrations.occam_trees import (
+                            OccamTreesClient as _OTClient,
+                        )
+                        from gitoma.planner.scaffold_shape import (
+                            compute_delta as _shape_delta,
+                            infer_level as _shape_level,
+                            infer_stack as _shape_infer,
+                            render_shape_context as _shape_render,
+                        )
+                        _ot = _OTClient()
+                        if _ot.enabled:
+                            _stacks = _ot.list_stacks()
+                            _inf = _shape_infer(repo_brief, _stacks) if _stacks else None
+                            if _inf is not None:
+                                _level = _shape_level(file_tree)
+                                _resolved = _ot.resolve(_inf.stack_id, _level)
+                                if _resolved is not None:
+                                    _delta = _shape_delta(
+                                        _resolved.flatten(), file_tree,
+                                    )
+                                    _block = _shape_render(
+                                        stack_id=_inf.stack_id,
+                                        stack_name=_inf.stack_name,
+                                        level=_level,
+                                        matched_components=_inf.matched_components,
+                                        delta=_delta,
+                                    )
+                                    if _block:
+                                        _scaffold_block = _block
+                                        console.print(
+                                            f"[muted]PHASE 1.7: shape inferred "
+                                            f"= {_inf.stack_name} ({_inf.stack_id}) "
+                                            f"L{_level} — {len(_delta)} canonical "
+                                            f"path(s) missing[/muted]"
+                                        )
+                                        try:
+                                            from gitoma.core.trace import current as _ct17
+                                            _ct17().emit(
+                                                "phase17.shape_inferred",
+                                                stack_id=_inf.stack_id,
+                                                level=_level,
+                                                match_count=_inf.match_count,
+                                                missing_count=len(_delta),
+                                            )
+                                        except Exception:
+                                            pass
+                            _ot.close()
+                    except Exception as _ot_exc:  # noqa: BLE001 — must never escape
+                        try:
+                            from gitoma.core.trace import current as _ct_ot
+                            _ct_ot().exception("phase17.failed", _ot_exc)
+                        except Exception:
+                            pass
+
                 try:
                     plan = planner.plan(
                         report, file_tree,
@@ -824,6 +901,7 @@ def run(
                             _vertical.prompt_addendum if _vertical else None
                         ),
                         skeleton_context=_skeleton_block,
+                        scaffold_context=_scaffold_block,
                     )
                 except LLMError as e:
                     # LLM-specific error — give actionable hint
