@@ -499,6 +499,7 @@ def run(
         # Without these, --plan-from-file paths trip an UnboundLocalError
         # in PHASE 3.
         _repo_fp: dict | None = None
+        _semgrep_baseline: set[tuple[str, str]] | None = None
         # Resume gate on PLANNING: skip only if we can actually rehydrate.
         # Same reasoning as PHASE 1 — fall back to re-planning on deser
         # failure instead of crashing the whole resume.
@@ -837,6 +838,8 @@ def run(
                 # has no findings / GITOMA_PHASE16_OFF=1. Cap at
                 # 20 findings to protect prompt budget.
                 _semgrep_block: str | None = None
+                # _semgrep_baseline initialised above PHASE 2 to None so
+                # --plan-from-file paths still construct WorkerAgent OK
                 _phase16_off = (
                     os.environ.get("GITOMA_PHASE16_OFF") or ""
                 ).strip().lower() in ("1", "true", "yes")
@@ -846,13 +849,25 @@ def run(
                             SemgrepClient as _SgClient,
                             render_findings_block as _sg_render,
                         )
+                        from gitoma.worker.semgrep_regression import (
+                            compute_baseline_fingerprints as _sg_baseline,
+                            g21_severity_floor as _sg_floor,
+                        )
                         _sg = _SgClient()
                         if _sg.enabled:
+                            # Scan with a wide cap so the baseline gets
+                            # the full picture; the prompt block uses
+                            # only the top-20 (severity-sorted) for
+                            # token budget. baseline = ALL findings at
+                            # or above the configured severity floor.
                             _sg_findings = _sg.scan(
-                                git_repo.root, max_findings=20,
+                                git_repo.root, max_findings=500,
                             )
                             if _sg_findings:
-                                _semgrep_block = _sg_render(_sg_findings)
+                                _semgrep_block = _sg_render(_sg_findings[:20])
+                                _semgrep_baseline = _sg_baseline(
+                                    _sg_findings, severity_floor=_sg_floor(),
+                                )
                                 _err_count = sum(
                                     1 for f in _sg_findings
                                     if f.severity.upper() == "ERROR"
@@ -860,7 +875,8 @@ def run(
                                 console.print(
                                     f"[muted]PHASE 1.6: semgrep — "
                                     f"{len(_sg_findings)} finding(s) "
-                                    f"({_err_count} ERROR)[/muted]"
+                                    f"({_err_count} ERROR, "
+                                    f"baseline={len(_semgrep_baseline)})[/muted]"
                                 )
                                 try:
                                     from gitoma.core.trace import current as _ct16
@@ -868,6 +884,7 @@ def run(
                                         "phase16.semgrep_findings",
                                         total=len(_sg_findings),
                                         errors=_err_count,
+                                        baseline_size=len(_semgrep_baseline),
                                     )
                                 except Exception:
                                     pass
@@ -1281,6 +1298,7 @@ def run(
                 compile_fix_mode=_compile_fix_mode,
                 repo_fingerprint=_repo_fp,
                 cpg_index=_cpg_index,
+                semgrep_baseline=_semgrep_baseline,
             )
 
             from gitoma.planner.task import SubTask, Task

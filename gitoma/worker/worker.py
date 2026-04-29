@@ -54,6 +54,7 @@ class WorkerAgent:
         compile_fix_mode: bool = False,
         repo_fingerprint: dict[str, Any] | None = None,
         cpg_index: Any = None,
+        semgrep_baseline: set[tuple[str, str]] | None = None,
     ) -> None:
         self._llm = llm
         self._git = git_repo
@@ -98,6 +99,13 @@ class WorkerAgent:
         # identical to pre-v0. Opt-in via ``GITOMA_CPG_LITE=on`` set
         # in the run pipeline before PHASE 3.
         self._cpg_index = cpg_index
+        # G21 semgrep-regression critic: pre-run set of (rule_id, path)
+        # fingerprints. ``None`` = baseline never computed (PHASE 1.6
+        # disabled / binary missing) → G21 silently skips. When set,
+        # post-patch scans diff against this and reject patches that
+        # introduced new high-severity findings. Opt-in via
+        # ``GITOMA_G21_SEMGREP=1``.
+        self._semgrep_baseline: set[tuple[str, str]] | None = semgrep_baseline
 
     def execute(
         self,
@@ -658,6 +666,40 @@ class WorkerAgent:
                         f"G19 echo-chamber check failed after "
                         f"{max_attempts} attempt(s). "
                         f"{len(g19_result.conflicts)} symbol(s) echo."
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
+            # G21 semgrep-regression: opt-in via GITOMA_G21_SEMGREP=1.
+            # Re-scan post-patch + diff against the PHASE-1.6 baseline.
+            # New (rule_id, path) fingerprints in touched files at or
+            # above the configured severity floor (default ERROR) =
+            # critic fails → revert + retry. Baseline ``None`` =
+            # PHASE 1.6 didn't run, G21 silently skips (caller never
+            # opted into the semgrep wire-up at all).
+            from gitoma.worker.semgrep_regression import (
+                check_g21_semgrep_regression,
+            )
+            g21_result = check_g21_semgrep_regression(
+                self._git.root, touched, self._semgrep_baseline,
+            )
+            if g21_result is not None:
+                err_text = g21_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g21_semgrep.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(g21_result.conflicts),
+                    rules=sorted({c.rule_id for c in g21_result.conflicts}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G21 semgrep-regression check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(g21_result.conflicts)} new finding(s) "
+                        f"introduced."
                     )
                 self._revert_touched(touched)
                 compile_error_feedback = err_text
