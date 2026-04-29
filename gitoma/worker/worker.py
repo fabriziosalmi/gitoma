@@ -601,6 +601,41 @@ class WorkerAgent:
                 compile_error_feedback = err_text
                 continue
 
+            # G24 config-structure validity: opt-in via
+            # GITOMA_G24_CONFIG_STRUCTURE=1. Closes the bench-blast
+            # PR #10 failure mode (qwen3-8b A/B 2026-04-29 EVE):
+            # `[tool.poetry] dependencies = [...]` (LIST format) is
+            # syntactically valid TOML but semantically wrong — Poetry
+            # requires deps as a TABLE. Same pattern G23 catches for
+            # KEYS, G24 catches for SHAPES (list vs table vs scalar).
+            from gitoma.worker.config_structure import (
+                check_g24_config_structure,
+            )
+            g24_result = check_g24_config_structure(
+                self._git.root, touched, originals,
+            )
+            if g24_result is not None:
+                err_text = g24_result.render_for_llm()
+                current_trace().emit(
+                    "critic_g24_config_structure.fail",
+                    subtask_id=subtask.id,
+                    attempt=attempt,
+                    conflict_count=len(g24_result.conflicts),
+                    files=sorted({c.file for c in g24_result.conflicts}),
+                    sections=sorted({c.section_path for c in g24_result.conflicts}),
+                )
+                if attempt >= max_attempts:
+                    self._revert_touched(touched)
+                    raise ValueError(
+                        f"G24 config-structure check failed after "
+                        f"{max_attempts} attempt(s). "
+                        f"{len(g24_result.conflicts)} wrong-shape section(s) "
+                        f"in: {sorted({c.file for c in g24_result.conflicts})}"
+                    )
+                self._revert_touched(touched)
+                compile_error_feedback = err_text
+                continue
+
             # CPG-lite refresh: rebuild the in-memory index over the
             # post-patch worktree so the orphan-symbol guards (G16,
             # G19) and Ψ-full Φ see the symbols this subtask just
