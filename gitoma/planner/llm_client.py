@@ -254,6 +254,11 @@ class LLMClient:
         # (prompt_tokens, completion_tokens), or None when the
         # backend did not report usage on the last call.
         self._last_usage: tuple[int, int] | None = None
+        # G14 — fenced-JSON guard fired on last chat_json() call.
+        # Reset at the START of every chat_json call so callers can
+        # read it AFTER the call to know if the model violated the
+        # "no fences" prompt contract on this attempt.
+        self._last_g14_fired: bool = False
 
     @classmethod
     def for_worker(cls, config: Config) -> "LLMClient":
@@ -326,6 +331,7 @@ class LLMClient:
         *,
         temperature: float | None = None,
         model: str | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """
         Send a chat completion request. Returns the raw text response.
@@ -339,6 +345,13 @@ class LLMClient:
         (e.g. critic panel uses gemma for personas + a bigger model for
         the devil's advocate). Falls back to ``self.model`` (which reads
         from config) when omitted, preserving backwards compat.
+
+        ``max_tokens`` is keyword-only — when provided overrides the
+        config default for this single call. Use case: PHASE 5
+        self-review on big PRs needs a bigger budget than the worker's
+        4096 default (verified 2026-04-30 on PR #12 — global 4096
+        truncated the review). Caller (e.g. ``self_critic``) is
+        expected to source the value from a phase-specific env knob.
 
         Retries on transient connection/timeout errors with exponential backoff.
         Raises LLMError on unrecoverable failures.
@@ -437,6 +450,11 @@ class LLMClient:
 
         for attempt in range(retries):
             try:
+                _effective_max_tokens = (
+                    max_tokens
+                    if max_tokens is not None
+                    else self._config.lmstudio.max_tokens
+                )
                 _create_kwargs: dict = dict(
                     model=model if model else self.model,
                     messages=messages,  # type: ignore[arg-type]
@@ -445,7 +463,7 @@ class LLMClient:
                         if temperature is not None
                         else self._config.lmstudio.temperature
                     ),
-                    max_tokens=self._config.lmstudio.max_tokens,
+                    max_tokens=_effective_max_tokens,
                 )
                 if _extra_body is not None:
                     _create_kwargs["extra_body"] = _extra_body
@@ -478,7 +496,7 @@ class LLMClient:
                 if finish_reason == "length":
                     raise LLMTruncatedError(
                         f"LLM response was truncated by max_tokens "
-                        f"({self._config.lmstudio.max_tokens} tokens). "
+                        f"({_effective_max_tokens} tokens). "
                         "Increase LM_STUDIO_MAX_TOKENS or shrink the prompt."
                     )
                 return str(content)
@@ -525,7 +543,22 @@ class LLMClient:
 
         Strips markdown code fences. On parse failure, adds a correction turn
         and retries. Raises LLMError if JSON cannot be obtained.
+
+        G14 — fenced-JSON guard: when the raw response is wrapped in
+        `````json ...````` despite the prompt's
+        "no fences" instruction, ``self._last_g14_fired`` flips True
+        and a ``g14_fenced_json`` trace event is emitted (model + role).
+        Default behaviour: silent repair, same as before. Opt-in
+        ``GITOMA_G14_REJECT_FENCED_JSON=1`` flips behaviour to
+        fail-fast — useful in benches/CI to surface offending models
+        rather than masking the issue.
         """
+        import os as _g14_os
+        _g14_strict = (
+            _g14_os.environ.get("GITOMA_G14_REJECT_FENCED_JSON") or ""
+        ).lower() in ("1", "true", "yes")
+        self._last_g14_fired = False
+
         current_messages = list(messages)
 
         for attempt in range(retries):
@@ -534,6 +567,30 @@ class LLMClient:
                 raw = self.chat(current_messages, retries=1)
             except LLMError:
                 raise  # don't swallow — let caller handle
+
+            # G14 detection runs on RAW output before any fence-stripping
+            # / brace-walking, so we see what the model actually emitted.
+            if _detect_fenced_json(raw):
+                self._last_g14_fired = True
+                try:
+                    from gitoma.core.trace import current as _g14_ct
+                    _g14_ct().emit(
+                        "g14_fenced_json",
+                        role=getattr(self, "_role", "planner"),
+                        model=self.model,
+                        attempt=attempt + 1,
+                        chars=len(raw),
+                    )
+                except Exception:
+                    pass
+                if _g14_strict:
+                    raise LLMError(
+                        "G14: model emitted fenced JSON despite the prompt's "
+                        "'no fences, no explanation' instruction. "
+                        "Set GITOMA_G14_REJECT_FENCED_JSON=0 (or unset) to "
+                        "fall back to silent repair. "
+                        f"Raw (head): {raw[:160]}"
+                    )
 
             cleaned = _extract_json(raw)
 
@@ -653,6 +710,38 @@ def _append_no_think(messages: list[dict[str, str]]) -> list[dict[str, str]]:
                 out[i]["content"] = content + "\n/no_think"
             break
     return out
+
+
+def _detect_fenced_json(text: str) -> bool:
+    """G14 detection: did the raw response wrap its JSON in markdown fences?
+
+    Recognises both ``` ```json ... ``` ``` and bare ``` ``` ... ``` ```
+    around what looks like JSON. Whitespace-tolerant. Used to flag
+    coder/instruct fine-tunes that ignore "no fences, no explanation"
+    in the prompt — the silent fence-strip in ``_attempt_json_repair``
+    + brace-walk in ``_extract_json`` recover the JSON either way, but
+    without telemetry we never see WHICH models do this and HOW often.
+
+    Returns True only when:
+      * stripped body starts with three backticks, AND
+      * after the optional language tag + first newline, there's a
+        ``{`` — i.e. it really is fenced JSON, not e.g. ``` ```python
+        def foo() ``` ``` (which is not our concern here).
+
+    Conservative: false negatives on rare shapes are fine — the silent
+    repair handles them; we just miss the telemetry bump on those.
+    """
+    body = text.strip()
+    if not body.startswith("```"):
+        return False
+    # Drop optional language tag through to first newline.
+    rest = body[3:]
+    nl = rest.find("\n")
+    if nl == -1:
+        # ``` foo ``` single-line — too unusual to count as fenced JSON.
+        return False
+    after_tag = rest[nl + 1:].lstrip()
+    return after_tag.startswith("{") or after_tag.startswith("[")
 
 
 def _attempt_json_repair(s: str) -> str:

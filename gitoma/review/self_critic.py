@@ -144,7 +144,24 @@ class SelfCriticAgent:
         return "\n\n".join(pieces)
 
     def _ask_llm(self, title: str, body: str, diff: str) -> str:
-        """Single-shot adversarial-critic prompt."""
+        """Single-shot adversarial-critic prompt.
+
+        Uses ``LM_STUDIO_SELFREVIEW_MAX_TOKENS`` (default 8192) instead
+        of the global ``LM_STUDIO_MAX_TOKENS`` (which defaults to 4096
+        for the worker patches). Caught live 2026-04-30 EVE on PR #12:
+        the review prompt is full-PR-diff sized and 4096 tokens
+        truncated the response, leaving "Self-review skipped". The
+        env knob lets ops bump just this phase without inflating the
+        worker budget. Clamped to a sane range to surface stuck calls.
+        """
+        import os as _sr_os
+        try:
+            _sr_max = int(
+                _sr_os.environ.get("LM_STUDIO_SELFREVIEW_MAX_TOKENS") or "8192"
+            )
+        except ValueError:
+            _sr_max = 8192
+        _sr_max = max(1024, min(32768, _sr_max))
         prompt = _CRITIC_PROMPT.format(
             title=title or "(no title)",
             body=body or "(none)",
@@ -154,8 +171,12 @@ class SelfCriticAgent:
             "self_critic.llm.request",
             model=self.config.lmstudio.model,
             prompt_chars=len(prompt),
+            max_tokens=_sr_max,
         )
-        response = self.llm.chat([{"role": "user", "content": prompt}])
+        response = self.llm.chat(
+            [{"role": "user", "content": prompt}],
+            max_tokens=_sr_max,
+        )
         current().emit(
             "self_critic.llm.response",
             response_chars=len(response),
