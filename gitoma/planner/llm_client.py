@@ -241,8 +241,10 @@ class LLMClient:
     """
 
     def __init__(self, config: Config, *, role: str = "planner") -> None:
-        if role not in ("planner", "worker"):
-            raise ValueError(f"role must be 'planner' or 'worker', got {role!r}")
+        if role not in ("planner", "worker", "reviewer"):
+            raise ValueError(
+                f"role must be 'planner', 'worker', or 'reviewer', got {role!r}"
+            )
         self._config = config
         self._role = role
         # Build the client lazily to avoid import-time failures
@@ -272,6 +274,20 @@ class LLMClient:
         """
         return cls(config, role="worker")
 
+    @classmethod
+    def for_reviewer(cls, config: Config) -> "LLMClient":
+        """Build a reviewer-routed client.
+
+        Mirrors ``for_worker``: when ``review_base_url`` /
+        ``review_model`` are set, PHASE 5 self-critic hits a third
+        endpoint/model (e.g. ``google/gemma-4-e2b@localhost`` for an
+        out-of-family second opinion). Falls back to the planner
+        endpoint when both are empty. Tagged ``role="reviewer"`` so
+        operators can opt into review-specific anti-thinking via
+        ``LM_STUDIO_REVIEW_DISABLE_THINKING_*`` envs.
+        """
+        return cls(config, role="reviewer")
+
     def _resolve_base_url(self) -> str:
         # ``getattr`` fallbacks support test doubles that bypass __init__
         # via ``LLMClient.__new__`` and never set ``_role`` /
@@ -281,6 +297,10 @@ class LLMClient:
             wb = getattr(self._config.lmstudio, "worker_base_url", "") or ""
             if wb:
                 return wb
+        elif role == "reviewer":
+            rb = getattr(self._config.lmstudio, "review_base_url", "") or ""
+            if rb:
+                return rb
         return self._config.lmstudio.base_url
 
     def _build_client(self) -> "OpenAI":
@@ -311,6 +331,10 @@ class LLMClient:
             wm = getattr(self._config.lmstudio, "worker_model", "") or ""
             if wm:
                 return wm
+        elif role == "reviewer":
+            rm = getattr(self._config.lmstudio, "review_model", "") or ""
+            if rm:
+                return rm
         return self._config.lmstudio.model
 
     @property
@@ -386,6 +410,8 @@ class LLMClient:
             v = ""
             if _role == "worker":
                 v = _os.environ.get(f"LM_STUDIO_WORKER_{name}") or ""
+            elif _role == "reviewer":
+                v = _os.environ.get(f"LM_STUDIO_REVIEW_{name}") or ""
             if not v:
                 v = _os.environ.get(f"LM_STUDIO_{name}") or ""
             return v.lower() in ("1", "true", "yes")

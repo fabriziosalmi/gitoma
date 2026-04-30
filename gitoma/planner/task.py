@@ -70,6 +70,16 @@ class TaskPlan:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     overall_score_before: float = 0.0
     llm_model: str = ""
+    # Worker model, when split-topology is in use (LM_STUDIO_WORKER_MODEL
+    # set). Empty when planner and worker share the same model — the
+    # PR template + diary then show a single name. Surfaces tonight's
+    # mm1+qwen3-8b planner + mm2+qwen3.5-9b worker setup so PRs
+    # accurately attribute who-did-what.
+    worker_model: str = ""
+    # Reviewer model, when 3-way split-topology is in use
+    # (LM_STUDIO_REVIEW_MODEL set). Same shape as worker_model.
+    # Empty when reviewer falls back to the planner client.
+    review_model: str = ""
 
     @property
     def total_tasks(self) -> int:
@@ -92,6 +102,8 @@ class TaskPlan:
             "created_at": self.created_at,
             "overall_score_before": self.overall_score_before,
             "llm_model": self.llm_model,
+            "worker_model": self.worker_model,
+            "review_model": self.review_model,
             "tasks": [t.to_dict() for t in self.tasks],
         }
 

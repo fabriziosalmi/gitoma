@@ -51,6 +51,15 @@ class LMStudioConfig:
     # field lets the worker have its own budget. Read by chat() when
     # role=="worker" and no explicit ``max_tokens`` kwarg is passed.
     worker_max_tokens: int = 0
+    # ── Reviewer routing (2026-05-01) ──────────────────────────────────
+    # When set, PHASE 5 self-critic uses this endpoint/model instead
+    # of the planner's. Empty means "same as base_url/model". 3-way
+    # split: planner thinks (qwen3-8b@mm1), worker codes
+    # (qwen3.5-9b@mm2), reviewer reads (e.g. gemma-4-e2b@localhost
+    # for an out-of-family second opinion). Mirrors the worker_*
+    # pattern; LLMClient role="reviewer" picks these up.
+    review_base_url: str = ""
+    review_model: str = ""
 
 
 @dataclass
@@ -167,6 +176,8 @@ def load_config() -> Config:
         worker_base_url=os.getenv("LM_STUDIO_WORKER_BASE_URL", lm_raw.get("worker_base_url", "")),
         worker_model=os.getenv("LM_STUDIO_WORKER_MODEL", lm_raw.get("worker_model", "")),
         worker_max_tokens=int(os.getenv("LM_STUDIO_WORKER_MAX_TOKENS", lm_raw.get("worker_max_tokens", 0))),
+        review_base_url=os.getenv("LM_STUDIO_REVIEW_BASE_URL", lm_raw.get("review_base_url", "")),
+        review_model=os.getenv("LM_STUDIO_REVIEW_MODEL", lm_raw.get("review_model", "")),
     )
 
     # Pull defaults from the dataclass so they stay in ONE place. The
@@ -227,6 +238,8 @@ def save_config_value(key: str, value: str) -> None:
         "LM_STUDIO_WORKER_BASE_URL": ("lmstudio", "worker_base_url"),
         "LM_STUDIO_WORKER_MODEL": ("lmstudio", "worker_model"),
         "LM_STUDIO_WORKER_MAX_TOKENS": ("lmstudio", "worker_max_tokens"),
+        "LM_STUDIO_REVIEW_BASE_URL": ("lmstudio", "review_base_url"),
+        "LM_STUDIO_REVIEW_MODEL": ("lmstudio", "review_model"),
         "CRITIC_PANEL_MODE": ("critic_panel", "mode"),
         "CRITIC_PANEL_PERSONAS": ("critic_panel", "personas"),
         "CRITIC_PANEL_DEVIL": ("critic_panel", "devil_advocate"),

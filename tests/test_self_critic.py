@@ -138,6 +138,11 @@ def test_render_body_includes_signature_line():
 def _make_agent(mocker, llm_response: str):
     mock_config = MagicMock()
     mock_config.lmstudio.model = "mock-gemma"
+    # Explicit empty strings so SelfCriticAgent's reviewer-route check
+    # (added 2026-05-01) takes the planner-fallback branch by default.
+    # Tests that want to exercise the reviewer route should override.
+    mock_config.lmstudio.review_base_url = ""
+    mock_config.lmstudio.review_model = ""
 
     llm_instance = MagicMock()
     llm_instance.chat.return_value = llm_response

@@ -72,7 +72,22 @@ class SelfCriticAgent:
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.llm = LLMClient(config)
+        # Reviewer-route override (2026-05-01): when
+        # ``review_base_url`` or ``review_model`` is set, route this
+        # PHASE 5 critic to a third endpoint/model — useful for
+        # out-of-family second opinions (e.g. planner=qwen3-8b@mm1,
+        # worker=qwen3.5-9b@mm2, reviewer=gemma-4-e2b@localhost).
+        # Falls back to role="planner" when both are empty so
+        # backward-compat is total. Calls ``LLMClient(config, role=…)``
+        # directly (not ``for_reviewer``) so test fixtures patching
+        # ``self_critic.LLMClient`` catch both branches.
+        _lm = config.lmstudio
+        if (getattr(_lm, "review_base_url", "") or "") or (
+            getattr(_lm, "review_model", "") or ""
+        ):
+            self.llm = LLMClient(config, role="reviewer")
+        else:
+            self.llm = LLMClient(config)
         self.gh = GitHubClient(config)
 
     # ── Public API ────────────────────────────────────────────────────────

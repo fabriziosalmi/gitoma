@@ -1454,8 +1454,29 @@ def run(
                     f"[muted]Worker-route: {worker_llm.model} @ "
                     f"{config.lmstudio.worker_base_url or config.lmstudio.base_url}[/muted]"
                 )
+                # Stamp the plan so PR + diary attribute the worker
+                # accurately when planner ≠ worker. Only set when the
+                # worker model actually differs — same-model
+                # topologies leave plan.worker_model empty so the PR
+                # template falls back to the single-name format.
+                if worker_llm.model != llm.model:
+                    plan.worker_model = worker_llm.model
             else:
                 worker_llm = llm
+            # Reviewer-route stamp (PHASE 5 self-critic builds its own
+            # client at run time; here we stamp the plan ahead of
+            # PR-body generation so attribution is accurate).
+            if (
+                config.lmstudio.review_base_url
+                or config.lmstudio.review_model
+            ):
+                _rev_llm = _LLMClient.for_reviewer(config)
+                console.print(
+                    f"[muted]Reviewer-route: {_rev_llm.model} @ "
+                    f"{config.lmstudio.review_base_url or config.lmstudio.base_url}[/muted]"
+                )
+                if _rev_llm.model != llm.model:
+                    plan.review_model = _rev_llm.model
             worker = WorkerAgent(
                 llm=worker_llm,
                 git_repo=git_repo,
