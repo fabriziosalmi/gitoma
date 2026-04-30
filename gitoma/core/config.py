@@ -43,6 +43,14 @@ class LMStudioConfig:
     # mm1=planner(qwen3-8b) + mm2=worker(qwen3.5-9b plan-from-file).
     worker_base_url: str = ""
     worker_model: str = ""
+    # Worker max_tokens override (2026-05-01). 0 = use base max_tokens.
+    # Caught live on b2v PR #33: worker T001-S01 truncated at 4096
+    # because the global max_tokens has to balance planner JSON-mode
+    # output (often <2K) and worker patch output (often 4-8K). Bumping
+    # the global to 8192 inflates planner calls unnecessarily; this
+    # field lets the worker have its own budget. Read by chat() when
+    # role=="worker" and no explicit ``max_tokens`` kwarg is passed.
+    worker_max_tokens: int = 0
 
 
 @dataclass
@@ -158,6 +166,7 @@ def load_config() -> Config:
         max_tokens=int(os.getenv("LM_STUDIO_MAX_TOKENS", lm_raw.get("max_tokens", 4096))),
         worker_base_url=os.getenv("LM_STUDIO_WORKER_BASE_URL", lm_raw.get("worker_base_url", "")),
         worker_model=os.getenv("LM_STUDIO_WORKER_MODEL", lm_raw.get("worker_model", "")),
+        worker_max_tokens=int(os.getenv("LM_STUDIO_WORKER_MAX_TOKENS", lm_raw.get("worker_max_tokens", 0))),
     )
 
     # Pull defaults from the dataclass so they stay in ONE place. The
@@ -217,6 +226,7 @@ def save_config_value(key: str, value: str) -> None:
         "LM_STUDIO_MAX_TOKENS": ("lmstudio", "max_tokens"),
         "LM_STUDIO_WORKER_BASE_URL": ("lmstudio", "worker_base_url"),
         "LM_STUDIO_WORKER_MODEL": ("lmstudio", "worker_model"),
+        "LM_STUDIO_WORKER_MAX_TOKENS": ("lmstudio", "worker_max_tokens"),
         "CRITIC_PANEL_MODE": ("critic_panel", "mode"),
         "CRITIC_PANEL_PERSONAS": ("critic_panel", "personas"),
         "CRITIC_PANEL_DEVIL": ("critic_panel", "devil_advocate"),

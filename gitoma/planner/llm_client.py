@@ -450,11 +450,24 @@ class LLMClient:
 
         for attempt in range(retries):
             try:
-                _effective_max_tokens = (
-                    max_tokens
-                    if max_tokens is not None
-                    else self._config.lmstudio.max_tokens
-                )
+                # Effective max_tokens precedence:
+                #   1. explicit kwarg (caller wants exact control —
+                #      e.g. self_critic with PHASE-5 budget)
+                #   2. role-aware worker config (when role=="worker"
+                #      and lmstudio.worker_max_tokens > 0) — lets
+                #      the worker have a bigger budget than the
+                #      planner without bloating planner JSON calls
+                #   3. global config max_tokens
+                if max_tokens is not None:
+                    _effective_max_tokens = max_tokens
+                else:
+                    _wmt = getattr(
+                        self._config.lmstudio, "worker_max_tokens", 0,
+                    ) or 0
+                    if _role == "worker" and _wmt > 0:
+                        _effective_max_tokens = _wmt
+                    else:
+                        _effective_max_tokens = self._config.lmstudio.max_tokens
                 _create_kwargs: dict = dict(
                     model=model if model else self.model,
                     messages=messages,  # type: ignore[arg-type]
