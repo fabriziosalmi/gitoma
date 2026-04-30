@@ -221,10 +221,30 @@ class LLMTruncatedError(LLMError):
 
 
 class LLMClient:
-    """OpenAI-compatible client pointing at LM Studio with robust error handling."""
+    """OpenAI-compatible client pointing at LM Studio with robust error handling.
 
-    def __init__(self, config: Config) -> None:
+    ``role`` (``"planner"`` default, or ``"worker"``) controls two things:
+
+      1. Endpoint + model routing — when role=="worker" AND
+         ``config.lmstudio.worker_base_url`` / ``worker_model`` are
+         set, the client points at that endpoint with that model
+         instead of the planner's. This is the parallel-topology hook
+         (mm1 plans on qwen3-8b, mm2 codes on qwen3.5-9b).
+
+      2. Anti-thinking env precedence — when role=="worker", the
+         four no-think kill-switches first read
+         ``LM_STUDIO_WORKER_<NAME>`` and only fall back to
+         ``LM_STUDIO_<NAME>`` if the worker variant is unset.
+         Lets the operator give the worker a model-specific recipe
+         (e.g. PRELUDE on for qwen3.5-9b worker) without polluting
+         the planner's call shape (qwen3-8b doesn't need it).
+    """
+
+    def __init__(self, config: Config, *, role: str = "planner") -> None:
+        if role not in ("planner", "worker"):
+            raise ValueError(f"role must be 'planner' or 'worker', got {role!r}")
         self._config = config
+        self._role = role
         # Build the client lazily to avoid import-time failures
         self._client = self._build_client()
         # Last call's token usage, populated by chat() on success.
@@ -234,6 +254,29 @@ class LLMClient:
         # (prompt_tokens, completion_tokens), or None when the
         # backend did not report usage on the last call.
         self._last_usage: tuple[int, int] | None = None
+
+    @classmethod
+    def for_worker(cls, config: Config) -> "LLMClient":
+        """Build a worker-routed client.
+
+        Returns a client that points at ``worker_base_url`` /
+        ``worker_model`` if either is set in config, falling back to
+        the planner endpoint/model otherwise. Always tagged
+        ``role="worker"`` so the role-aware anti-thinking lookup
+        applies to every chat() call from the worker stack.
+        """
+        return cls(config, role="worker")
+
+    def _resolve_base_url(self) -> str:
+        # ``getattr`` fallbacks support test doubles that bypass __init__
+        # via ``LLMClient.__new__`` and never set ``_role`` /
+        # ``worker_base_url`` on a MagicMock'd config.
+        role = getattr(self, "_role", "planner")
+        if role == "worker":
+            wb = getattr(self._config.lmstudio, "worker_base_url", "") or ""
+            if wb:
+                return wb
+        return self._config.lmstudio.base_url
 
     def _build_client(self) -> "OpenAI":
         try:
@@ -249,7 +292,7 @@ class LLMClient:
                 _t = 120.0
             _t = max(10.0, min(600.0, _t))
             return OpenAI(
-                base_url=self._config.lmstudio.base_url,
+                base_url=self._resolve_base_url(),
                 api_key=self._config.lmstudio.api_key,
                 timeout=_t,
             )
@@ -258,7 +301,16 @@ class LLMClient:
 
     @property
     def model(self) -> str:
+        role = getattr(self, "_role", "planner")
+        if role == "worker":
+            wm = getattr(self._config.lmstudio, "worker_model", "") or ""
+            if wm:
+                return wm
         return self._config.lmstudio.model
+
+    @property
+    def role(self) -> str:
+        return getattr(self, "_role", "planner")
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -306,6 +358,24 @@ class LLMClient:
 
         last_error: Exception | None = None
 
+        # Role-aware env lookup: when this client is the worker (built
+        # via ``LLMClient.for_worker``), each anti-thinking switch
+        # first checks ``LM_STUDIO_WORKER_<NAME>`` then falls back
+        # to the planner-side ``LM_STUDIO_<NAME>``. Lets the operator
+        # apply a model-specific recipe to the worker (e.g. PRELUDE on
+        # for qwen3.5-9b worker) without polluting the planner's call
+        # shape (qwen3-8b doesn't need it).
+        import os as _os
+        # ``__new__``-bypassed test doubles may not set ``_role``;
+        # default to planner so legacy fixtures keep working.
+        _role = getattr(self, "_role", "planner")
+        def _flag(name: str) -> bool:
+            v = ""
+            if _role == "worker":
+                v = _os.environ.get(f"LM_STUDIO_WORKER_{name}") or ""
+            if not v:
+                v = _os.environ.get(f"LM_STUDIO_{name}") or ""
+            return v.lower() in ("1", "true", "yes")
         # Optional: append the Qwen3 ``/no_think`` soft-switch to the LAST
         # user message when ``LM_STUDIO_DISABLE_THINKING=true``. Verified
         # 2026-04-23 against ``qwen/qwen3-8b`` on Mac: reasoning_tokens
@@ -313,10 +383,7 @@ class LLMClient:
         # don't recognise the suffix (DeepSeek-R1, Qwen3.5) — they treat
         # the trailing ``/no_think`` as harmless prose. Per-call: makes a
         # COPY of the messages list so the caller's data is untouched.
-        import os as _os
-        _disable_thinking = (
-            _os.environ.get("LM_STUDIO_DISABLE_THINKING") or ""
-        ).lower() in ("1", "true", "yes")
+        _disable_thinking = _flag("DISABLE_THINKING")
         # ``/no_think`` suffix in the message body — the Qwen3 family
         # soft-switch. Harmless prose to other models that don't
         # recognise it. Verified 2026-04-23 against ``qwen/qwen3-8b``:
@@ -336,7 +403,7 @@ class LLMClient:
         # 2026-04-24 against ``google/gemma-4-e4b`` on llmproxy SHORT
         # prompts: reasoning_content 684 → 0.
         _extra_body: dict | None = None
-        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING_TEMPLATE_KWARG") or "").lower() in ("1", "true", "yes"):
+        if _flag("DISABLE_THINKING_TEMPLATE_KWARG"):
             _extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
         # Optional third prong: top-level ``enable_thinking: false`` —
         # the only kill-switch exo's OpenAI-compat shim honors (verified
@@ -349,7 +416,7 @@ class LLMClient:
         # top-level field. Composes additively with the kwarg above —
         # backends that honor neither field (LM Studio) will reject
         # the unknown key, hence the explicit opt-in.
-        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING_TOPLEVEL") or "").lower() in ("1", "true", "yes"):
+        if _flag("DISABLE_THINKING_TOPLEVEL"):
             if _extra_body is None:
                 _extra_body = {}
             _extra_body["enable_thinking"] = False
@@ -365,7 +432,7 @@ class LLMClient:
         # its own env so the default LM Studio path stays unbroken;
         # opt in for reasoning models that ignore ``/no_think`` and
         # template kwargs (Qwen3.5, some DeepSeek-R1 variants).
-        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING_PRELUDE") or "").lower() in ("1", "true", "yes"):
+        if _flag("DISABLE_THINKING_PRELUDE"):
             messages = _prepend_no_think_prelude(messages)
 
         for attempt in range(retries):

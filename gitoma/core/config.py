@@ -34,6 +34,15 @@ class LMStudioConfig:
     api_key: str = "lm-studio"
     temperature: float = 0.3
     max_tokens: int = 4096
+    # ── Worker routing (2026-04-30) ────────────────────────────────────
+    # When set, the WORKER (PHASE 3 patches + critic panel + test gen)
+    # uses this endpoint/model instead of the planner's. Empty means
+    # "same as base_url/model". Mirrors the multi-model pattern already
+    # used by ``critic_panel.devil_*`` — same shape, scoped to the
+    # worker. Unblocks the parallel topology
+    # mm1=planner(qwen3-8b) + mm2=worker(qwen3.5-9b plan-from-file).
+    worker_base_url: str = ""
+    worker_model: str = ""
 
 
 @dataclass
@@ -147,6 +156,8 @@ def load_config() -> Config:
         api_key=os.getenv("LM_STUDIO_API_KEY", lm_raw.get("api_key", "lm-studio")),
         temperature=float(os.getenv("LM_STUDIO_TEMPERATURE", lm_raw.get("temperature", 0.3))),
         max_tokens=int(os.getenv("LM_STUDIO_MAX_TOKENS", lm_raw.get("max_tokens", 4096))),
+        worker_base_url=os.getenv("LM_STUDIO_WORKER_BASE_URL", lm_raw.get("worker_base_url", "")),
+        worker_model=os.getenv("LM_STUDIO_WORKER_MODEL", lm_raw.get("worker_model", "")),
     )
 
     # Pull defaults from the dataclass so they stay in ONE place. The
@@ -204,6 +215,8 @@ def save_config_value(key: str, value: str) -> None:
         "LM_STUDIO_API_KEY": ("lmstudio", "api_key"),
         "LM_STUDIO_TEMPERATURE": ("lmstudio", "temperature"),
         "LM_STUDIO_MAX_TOKENS": ("lmstudio", "max_tokens"),
+        "LM_STUDIO_WORKER_BASE_URL": ("lmstudio", "worker_base_url"),
+        "LM_STUDIO_WORKER_MODEL": ("lmstudio", "worker_model"),
         "CRITIC_PANEL_MODE": ("critic_panel", "mode"),
         "CRITIC_PANEL_PERSONAS": ("critic_panel", "personas"),
         "CRITIC_PANEL_DEVIL": ("critic_panel", "devil_advocate"),

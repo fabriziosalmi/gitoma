@@ -1359,8 +1359,24 @@ def run(
             # be None when the env opt-in isn't set OR the repo has
             # no Python — the worker treats None as "no CPG signal"
             # and silently skips BLAST RADIUS injection.
+            #
+            # Worker-route override: if `lmstudio.worker_base_url` or
+            # `worker_model` are set, build a sibling LLMClient with
+            # role="worker" so the worker hits a different endpoint /
+            # model than the planner (e.g. mm1=planner+qwen3-8b,
+            # mm2=worker+qwen3.5-9b). Same `llm` instance otherwise so
+            # backwards-compat is total.
+            from gitoma.planner.llm_client import LLMClient as _LLMClient
+            if config.lmstudio.worker_base_url or config.lmstudio.worker_model:
+                worker_llm = _LLMClient.for_worker(config)
+                console.print(
+                    f"[muted]Worker-route: {worker_llm.model} @ "
+                    f"{config.lmstudio.worker_base_url or config.lmstudio.base_url}[/muted]"
+                )
+            else:
+                worker_llm = llm
             worker = WorkerAgent(
-                llm=llm,
+                llm=worker_llm,
                 git_repo=git_repo,
                 config=config,
                 state=state,
