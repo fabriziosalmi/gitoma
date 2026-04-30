@@ -353,6 +353,20 @@ class LLMClient:
             if _extra_body is None:
                 _extra_body = {}
             _extra_body["enable_thinking"] = False
+        # Optional fourth prong: system-prompt prelude that explicitly
+        # forbids reasoning. The only kill-switch that works on Qwen3.5
+        # — verified 2026-04-30 against ``qwen/qwen3.5-9b`` on LM Studio:
+        # ``/no_think`` suffix ignored (3425 ch reasoning), template
+        # kwargs returned 502, top-level field unsupported. With this
+        # prelude reasoning_content collapsed 3425 → 391 chars (≈10×)
+        # and content rendered in 14.8s vs 182s out-of-box. Composes
+        # additively with the other 3 prongs — for backends that honor
+        # them, having the prelude AS WELL is harmless. Gated behind
+        # its own env so the default LM Studio path stays unbroken;
+        # opt in for reasoning models that ignore ``/no_think`` and
+        # template kwargs (Qwen3.5, some DeepSeek-R1 variants).
+        if (_os.environ.get("LM_STUDIO_DISABLE_THINKING_PRELUDE") or "").lower() in ("1", "true", "yes"):
+            messages = _prepend_no_think_prelude(messages)
 
         for attempt in range(retries):
             try:
@@ -501,6 +515,53 @@ class LLMClient:
 # ─────────────────────────────────────────────────────────────────────────────
 # JSON extraction helper
 # ─────────────────────────────────────────────────────────────────────────────
+
+_NO_THINK_PRELUDE = (
+    "NEVER output reasoning, thinking, analysis, <think> tags, or "
+    "chain-of-thought. Reply with ONLY the final answer — no preamble, "
+    "no commentary."
+)
+
+
+def _prepend_no_think_prelude(
+    messages: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Prepend a system-prompt prelude that forbids reasoning output.
+
+    Fourth prong of the no-think kill-switch family. Verified 2026-04-30
+    on ``qwen/qwen3.5-9b`` (LM Studio): the model ignores both
+    ``/no_think`` AND ``chat_template_kwargs={"enable_thinking": false}``,
+    but a system message that explicitly forbids thinking collapses
+    reasoning_content from 3425 → 391 chars and turnaround from 182s →
+    14.8s on a 1-line diff task.
+
+    Behaviour:
+      * Empty list → returned unchanged.
+      * Idempotent — the prelude string is a sentinel; if it appears
+        anywhere in any system message, no-op.
+      * If a system message already exists, prepend the prelude to its
+        content with ``\\n\\n`` separator. The directive goes FIRST so
+        the model sees "no thinking" before any task-specific persona.
+      * If no system message exists, insert a new one at index 0.
+
+    Returns a copy so the caller's messages list isn't mutated.
+    """
+    if not messages:
+        return messages
+    # Idempotency check across all system messages.
+    for m in messages:
+        if m.get("role") == "system" and _NO_THINK_PRELUDE in (m.get("content") or ""):
+            return [dict(m) for m in messages]
+    out = [dict(m) for m in messages]
+    # Find first system message.
+    for i, m in enumerate(out):
+        if m.get("role") == "system":
+            existing = m.get("content") or ""
+            out[i]["content"] = _NO_THINK_PRELUDE + "\n\n" + existing if existing else _NO_THINK_PRELUDE
+            return out
+    # No system message — insert a new one at the front.
+    return [{"role": "system", "content": _NO_THINK_PRELUDE}] + out
+
 
 def _append_no_think(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     """Append ``/no_think`` to the last user message's content.
