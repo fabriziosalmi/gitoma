@@ -1347,6 +1347,87 @@ def run(
                     save_state(state)
 
             console.print()
+            # ────────────────────────────────────────────────────
+            # PRE-EXECUTION BASELINES (G21 / G22)
+            # ────────────────────────────────────────────────────
+            # The semgrep + trivy baselines that G21/G22 use to detect
+            # NEW findings introduced by patches were originally
+            # computed inside the LLM-planner block (PHASE 1.6 + 1.8)
+            # — which means ``--plan-from-file`` runs silently lost
+            # them, and any adversarial patch slipped past G21/G22.
+            # Caught live 2026-04-30 EVE on bench-supply-chain: a plan
+            # adding `flask==0.12.0` (multiple known CVEs) was
+            # COMMITTED with no G22 fire. Fix: ensure baselines are
+            # populated regardless of plan source. Skipped when
+            # already populated by the planner branch, when env
+            # opt-out is set (GITOMA_PHASE16_OFF / GITOMA_PHASE18_OFF),
+            # or when the binary is not on PATH. Same silent-fail-open
+            # contract as PHASE 1.6 / 1.8 — never blocks the run.
+            if _semgrep_baseline is None:
+                _phase16_off_be = (
+                    os.environ.get("GITOMA_PHASE16_OFF") or ""
+                ).strip().lower() in ("1", "true", "yes")
+                if not _phase16_off_be:
+                    try:
+                        from gitoma.integrations.semgrep_scan import (
+                            SemgrepClient as _SgC,
+                        )
+                        from gitoma.worker.semgrep_regression import (
+                            compute_baseline_fingerprints as _sg_be,
+                            g21_severity_floor as _sg_be_floor,
+                        )
+                        _sg = _SgC()
+                        if _sg.enabled:
+                            _f = _sg.scan(git_repo.root, max_findings=500)
+                            if _f:
+                                _semgrep_baseline = _sg_be(
+                                    _f, severity_floor=_sg_be_floor(),
+                                )
+                                console.print(
+                                    f"[muted]Pre-exec: semgrep baseline "
+                                    f"= {len(_semgrep_baseline)} finding(s)[/muted]"
+                                )
+                    except Exception as _be_sg_exc:  # noqa: BLE001
+                        try:
+                            from gitoma.core.trace import current as _ct_be_sg
+                            _ct_be_sg().exception(
+                                "preexec.semgrep_baseline.failed", _be_sg_exc,
+                            )
+                        except Exception:
+                            pass
+            if _trivy_baseline is None:
+                _phase18_off_be = (
+                    os.environ.get("GITOMA_PHASE18_OFF") or ""
+                ).strip().lower() in ("1", "true", "yes")
+                if not _phase18_off_be:
+                    try:
+                        from gitoma.integrations.trivy_scan import (
+                            TrivyClient as _TvC,
+                        )
+                        from gitoma.worker.trivy_regression import (
+                            compute_trivy_baseline_fingerprints as _tv_be,
+                            g22_severity_floor as _tv_be_floor,
+                        )
+                        _tv = _TvC()
+                        if _tv.enabled:
+                            _tf = _tv.scan(git_repo.root, max_findings=500)
+                            if _tf:
+                                _trivy_baseline = _tv_be(
+                                    _tf, severity_floor=_tv_be_floor(),
+                                )
+                                console.print(
+                                    f"[muted]Pre-exec: trivy baseline "
+                                    f"= {len(_trivy_baseline)} finding(s)[/muted]"
+                                )
+                    except Exception as _be_tv_exc:  # noqa: BLE001
+                        try:
+                            from gitoma.core.trace import current as _ct_be_tv
+                            _ct_be_tv().exception(
+                                "preexec.trivy_baseline.failed", _be_tv_exc,
+                            )
+                        except Exception:
+                            pass
+
             # Compile-fix mode: active when the Build Integrity analyzer
             # reported failure at audit time. Propagates into the patcher
             # so build-manifest edits are hard-rejected, not merely
