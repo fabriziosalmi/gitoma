@@ -135,9 +135,12 @@ def build_pr_body(
     # Model attribution: collapses gracefully from 3-way → 2-way →
     # 1-way as roles share models. PR readers see exactly which
     # models played which role, no fluff when the topology is simple.
+    # ``getattr`` fallbacks defend against TaskPlan instances that
+    # predate the worker_model/review_model fields — e.g. resumed
+    # state files written before the schema bump 2026-05-01.
     _planner = plan.llm_model
-    _worker = plan.worker_model or _planner
-    _reviewer = plan.review_model or _planner
+    _worker = getattr(plan, "worker_model", "") or _planner
+    _reviewer = getattr(plan, "review_model", "") or _planner
     _distinct = {_planner, _worker, _reviewer}
     if len(_distinct) == 3:
         _model_label = (

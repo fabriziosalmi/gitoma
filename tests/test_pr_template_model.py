@@ -174,3 +174,24 @@ def test_taskplan_roundtrip_preserves_review_model() -> None:
     assert restored.llm_model == "A"
     assert restored.worker_model == "B"
     assert restored.review_model == "C"
+
+
+def test_legacy_plan_without_new_fields_renders_safely() -> None:
+    """Defends against resumed state files written before the
+    worker_model / review_model schema bump (2026-05-01). Caught
+    live on b2v R2 — process started before the schema change,
+    state held an in-memory TaskPlan without the new attributes,
+    PHASE 4 crashed with AttributeError. Templates must use
+    getattr fallbacks so old plans render as single-name format."""
+    plan = TaskPlan.__new__(TaskPlan)
+    plan.tasks = []
+    plan.llm_model = "legacy-model"
+    plan.created_at = "2026-04-29T00:00:00Z"
+    plan.overall_score_before = 0.0
+    # Intentionally do NOT set worker_model / review_model
+    body = build_pr_body(_make_report(), plan, branch="x", qa_result=None)
+    assert "Model: `legacy-model`" in body
+    assert "LM Studio · `legacy-model` local inference" in body
+    # No 3-way / 2-way labels emitted
+    assert "Planned by" not in body
+    assert "planner=" not in body
