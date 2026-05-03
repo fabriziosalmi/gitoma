@@ -200,7 +200,22 @@ class SelfCriticAgent:
                         ensemble_min_agree=self.min_agree,
                         per_member_findings=per_member,
                     )
-                findings = merge_ensemble_findings(per_member, self.min_agree)
+                # Operator-tunable Jaccard floor for title similarity.
+                # Default 0.4 — see ``_FUZZY_DEFAULT`` for the rationale.
+                # Validated on b2v PR #34 (2026-05-02 live-fire).
+                import os as _fz_os
+                try:
+                    _fz_threshold = float(
+                        _fz_os.environ.get("GITOMA_REVIEW_FUZZY_THRESHOLD")
+                        or _FUZZY_DEFAULT
+                    )
+                except ValueError:
+                    _fz_threshold = _FUZZY_DEFAULT
+                _fz_threshold = max(0.0, min(1.0, _fz_threshold))
+                findings = merge_ensemble_findings(
+                    per_member, self.min_agree,
+                    fuzzy_threshold=_fz_threshold,
+                )
                 raw_first = results.get(0, ("", [], None))[0]
                 _unique = {
                     _fingerprint(f)
@@ -428,64 +443,192 @@ def _coerce_finding(item: dict[str, Any]) -> Finding:
 
 
 def _fingerprint(f: Finding) -> tuple[str | None, int, str]:
-    """Bucket key for ensemble agreement (2026-05-02).
+    """Coarse bucket key for ensemble metrics (2026-05-02).
 
-    Tuple of ``(file, line // 5, normalised_title_prefix)``:
+    Tuple of ``(file, line // 5, normalised_title_prefix)``. Used by
+    trace events as a "how many distinct shapes did the ensemble
+    report" metric and by tests, but NO LONGER load-bearing in the
+    merge logic — that uses similarity clustering (see
+    ``_findings_match``) since hash-equality on title prefixes was
+    too stringent for LLM-natural paraphrasing.
 
-    * ``file`` — exact match required (no path canonicalisation, the
-      diff carries one canonical form per file).
-    * ``line // 5`` — bucket of 5 lines tolerates small offset
-      mismatches between reviewers reading the same defect. ``-1``
-      when ``line`` is None / non-int.
-    * ``normalised_title_prefix`` — lowercased, whitespace-collapsed,
-      first 60 chars. Stable enough to cluster paraphrases of the
-      same finding across models.
+    Caught live 2026-05-02 on b2v PR #34: three reviewers each
+    flagged the same wrong cargo command at ``performance.md:28``
+    but with titles "Incorrect cargo command in documentation" vs
+    "Incorrect cargo command in performance guide" — the trailing
+    words diverged and the prefix-hash dropped them into separate
+    buckets, yielding 0 consensus on a clearly-shared defect.
 
-    Severity is intentionally NOT in the fingerprint — two reviewers
-    flagging the same defect at ``major`` vs ``minor`` IS agreement,
-    and the merger keeps the most-severe vote.
+    Severity is intentionally NOT in the fingerprint — same defect
+    flagged at ``major`` vs ``minor`` IS agreement, and the merger
+    keeps the most-severe vote.
     """
     norm = re.sub(r"\s+", " ", (f.title or "").lower()).strip()[:60]
     bucket = (f.line // 5) if isinstance(f.line, int) else -1
     return (f.file, bucket, norm)
 
 
+# Title tokens shorter than this are treated as noise (English
+# function words like ``in``/``of``/``to`` are all 2 chars; ``the``
+# slips in at 3 but contributes harmlessly to both numerator and
+# denominator). Tuned empirically — 3 keeps the signal-to-noise
+# ratio in Jaccard high enough that paraphrases of the same defect
+# clear 0.4 while genuinely-different defects on the same line stay
+# below it.
+_TITLE_TOKEN_MIN_LEN = 3
+# Default Jaccard threshold for "two titles describe the same
+# defect". Operator-tunable via ``GITOMA_REVIEW_FUZZY_THRESHOLD``;
+# this is the SHIPPED default. Validated on b2v PR #34: 0.4 clusters
+# "incorrect cargo command in documentation" with "incorrect cargo
+# command in performance guide" (Jaccard ≈ 0.5) while keeping
+# "Prettier conflict" and "no-console rule" (Jaccard ≈ 0) apart on
+# the same line.
+_FUZZY_DEFAULT = 0.4
+
+
+def _title_tokens(s: str) -> set[str]:
+    """Lowercased alphanumeric tokens, dropping function-word noise."""
+    return {
+        t
+        for t in re.findall(r"[a-z0-9]+", (s or "").lower())
+        if len(t) >= _TITLE_TOKEN_MIN_LEN
+    }
+
+
+def _title_jaccard(a: str, b: str) -> float:
+    """Token-set Jaccard similarity between two titles (0.0 to 1.0)."""
+    ta, tb = _title_tokens(a), _title_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return inter / union if union else 0.0
+
+
+def _line_bucket(line: int | None) -> int:
+    """Coarse bucket-of-5 for trace metrics + ``_fingerprint``.
+
+    No longer used by the merger — see ``_lines_close`` for the new
+    absolute-distance gate that handles bucket-boundary edge cases.
+    """
+    return (line // 5) if isinstance(line, int) else -1
+
+
+# Maximum line distance for two findings to count as locally "close".
+# Bucket equality (line // 5) had a boundary bug — finding @14 and
+# @15 fall into bucket 2 and 3 respectively, so adjacent-line
+# observations were rejected. Caught live 2026-05-02 on b2v PR #34
+# round 2 (eslint.config.js:14 vs :15). Absolute distance is
+# bucket-boundary free.
+_LINE_NEAR_DELTA = 5
+
+
+def _lines_close(a: int | None, b: int | None) -> bool:
+    """True if both lines are absent OR within ``_LINE_NEAR_DELTA``.
+
+    Two file-less findings (line=None) count as close — file equality
+    is the locality gate in that case. Mixed (one None, one int)
+    means one reviewer was specific and the other wasn't; treat that
+    as NOT close — the pinning reviewer saw something the other
+    didn't.
+    """
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    return abs(a - b) <= _LINE_NEAR_DELTA
+
+
+def _findings_match(a: Finding, b: Finding, *, threshold: float = _FUZZY_DEFAULT) -> bool:
+    """Two findings describe the same defect iff:
+
+    * same ``file`` (None counts as a distinct value, so two file-less
+      findings with similar titles can still match)
+    * lines within ``_LINE_NEAR_DELTA`` (or both None — see
+      ``_lines_close``); tolerates small offset drift between
+      reviewers reading the same defect
+    * Jaccard(title tokens) ≥ ``threshold``
+
+    The triple gate keeps the precision/recall balance: file + line
+    locality blocks spurious cross-file matches, and the Jaccard
+    floor permits LLM-natural paraphrasing without merging
+    genuinely-different defects on the same line.
+    """
+    if a.file != b.file:
+        return False
+    if not _lines_close(a.line, b.line):
+        return False
+    return _title_jaccard(a.title, b.title) >= threshold
+
+
 def merge_ensemble_findings(
     per_member: list[list[Finding]],
     min_agree: int,
+    *,
+    fuzzy_threshold: float | None = None,
 ) -> list[Finding]:
-    """Fold N reviewers' findings into a single list by ≥N-of-M agreement.
+    """Fold N reviewers' findings into one list by ≥M-of-N agreement.
 
-    For each unique fingerprint, keep the finding only if it appears
-    in at least ``min_agree`` distinct member lists. When kept, the
-    output finding takes the highest severity across votes (lowest
-    rank wins — ``blocker`` over ``major`` over ``minor``) and the
-    longest detail (more information beats less).
+    Algorithm: greedy single-link clustering by ``_findings_match``.
+    Each finding is attached to the first existing cluster where ANY
+    representative matches; otherwise a new cluster is opened. A
+    cluster is kept iff the set of distinct member indices that
+    contributed to it has size ≥ ``min_agree``.
 
-    Returns findings sorted by (severity rank, file, line) so the
+    Within-member dedupe is implicit: ``cluster["members"]`` is a
+    set, so a chatty reviewer reporting the same defect 3× still
+    contributes a single vote. The "1 finding clusters with 0 other
+    members" case correctly yields a 1-vote cluster that fails the
+    floor (≥2).
+
+    For each kept cluster the merged finding inherits:
+
+    * highest severity across votes (lowest rank wins — blocker over
+      major over minor over nit)
+    * longest detail (more information beats less, ties broken by
+      first occurrence)
+    * file + line + title from the highest-severity representative
+
+    Returns findings sorted by ``(severity rank, file, line)`` so the
     PR comment reads top-down by importance, matching the solo path.
+
+    Cost is O(N²) on the total finding count summed across members.
+    With typical N ≈ 5-20 findings × 3 reviewers, this is trivial.
+
+    The ``fuzzy_threshold`` kwarg overrides the default Jaccard floor
+    for tests; production callers normally read it from the env via
+    ``GITOMA_REVIEW_FUZZY_THRESHOLD`` (handled in ``review_pr``).
     """
     if min_agree <= 0:
         min_agree = 1
-    # Within a single member's list, dedupe by fingerprint first so
-    # one chatty reviewer can't satisfy the threshold alone.
-    buckets: dict[tuple[str | None, int, str], list[Finding]] = {}
-    for member in per_member:
-        seen_in_member: set[tuple[str | None, int, str]] = set()
+    threshold = _FUZZY_DEFAULT if fuzzy_threshold is None else fuzzy_threshold
+
+    # Each cluster: list of votes + set of contributing member indices.
+    clusters: list[dict[str, Any]] = []
+
+    for member_idx, member in enumerate(per_member):
         for f in member:
-            fp = _fingerprint(f)
-            if fp in seen_in_member:
-                continue
-            seen_in_member.add(fp)
-            buckets.setdefault(fp, []).append(f)
+            attached_to: int | None = None
+            for ci, cluster in enumerate(clusters):
+                if any(
+                    _findings_match(f, rep, threshold=threshold)
+                    for rep in cluster["votes"]
+                ):
+                    attached_to = ci
+                    break
+            if attached_to is None:
+                clusters.append({"votes": [f], "members": {member_idx}})
+            else:
+                clusters[attached_to]["votes"].append(f)
+                clusters[attached_to]["members"].add(member_idx)
 
     kept: list[Finding] = []
-    for fp, votes in buckets.items():
-        if len(votes) < min_agree:
+    for cluster in clusters:
+        if len(cluster["members"]) < min_agree:
             continue
+        votes = cluster["votes"]
         votes_sorted = sorted(votes, key=lambda f: f.rank())
         best = votes_sorted[0]
-        # Longest detail across votes. Tie → first.
         detail = max((v.detail or "" for v in votes), key=len, default="")
         kept.append(Finding(
             severity=best.severity,

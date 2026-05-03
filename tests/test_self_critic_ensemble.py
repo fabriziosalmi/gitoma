@@ -22,7 +22,10 @@ from unittest.mock import MagicMock
 from gitoma.review.self_critic import (
     Finding,
     SelfCriticAgent,
+    _findings_match,
     _fingerprint,
+    _title_jaccard,
+    _title_tokens,
     merge_ensemble_findings,
     render_comment_body,
 )
@@ -146,6 +149,150 @@ def test_merge_zero_min_agree_clamped_to_one():
 def test_merge_empty_inputs_returns_empty():
     assert merge_ensemble_findings([], min_agree=2) == []
     assert merge_ensemble_findings([[], [], []], min_agree=2) == []
+
+
+# ── Fuzzy similarity (2026-05-02) — closes b2v PR #34 live-fire gap ─────────
+
+
+def test_title_tokens_drops_short_words():
+    """Function-word noise (in/of/to/at) must not pollute the Jaccard."""
+    assert "in" not in _title_tokens("incorrect cargo command in performance guide")
+    assert "command" in _title_tokens("incorrect cargo command in performance guide")
+
+
+def test_title_jaccard_paraphrase_clusters():
+    """The exact b2v PR #34 case: same defect, different trailing words."""
+    a = "Incorrect cargo command in documentation"
+    b = "Incorrect cargo command in performance guide"
+    j = _title_jaccard(a, b)
+    assert j >= 0.4, f"expected ≥0.4 to cluster, got {j:.2f}"
+
+
+def test_title_jaccard_disjoint_titles_below_floor():
+    """Different defects on the same file:line must NOT cluster."""
+    a = "Potential ESLint-Prettier conflict"
+    b = "no-console: 'off' without justification comment"
+    assert _title_jaccard(a, b) < 0.4
+
+
+def test_title_jaccard_handles_empty_inputs():
+    assert _title_jaccard("", "anything") == 0.0
+    assert _title_jaccard("anything", "") == 0.0
+    assert _title_jaccard("", "") == 0.0
+
+
+def test_findings_match_locality_gate():
+    """Same title, different file → no match (locality wins over similarity)."""
+    a = _f("major", "a.py", 10, "magic number")
+    b = _f("major", "b.py", 10, "magic number")
+    assert _findings_match(a, b) is False
+
+
+def test_findings_match_line_bucket_gate():
+    """Same file + title, distant lines → no match."""
+    a = _f("major", "a.py", 10, "magic number")
+    b = _f("major", "a.py", 100, "magic number")
+    assert _findings_match(a, b) is False
+
+
+def test_findings_match_adjacent_lines_across_bucket_boundary():
+    """Lines @14 and @15 are 1 apart but the old bucket scheme put
+    them in different buckets (14//5=2 vs 15//5=3). Caught live
+    2026-05-02 on b2v PR #34 round 2 — eslint.config.js:14 and :15
+    on the same defect family. Absolute-distance gate fixes it."""
+    a = _f("major", "a.py", 14, "magic number")
+    b = _f("major", "a.py", 15, "magic number")
+    assert _findings_match(a, b) is True
+
+
+def test_findings_match_lines_5_apart_inclusive():
+    """Boundary: ``_LINE_NEAR_DELTA`` is inclusive — exactly 5 apart
+    still matches; 6 apart does not."""
+    base = _f("major", "a.py", 10, "magic number")
+    five_apart = _f("major", "a.py", 15, "magic number")
+    six_apart = _f("major", "a.py", 16, "magic number")
+    assert _findings_match(base, five_apart) is True
+    assert _findings_match(base, six_apart) is False
+
+
+def test_findings_match_one_pinned_one_unpinned_no_match():
+    """One reviewer specifies a line, the other doesn't. The pinned
+    reviewer saw locality the other missed — treat as not-same-defect."""
+    a = _f("major", "a.py", 10, "magic number")
+    b = _f("major", "a.py", None, "magic number")
+    assert _findings_match(a, b) is False
+
+
+def test_findings_match_both_unpinned_can_still_match():
+    """Two file-level findings (line=None) on the same file with
+    similar titles cluster — locality is satisfied by file equality."""
+    a = _f("major", "a.py", None, "missing license header")
+    b = _f("major", "a.py", None, "no license header at top of file")
+    assert _findings_match(a, b) is True
+
+
+def test_findings_match_paraphrase():
+    """The b2v PR #34 case end-to-end: same file, same line bucket,
+    paraphrased title → match."""
+    a = _f("major", "perf.md", 28, "Incorrect cargo command in documentation")
+    b = _f("major", "perf.md", 28, "Incorrect cargo command in performance guide")
+    assert _findings_match(a, b) is True
+
+
+def test_findings_match_threshold_kwarg():
+    """Tunable threshold lets ops loosen / tighten clustering at will."""
+    a = _f("major", "x.py", 10, "alpha beta gamma")
+    b = _f("major", "x.py", 10, "alpha delta epsilon")
+    # 1/5 = 0.2 — fails default 0.4
+    assert _findings_match(a, b) is False
+    # Same pair clears a 0.15 floor.
+    assert _findings_match(a, b, threshold=0.15) is True
+
+
+def test_merge_clusters_paraphrased_titles_2of3():
+    """The PR #34 live-fire case verbatim: 2-of-3 reviewers describe
+    the same defect with different trailing wording. Old hash-equal
+    fingerprint dropped both into separate buckets and yielded 0
+    consensus; fuzzy clustering must keep it."""
+    a = [_f("major", "perf.md", 28, "Incorrect cargo command in documentation")]
+    b = [_f("major", "perf.md", 28, "Incorrect cargo command in performance guide")]
+    c = [_f("nit", "other.md", 5, "totally unrelated")]
+    out = merge_ensemble_findings([a, b, c], min_agree=2)
+    assert len(out) == 1
+    assert "cargo command" in out[0].title.lower()
+
+
+def test_merge_does_not_cluster_distinct_defects_on_same_line():
+    """Same file:line but genuinely-different defects must stay split."""
+    a = [_f("major", "eslint.config.js", 10, "Potential ESLint-Prettier conflict")]
+    b = [_f("minor", "eslint.config.js", 10,
+            "no-console: 'off' without justification comment")]
+    out = merge_ensemble_findings([a, b], min_agree=2)
+    assert out == []
+
+
+def test_merge_chatty_reviewer_paraphrasing_still_one_vote():
+    """Within-member dedupe must work under fuzzy clustering: a single
+    reviewer rephrasing the same defect 3 times still gives 1 vote."""
+    a = [
+        _f("major", "x.py", 10, "magic number used for scaling"),
+        _f("major", "x.py", 11, "scaling magic number is unnamed"),
+        _f("major", "x.py", 12, "magic scaling constant should be named"),
+    ]
+    b = []
+    out = merge_ensemble_findings([a, b], min_agree=2)
+    assert out == []
+
+
+def test_merge_threshold_kwarg_loosens_clustering():
+    """The kwarg lets tests force partial overlaps to cluster."""
+    a = [_f("major", "x.py", 10, "alpha beta gamma")]
+    b = [_f("major", "x.py", 10, "alpha delta epsilon")]
+    # Default 0.4 — Jaccard 1/5 = 0.2 → no cluster.
+    assert merge_ensemble_findings([a, b], min_agree=2) == []
+    # Loosened — same pair now clusters.
+    out = merge_ensemble_findings([a, b], min_agree=2, fuzzy_threshold=0.15)
+    assert len(out) == 1
 
 
 # ── render_comment_body — ensemble header ────────────────────────────────────
