@@ -60,6 +60,29 @@ class LMStudioConfig:
     # pattern; LLMClient role="reviewer" picks these up.
     review_base_url: str = ""
     review_model: str = ""
+    # ── Reviewer ENSEMBLE routing (2026-05-02) ─────────────────────────
+    # Comma-separated parallel lists. When BOTH are non-empty AND the
+    # same length, PHASE 5 fans out to N reviewers in parallel and
+    # only reports findings that ≥ ``review_ensemble_min_agree`` of
+    # them flag (fingerprint match). Singular ``review_base_url`` /
+    # ``review_model`` take effect when the plurals are empty —
+    # backward-compat is total. b2v PR #34 (2026-05-01) showed solo
+    # gemma-4-e2b reviewer missed hallucinated nav-links + boilerplate;
+    # 2-of-3 agreement kills false positives without losing signal.
+    review_base_urls: str = ""
+    review_models: str = ""
+    review_ensemble_min_agree: int = 2
+
+    def parsed_review_base_urls(self) -> list[str]:
+        return [u.strip() for u in (self.review_base_urls or "").split(",") if u.strip()]
+
+    def parsed_review_models(self) -> list[str]:
+        return [m.strip() for m in (self.review_models or "").split(",") if m.strip()]
+
+    def is_review_ensemble(self) -> bool:
+        urls = self.parsed_review_base_urls()
+        models = self.parsed_review_models()
+        return bool(urls) and bool(models) and len(urls) == len(models) and len(urls) >= 2
 
 
 @dataclass
@@ -178,6 +201,12 @@ def load_config() -> Config:
         worker_max_tokens=int(os.getenv("LM_STUDIO_WORKER_MAX_TOKENS", lm_raw.get("worker_max_tokens", 0))),
         review_base_url=os.getenv("LM_STUDIO_REVIEW_BASE_URL", lm_raw.get("review_base_url", "")),
         review_model=os.getenv("LM_STUDIO_REVIEW_MODEL", lm_raw.get("review_model", "")),
+        review_base_urls=os.getenv("LM_STUDIO_REVIEW_BASE_URLS", lm_raw.get("review_base_urls", "")),
+        review_models=os.getenv("LM_STUDIO_REVIEW_MODELS", lm_raw.get("review_models", "")),
+        review_ensemble_min_agree=int(os.getenv(
+            "LM_STUDIO_REVIEW_ENSEMBLE_MIN_AGREE",
+            lm_raw.get("review_ensemble_min_agree", 2),
+        )),
     )
 
     # Pull defaults from the dataclass so they stay in ONE place. The

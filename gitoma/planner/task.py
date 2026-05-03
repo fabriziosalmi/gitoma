@@ -80,6 +80,13 @@ class TaskPlan:
     # (LM_STUDIO_REVIEW_MODEL set). Same shape as worker_model.
     # Empty when reviewer falls back to the planner client.
     review_model: str = ""
+    # Reviewer ENSEMBLE members + agreement floor (2026-05-02). When
+    # populated (len >= 2), PHASE 5 fanned out across N reviewers and
+    # the PR template renders the ensemble shape instead of the
+    # single ``review_model``. Empty list means no ensemble (solo or
+    # planner-fallback path). ``review_min_agree`` 0 means "n/a".
+    review_models: list[str] = field(default_factory=list)
+    review_min_agree: int = 0
 
     @property
     def total_tasks(self) -> int:
@@ -104,6 +111,8 @@ class TaskPlan:
             "llm_model": self.llm_model,
             "worker_model": self.worker_model,
             "review_model": self.review_model,
+            "review_models": list(self.review_models),
+            "review_min_agree": self.review_min_agree,
             "tasks": [t.to_dict() for t in self.tasks],
         }
 

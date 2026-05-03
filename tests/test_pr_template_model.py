@@ -195,3 +195,90 @@ def test_legacy_plan_without_new_fields_renders_safely() -> None:
     # No 3-way / 2-way labels emitted
     assert "Planned by" not in body
     assert "planner=" not in body
+
+
+# ── Reviewer ENSEMBLE attribution (2026-05-02) ──────────────────────────────
+
+def test_ensemble_renders_members_and_min_agree() -> None:
+    """When review_models has ≥2 entries and review_min_agree ≥ 2,
+    header + footer announce the ensemble shape so PR readers know
+    findings already passed the agreement floor."""
+    plan = TaskPlan(
+        tasks=[],
+        llm_model="qwen/qwen3-8b",
+        worker_model="qwen/qwen3.5-9b",
+        review_models=[
+            "qwen/qwen3-8b",
+            "qwen/qwen3-8b",
+            "qwen/qwen3.5-9b",
+        ],
+        review_min_agree=2,
+    )
+    body = build_pr_body(_make_report(), plan, branch="x", qa_result=None)
+    assert "Planned by `qwen/qwen3-8b`" in body
+    assert "Coded by `qwen/qwen3.5-9b`" in body
+    assert "ensemble 2/3" in body
+    # Each ensemble member appears in the header.
+    for m in ("`qwen/qwen3-8b`", "`qwen/qwen3.5-9b`"):
+        assert m in body
+    # Footer carries the ensemble shape too.
+    assert "reviewer ensemble 2/3" in body
+
+
+def test_ensemble_with_planner_equals_worker_collapses_planner_coder() -> None:
+    """Planner == worker but ensemble distinct → single planner/coder
+    line + ensemble line."""
+    plan = TaskPlan(
+        tasks=[],
+        llm_model="qwen/qwen3-8b",
+        worker_model="",  # falls back to planner
+        review_models=["m-A", "m-B"],
+        review_min_agree=2,
+    )
+    body = build_pr_body(_make_report(), plan, branch="x", qa_result=None)
+    assert "Planned/coded by `qwen/qwen3-8b`" in body
+    assert "ensemble 2/2" in body
+
+
+def test_ensemble_min_agree_1_falls_back_to_solo_render() -> None:
+    """``review_min_agree`` < 2 means "not really an ensemble" — the
+    template should fall through to the solo / 3-way collapse path
+    instead of announcing an ensemble. Defensive against partial
+    state file writes."""
+    plan = TaskPlan(
+        tasks=[],
+        llm_model="A",
+        worker_model="",
+        review_models=["X", "Y"],
+        review_min_agree=1,
+    )
+    body = build_pr_body(_make_report(), plan, branch="x", qa_result=None)
+    assert "ensemble" not in body.lower()
+
+
+def test_ensemble_with_single_member_falls_back_to_solo_render() -> None:
+    """``review_models`` with len < 2 is degenerate — render solo/3-way
+    even if ``review_min_agree`` is set."""
+    plan = TaskPlan(
+        tasks=[],
+        llm_model="A",
+        worker_model="",
+        review_models=["only-one"],
+        review_min_agree=2,
+    )
+    body = build_pr_body(_make_report(), plan, branch="x", qa_result=None)
+    assert "ensemble" not in body.lower()
+
+
+def test_taskplan_roundtrip_preserves_ensemble_fields() -> None:
+    plan = TaskPlan(
+        tasks=[],
+        llm_model="A",
+        worker_model="B",
+        review_model="C",
+        review_models=["X", "Y", "Z"],
+        review_min_agree=2,
+    )
+    restored = TaskPlan.from_dict(plan.to_dict())
+    assert restored.review_models == ["X", "Y", "Z"]
+    assert restored.review_min_agree == 2

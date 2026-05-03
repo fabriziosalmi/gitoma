@@ -240,13 +240,29 @@ class LLMClient:
          the planner's call shape (qwen3-8b doesn't need it).
     """
 
-    def __init__(self, config: Config, *, role: str = "planner") -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        role: str = "planner",
+        base_url_override: str = "",
+        model_override: str = "",
+    ) -> None:
         if role not in ("planner", "worker", "reviewer"):
             raise ValueError(
                 f"role must be 'planner', 'worker', or 'reviewer', got {role!r}"
             )
         self._config = config
         self._role = role
+        # Per-instance endpoint+model override — used by reviewer
+        # ENSEMBLE members (2026-05-02). Each ensemble member is a
+        # full LLMClient with its own (base_url, model) pair, but the
+        # role-aware anti-thinking + max_tokens lookups still apply
+        # because ``role`` stays "reviewer". Empty strings fall back
+        # to the role-aware config resolution (preserves single-
+        # reviewer + worker + planner behaviour exactly).
+        self._base_url_override = base_url_override or ""
+        self._model_override = model_override or ""
         # Build the client lazily to avoid import-time failures
         self._client = self._build_client()
         # Last call's token usage, populated by chat() on success.
@@ -288,10 +304,47 @@ class LLMClient:
         """
         return cls(config, role="reviewer")
 
+    @classmethod
+    def for_reviewer_ensemble(cls, config: Config) -> list["LLMClient"]:
+        """Build the list of reviewer ENSEMBLE clients (2026-05-02).
+
+        Returns one ``LLMClient`` per (base_url, model) pair parsed
+        from ``LM_STUDIO_REVIEW_BASE_URLS`` / ``LM_STUDIO_REVIEW_MODELS``
+        (comma-separated, parallel lists). Each client is tagged
+        ``role="reviewer"`` so the role-aware anti-thinking +
+        max_tokens lookups stay consistent across members. Returns
+        ``[]`` when ensemble config is absent or malformed (lengths
+        mismatch / fewer than 2 members) — caller falls back to the
+        solo ``for_reviewer`` path.
+
+        Closes the b2v PR #34 (2026-05-01) post-mortem: solo gemma-4-e2b
+        reviewer flagged "no issues" on a diff with hallucinated
+        nav-links + boilerplate. ≥2-of-N agreement across diverse
+        reviewers kills the "single model blind spot" failure mode.
+        """
+        lm = config.lmstudio
+        if not getattr(lm, "is_review_ensemble", lambda: False)():
+            return []
+        urls = lm.parsed_review_base_urls()
+        models = lm.parsed_review_models()
+        return [
+            cls(
+                config,
+                role="reviewer",
+                base_url_override=u,
+                model_override=m,
+            )
+            for u, m in zip(urls, models)
+        ]
+
     def _resolve_base_url(self) -> str:
         # ``getattr`` fallbacks support test doubles that bypass __init__
         # via ``LLMClient.__new__`` and never set ``_role`` /
         # ``worker_base_url`` on a MagicMock'd config.
+        # Per-instance ensemble override wins over role/config lookup.
+        ovr = getattr(self, "_base_url_override", "") or ""
+        if ovr:
+            return ovr
         role = getattr(self, "_role", "planner")
         if role == "worker":
             wb = getattr(self._config.lmstudio, "worker_base_url", "") or ""
@@ -326,6 +379,9 @@ class LLMClient:
 
     @property
     def model(self) -> str:
+        ovr = getattr(self, "_model_override", "") or ""
+        if ovr:
+            return ovr
         role = getattr(self, "_role", "planner")
         if role == "worker":
             wm = getattr(self._config.lmstudio, "worker_model", "") or ""

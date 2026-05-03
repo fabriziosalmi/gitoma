@@ -1466,7 +1466,32 @@ def run(
             # Reviewer-route stamp (PHASE 5 self-critic builds its own
             # client at run time; here we stamp the plan ahead of
             # PR-body generation so attribution is accurate).
-            if (
+            # Three-way precedence (ensemble > solo > fallback) mirrors
+            # SelfCriticAgent.__init__.
+            if getattr(config.lmstudio, "is_review_ensemble", lambda: False)():
+                _rev_clients = _LLMClient.for_reviewer_ensemble(config)
+                _rev_models = [c.model for c in _rev_clients]
+                _rev_urls = config.lmstudio.parsed_review_base_urls()
+                _min_agree = max(2, int(getattr(
+                    config.lmstudio, "review_ensemble_min_agree", 2,
+                )))
+                _min_agree = min(_min_agree, len(_rev_clients))
+                console.print(
+                    f"[muted]Reviewer ensemble {_min_agree}/{len(_rev_clients)}: "
+                    + ", ".join(
+                        f"{m} @ {u}" for m, u in zip(_rev_models, _rev_urls)
+                    )
+                    + "[/muted]"
+                )
+                plan.review_models = _rev_models
+                plan.review_min_agree = _min_agree
+                # Stamp singular review_model with the first member so
+                # legacy diary / state readers still get a non-empty
+                # name. The ensemble fields take precedence in the PR
+                # template renderer.
+                if _rev_models and _rev_models[0] != llm.model:
+                    plan.review_model = _rev_models[0]
+            elif (
                 config.lmstudio.review_base_url
                 or config.lmstudio.review_model
             ):

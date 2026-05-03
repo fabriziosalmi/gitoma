@@ -141,25 +141,50 @@ def build_pr_body(
     _planner = plan.llm_model
     _worker = getattr(plan, "worker_model", "") or _planner
     _reviewer = getattr(plan, "review_model", "") or _planner
-    _distinct = {_planner, _worker, _reviewer}
-    if len(_distinct) == 3:
-        _model_label = (
-            f"Planned by `{_planner}` · Coded by `{_worker}` "
-            f"· Reviewed by `{_reviewer}`"
+    _ensemble = list(getattr(plan, "review_models", []) or [])
+    _min_agree = int(getattr(plan, "review_min_agree", 0) or 0)
+    if _ensemble and len(_ensemble) >= 2 and _min_agree >= 2:
+        # Reviewer ENSEMBLE path (2026-05-02). Show planner + worker
+        # collapse if same, then enumerate ensemble members + agreement
+        # floor. ``review_model`` (singular) is ignored on this branch.
+        _members = ", ".join(f"`{m}`" for m in _ensemble)
+        _ensemble_label = (
+            f"Reviewed by ensemble {_min_agree}/{len(_ensemble)}: {_members}"
         )
-        _footer_model = (
-            f"`{_planner}` (planner) + `{_worker}` (coder) "
-            f"+ `{_reviewer}` (reviewer)"
+        _ensemble_footer = (
+            f"reviewer ensemble {_min_agree}/{len(_ensemble)} "
+            f"({', '.join(f'`{m}`' for m in _ensemble)})"
         )
-    elif _worker != _planner:
-        _model_label = f"planner=`{_planner}` · worker=`{_worker}`"
-        _footer_model = f"`{_planner}` (planner) + `{_worker}` (worker)"
-    elif _reviewer != _planner:
-        _model_label = f"planner=`{_planner}` · reviewer=`{_reviewer}`"
-        _footer_model = f"`{_planner}` (planner) + `{_reviewer}` (reviewer)"
+        if _worker != _planner:
+            _model_label = (
+                f"Planned by `{_planner}` · Coded by `{_worker}` · {_ensemble_label}"
+            )
+            _footer_model = (
+                f"`{_planner}` (planner) + `{_worker}` (coder) + {_ensemble_footer}"
+            )
+        else:
+            _model_label = f"Planned/coded by `{_planner}` · {_ensemble_label}"
+            _footer_model = f"`{_planner}` (planner+coder) + {_ensemble_footer}"
     else:
-        _model_label = f"`{_planner}`"
-        _footer_model = f"`{_planner}`"
+        _distinct = {_planner, _worker, _reviewer}
+        if len(_distinct) == 3:
+            _model_label = (
+                f"Planned by `{_planner}` · Coded by `{_worker}` "
+                f"· Reviewed by `{_reviewer}`"
+            )
+            _footer_model = (
+                f"`{_planner}` (planner) + `{_worker}` (coder) "
+                f"+ `{_reviewer}` (reviewer)"
+            )
+        elif _worker != _planner:
+            _model_label = f"planner=`{_planner}` · worker=`{_worker}`"
+            _footer_model = f"`{_planner}` (planner) + `{_worker}` (worker)"
+        elif _reviewer != _planner:
+            _model_label = f"planner=`{_planner}` · reviewer=`{_reviewer}`"
+            _footer_model = f"`{_planner}` (planner) + `{_reviewer}` (reviewer)"
+        else:
+            _model_label = f"`{_planner}`"
+            _footer_model = f"`{_planner}`"
 
     return f"""## 🤖 Gitoma Automated Improvement PR
 

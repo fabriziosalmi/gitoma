@@ -143,6 +143,13 @@ def _make_agent(mocker, llm_response: str):
     # Tests that want to exercise the reviewer route should override.
     mock_config.lmstudio.review_base_url = ""
     mock_config.lmstudio.review_model = ""
+    # Explicit ensemble disables (2026-05-02). MagicMock auto-vivifies
+    # any unset attribute as a truthy MagicMock, which would falsely
+    # trip the ensemble branch. Pin them to concrete falsy values.
+    mock_config.lmstudio.is_review_ensemble = lambda: False
+    mock_config.lmstudio.parsed_review_base_urls = lambda: []
+    mock_config.lmstudio.parsed_review_models = lambda: []
+    mock_config.lmstudio.review_ensemble_min_agree = 2
 
     llm_instance = MagicMock()
     llm_instance.chat.return_value = llm_response
