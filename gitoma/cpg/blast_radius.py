@@ -21,7 +21,7 @@ the result string (the worker passes it via
 
 from __future__ import annotations
 
-from gitoma.cpg._base import RefKind, SymbolKind
+from gitoma.cpg._base import SymbolKind
 from gitoma.cpg.queries import CPGIndex
 
 __all__ = [
