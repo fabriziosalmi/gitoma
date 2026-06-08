@@ -36,12 +36,10 @@ existing tests), anti-sycophancy system prompt.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
 from copy import deepcopy
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gitoma.core.trace import current as current_trace
