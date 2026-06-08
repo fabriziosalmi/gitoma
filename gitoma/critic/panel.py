@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from gitoma.core.trace import current as current_trace
 from gitoma.critic.personas import system_prompt_for
