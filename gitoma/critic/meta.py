@@ -19,7 +19,6 @@ v1) — the safer default. The trace records the failure.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import TYPE_CHECKING, Literal
 
