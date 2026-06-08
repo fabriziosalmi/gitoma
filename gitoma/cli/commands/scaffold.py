@@ -33,7 +33,6 @@ FIRST, then let the LLM-driven `gitoma run` polish the result.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
@@ -46,7 +45,6 @@ from gitoma.core.github_client import GitHubClient
 from gitoma.core.repo import GitRepo, parse_repo_url
 from gitoma.integrations.occam_trees import (
     OccamTreesClient,
-    OccamTreesUnavailable,
     ResolvedScaffold,
 )
 from gitoma.ui.console import console
