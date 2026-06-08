@@ -16,7 +16,6 @@ whether to keep it or revert. Default conservative: keep v0 on tie.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from gitoma.core.trace import current as current_trace
