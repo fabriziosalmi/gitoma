@@ -31,8 +31,8 @@ import os
 from typing import Any
 
 from gitoma.analyzers.base import MetricReport
-from gitoma.planner.task import SubTask, Task, TaskPlan
-from gitoma.verticals import VERTICALS, Vertical, get_vertical
+from gitoma.planner.task import SubTask, TaskPlan
+from gitoma.verticals import Vertical, get_vertical
 from gitoma.verticals.docs import DOCS_VERTICAL
 
 __all__ = [
