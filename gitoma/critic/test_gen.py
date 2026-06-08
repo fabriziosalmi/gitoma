@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from gitoma.cpg._base import Symbol
-from gitoma.cpg.diff import INDEXABLE_EXTS, diff_symbols
+from gitoma.cpg.diff import diff_symbols
 from gitoma.critic.test_gen_prompts import (
     LANG_SPECS,
     LangSpec,
