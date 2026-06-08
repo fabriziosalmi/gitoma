@@ -28,7 +28,6 @@ defined on direct call refs only.
 
 from __future__ import annotations
 
-from typing import Iterable
 
 from gitoma.cpg._base import Reference, RefKind, Symbol, SymbolKind
 from gitoma.cpg.storage import Storage
