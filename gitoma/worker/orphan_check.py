@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from gitoma.cpg._base import Reference, RefKind, Symbol, SymbolKind
+from gitoma.cpg._base import RefKind, Symbol, SymbolKind
 from gitoma.cpg.diff import DEFINING_KINDS, INDEXABLE_EXTS, index_text_to_storage
 from gitoma.cpg.storage import Storage
 
