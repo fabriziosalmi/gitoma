@@ -25,7 +25,6 @@ budget; renderer truncates with a marker when hit.
 
 from __future__ import annotations
 
-from typing import Any
 
 from gitoma.cpg._base import Symbol, SymbolKind
 from gitoma.cpg.queries import CPGIndex
