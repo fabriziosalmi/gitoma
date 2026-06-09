@@ -6,9 +6,7 @@ the original rung-0 evidence."""
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 from gitoma.analyzers.base import MetricResult, MetricReport
 from gitoma.planner.real_bug_filter import (
