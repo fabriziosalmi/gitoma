@@ -19,9 +19,7 @@ from pydantic import ValidationError
 
 from gitoma.critic.qa import _DEFENDER_SYSTEM, _QUESTIONER_SYSTEM, _validate_evidence
 from gitoma.critic.types import (
-    LLMQAAnswer,
     LLMQADefenderOutput,
-    LLMQAQuestion,
     LLMQAQuestionerOutput,
     QAResult,
 )
