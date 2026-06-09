@@ -6,10 +6,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from gitoma.cpg import build_index
-from gitoma.cpg._base import RefKind, SymbolKind
+from gitoma.cpg._base import SymbolKind
 
 
 def _populate(root: Path, files: dict[str, str]) -> None:
