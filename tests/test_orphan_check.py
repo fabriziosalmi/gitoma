@@ -9,12 +9,6 @@ import pytest
 
 from gitoma.cpg import build_index
 from gitoma.worker.orphan_check import (
-    G16Conflict,
-    G16Result,
-    G18Conflict,
-    G18Result,
-    G19Conflict,
-    G19Result,
     _is_test_file,
     check_g16_dead_code,
     check_g18_abandoned_helpers,
