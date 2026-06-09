@@ -8,7 +8,6 @@ plumbing through ``load_config``.
 
 from __future__ import annotations
 
-import os
 from unittest.mock import patch
 
 from gitoma.core.config import LMStudioConfig, load_config
