@@ -7,11 +7,11 @@ exercised via mocked SemgrepClient.scan."""
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from gitoma.integrations.semgrep_scan import SemgrepClient, SemgrepFinding
+from gitoma.integrations.semgrep_scan import SemgrepFinding
 from gitoma.worker.semgrep_regression import (
     G21Conflict,
     G21Result,
