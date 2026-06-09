@@ -59,7 +59,7 @@ def main() -> None:
             lines.append("Actual: PASS (Ψ ≥ 1.0 threshold; gate returned None)")
         else:
             _, msg, br = result
-            lines.append(f"Actual: BLOCK")
+            lines.append("Actual: BLOCK")
             lines.append(f"  Ψ = {br['psi']:.3f}")
             lines.append(f"  Components: {br['components']}")
             lines.append(f"  Message: {msg[:200]}")
