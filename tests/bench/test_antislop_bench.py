@@ -22,7 +22,6 @@ the bench-of-truth for ANTISLOP claims.
 from __future__ import annotations
 
 import os
-from unittest.mock import patch as patchmock
 
 import pytest
 
@@ -30,7 +29,6 @@ from tests.bench.antislop_harness import (
     BenchSummary,
     build_messages,
     detect_violations,
-    load_all_cases,
     load_cases,
     mock_llm_for_case,
     run_bench,
