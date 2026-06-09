@@ -8,7 +8,6 @@ get + ``None`` for unknown / empty input.
 
 from __future__ import annotations
 
-import pytest
 
 from gitoma.verticals import VERTICALS, Vertical, get_vertical
 from gitoma.verticals.docs import DOCS_VERTICAL
