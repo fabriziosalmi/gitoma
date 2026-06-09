@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from gitoma.cpg import build_index
 from gitoma.cpg.blast_radius import render_blast_radius_block
