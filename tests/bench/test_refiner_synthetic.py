@@ -32,7 +32,6 @@ LM_STUDIO_MODEL same as the antislop bench.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
