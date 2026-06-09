@@ -10,8 +10,6 @@ from pathlib import Path
 import pytest
 
 from gitoma.worker.sibling_config import (
-    SiblingConfigConflict,
-    SiblingConfigResult,
     _check_end_of_line,
     _check_indent,
     _check_quotes,
