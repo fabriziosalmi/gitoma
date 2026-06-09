@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from gitoma.cpg import (
     CPGIndex,
     DEFAULT_MAX_FILES,
     DEFAULT_SKIP_DIRS,
-    Symbol,
     SymbolKind,
     build_index,
 )
