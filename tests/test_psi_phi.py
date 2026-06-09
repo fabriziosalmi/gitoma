@@ -13,7 +13,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from gitoma.cpg import build_index
-from gitoma.cpg._base import Symbol, SymbolKind
 from gitoma.worker.psi_phi import DEFAULT_PHI_HARD_MIN, compute_phi
 
 
