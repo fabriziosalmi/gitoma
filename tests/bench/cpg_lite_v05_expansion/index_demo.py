@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import time
-from collections import Counter
 from pathlib import Path
 
 from gitoma.cpg import build_index
