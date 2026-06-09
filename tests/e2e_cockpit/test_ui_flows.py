@@ -16,7 +16,6 @@ up by clearing the token back from sessionStorage at teardown.
 
 from __future__ import annotations
 
-import json
 import re
 
 import pytest
