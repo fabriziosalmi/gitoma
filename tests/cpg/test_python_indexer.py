@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from gitoma.cpg._base import RefKind, SymbolKind
 from gitoma.cpg.python_indexer import (
